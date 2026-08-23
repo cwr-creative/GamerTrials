@@ -1,0 +1,29 @@
+# GamerTrials
+
+A multiplayer challenge platform for classic games. Players race simultaneously
+through a sequence of stages drawn from several games at once, with live
+telemetry and spectating.
+
+## Challenges
+
+A challenge is either a **time trial** (reach a defined end point fastest) or an
+**endurance** run (survive a defined span without dying). Either can run on
+**vanilla** content — a stage as it originally shipped — or on **generated**
+content, where the layout and enemy population are produced fresh for each
+attempt from a seed. Everyone in a session gets the same seed.
+
+**Spectating is a core requirement.** A player who finishes a stage can watch
+anyone still playing it, whatever game they are in.
+
+Head-to-head play, where players share one running game, is deliberately the last
+thing on the list: it needs synchronised netcode rather than one-way telemetry.
+
+## Status
+
+Vertical slice, in progress: a fully playable version with a three-game library —
+Super Mario Bros. 3 (NES), Donkey Kong Country (SNES), and Doom (PC). Players
+supply their own ROMs; the client verifies them by hash.
+
+Currently in Phase 1, a single-game libretro harness. See `CLAUDE.md` for the
+crate layout and the invariants, and `docs/adr/` for why the architecture is the
+way it is — start with `docs/adr/README.md`.

@@ -1,0 +1,1 @@
+E:\CWR\GamerTrials\target\release\smb3-harness.exe: E:\CWR\GamerTrials\crates\smb3-harness\src\audio.rs E:\CWR\GamerTrials\crates\smb3-harness\src\input.rs E:\CWR\GamerTrials\crates\smb3-harness\src\libretro.rs E:\CWR\GamerTrials\crates\smb3-harness\src\main.rs E:\CWR\GamerTrials\crates\smb3-harness\src\smb3.rs

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/smb3-harness"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
