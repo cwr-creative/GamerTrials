@@ -36,9 +36,7 @@ The ROM defaults to `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes`.
 | F9 | reset core, restart frame count |
 | Esc | quit |
 
-## Reaching 1-4
-
-There is no savestate in the repo — one has to be made from your own ROM.
+## Launching from savestate
 
 ```sh
 # to launch from a specific state
