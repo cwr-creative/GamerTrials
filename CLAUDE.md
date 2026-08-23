@@ -71,6 +71,8 @@ rejected for non-obvious reasons.
 
 ## Current phase
 
-Phase 1: single-game libretro harness. Deliberately SMB3-specific and ugly.
+Phase 2: Build the second single-game harness for DKC on the SNES core. Compare it against the SMB3 harness, create abstractions, then refactor to create the libretro harness. Create the manifest schema which is -- hopefully -- the same for all libretro games and not core-specific.
+
+Phase 1 (complete): single-game libretro harness. Deliberately SMB3-specific and ugly.
 Do not extract abstractions yet — that is Phase 2's job, after DKC exists.
 No generated content, no endurance stages, no head-to-head in this phase.

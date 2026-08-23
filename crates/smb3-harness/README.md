@@ -158,3 +158,19 @@ directly). Anything needing a real ROM stays a manual test.
 
 No `StageRunner`, no traits, no config files. Phase 1 is one game and stays ugly
 until DKC gives Phase 2 something real to abstract against (ADR 0012).
+
+## Notes for future manifest
+
+There are currently 4 save states for SMB3 for the first four levels of world 1. The win condition for each is the `STAGE COMPLETE` success signal.
+
+smb3_1-1.state
+Viable as a survival challenge and a time trial challenge.
+
+smb3_1-2.state
+Viable as a survival challenge and a time trial challenge.
+
+smb3_1-3.state
+Viable as a survival challenge and a time trial challenge.
+
+smb3_1-4.state
+Only viable as a survival challenge (forced-scrolling). 
