@@ -110,9 +110,20 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(m) = core.memory(RETRO_MEMORY_SAVE_RAM) {
-        // $6000-$7FFF cartridge WRAM. Not used yet; SMB3 keeps its
-        // level-complete flags here, which ADR 0014 will need.
         println!("[ram]  save   {} bytes", m.len());
+    }
+    // $6000-$7FFF cartridge WRAM holds the card count, and Mesen does not
+    // expose it as save RAM (it isn't battery-backed on this cart). The
+    // core's published memory map is the only way to reach it; without one,
+    // stage completion falls back to the $0014 heuristic alone.
+    if libretro::has_memory_map() {
+        println!("[ram]  memory map published; $6000-$7FFF readable");
+    } else {
+        eprintln!(
+            "[ram]  core published no memory map: ${:04X} (cards) is unreadable, \
+             so stage completion cannot be detected early",
+            smb3::ADDR_CARDS
+        );
     }
 
     // Audio doubles as the frame clock, so set it up before the loop.
@@ -244,7 +255,13 @@ fn run() -> Result<(), String> {
         if let Some(ram) = core.memory(RETRO_MEMORY_SYSTEM_RAM) {
             match watcher.tick(ram, frame) {
                 Some(smb3::Event::StageComplete) => println!("STAGE COMPLETE at frame {frame}"),
-                Some(smb3::Event::StageFailed) => println!("STAGE FAILED at frame {frame} (died)"),
+                // No card was seen before the map-return flag fired, so this
+                // could be a death — or a card-less level (fortress, castle,
+                // airship) cleared normally. $0014 alone can't tell those
+                // apart; see the confidence notes at the top of smb3.rs.
+                Some(smb3::Event::StageFailed) => {
+                    println!("STAGE FAILED at frame {frame} (died, or a card-less level cleared)")
+                }
                 None => {}
             }
         }

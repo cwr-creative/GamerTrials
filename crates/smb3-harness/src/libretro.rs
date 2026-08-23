@@ -50,6 +50,10 @@ const ENV_GET_VARIABLE_UPDATE: u32 = 17;
 const ENV_SET_SUPPORT_NO_GAME: u32 = 18;
 const ENV_GET_SAVE_DIRECTORY: u32 = 31;
 const ENV_SET_CONTROLLER_INFO: u32 = 35;
+/// `36 | RETRO_ENVIRONMENT_EXPERIMENTAL(0x10000)`. Mesen publishes the whole
+/// NES address space here, including the $6000-$7FFF cartridge WRAM that it
+/// does not expose as `RETRO_MEMORY_SAVE_RAM`.
+const ENV_SET_MEMORY_MAPS: u32 = 36 | 0x10000;
 const ENV_SET_SUPPORT_ACHIEVEMENTS: u32 = 42;
 const ENV_SET_CORE_OPTIONS_V2: u32 = 67;
 const ENV_SET_CORE_OPTIONS_V2_INTL: u32 = 68;
@@ -103,6 +107,27 @@ struct Variable {
     value: *const c_char,
 }
 
+/// One region of the emulated CPU address space, as described by the core via
+/// `SET_MEMORY_MAPS`. Field order and types are fixed by libretro.h.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MemoryDescriptor {
+    flags: u64,
+    ptr: *mut c_void,
+    offset: usize,
+    start: usize,
+    select: usize,
+    disconnect: usize,
+    len: usize,
+    addrspace: *const c_char,
+}
+
+#[repr(C)]
+struct MemoryMap {
+    descriptors: *const MemoryDescriptor,
+    num_descriptors: u32,
+}
+
 type EnvironmentFn = unsafe extern "C" fn(u32, *mut c_void) -> bool;
 type VideoRefreshFn = unsafe extern "C" fn(*const c_void, u32, u32, usize);
 type AudioSampleFn = unsafe extern "C" fn(i16, i16);
@@ -153,6 +178,54 @@ pub static JOYPAD: AtomicU32 = AtomicU32::new(0);
 
 static PIXEL_FORMAT: AtomicU32 = AtomicU32::new(PIXEL_FORMAT_0RGB1555);
 static SYSTEM_DIR: OnceLock<CString> = OnceLock::new();
+
+/// Regions the core published via `SET_MEMORY_MAPS`, copied out of the
+/// core-owned descriptor array at the moment it is offered. Mesen exposes
+/// only `RETRO_MEMORY_SYSTEM_RAM` through `retro_get_memory_data`, so this is
+/// the only route to cartridge WRAM at $6000-$7FFF.
+pub struct MappedRegion {
+    pub start: usize,
+    pub select: usize,
+    pub disconnect: usize,
+    pub len: usize,
+    pub offset: usize,
+    /// Base pointer of the core-owned buffer. Held as a `usize` so the
+    /// static stays `Send`; only dereferenced on the emulator thread.
+    pub ptr: usize,
+}
+
+pub static MEMORY_MAP: Mutex<Vec<MappedRegion>> = Mutex::new(Vec::new());
+
+/// True once the core has published a memory map.
+pub fn has_memory_map() -> bool {
+    !lock(&MEMORY_MAP).is_empty()
+}
+
+/// Reads one byte of the emulated CPU address space through the map the core
+/// published. `None` when no descriptor covers `addr`, including when the core
+/// published no map at all.
+///
+/// Only descriptors with `select == 0` are resolved — a plain
+/// `start..start+len` window. Mesen describes the NES as 64 such 256-byte
+/// pages, so that covers every address this harness asks for. The `select` /
+/// `disconnect` bit-matching form in libretro.h is deliberately not
+/// implemented: nothing here needs it, and guessing at it would silently
+/// return the wrong byte rather than nothing.
+pub fn read_addr(addr: usize) -> Option<u8> {
+    let map = lock(&MEMORY_MAP);
+    for r in map.iter() {
+        if r.select != 0 || r.disconnect != 0 {
+            continue;
+        }
+        if addr >= r.start && addr < r.start + r.len {
+            // Safe while the core is loaded: the pointer is core-owned and
+            // stays live for the core's lifetime, the index is bounded by
+            // `len` above, and this only ever runs on the emulator thread.
+            return Some(unsafe { *(r.ptr as *const u8).add(r.offset + (addr - r.start)) });
+        }
+    }
+    None
+}
 
 fn audio_enabled() -> bool {
     AUDIO_ENABLED.load(Ordering::Relaxed) != 0
@@ -214,6 +287,33 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                 return false;
             }
             *(data as *mut bool) = false;
+            true
+        }
+        ENV_SET_MEMORY_MAPS => {
+            if data.is_null() {
+                return false;
+            }
+            let map = unsafe { &*(data as *const MemoryMap) };
+            if map.descriptors.is_null() {
+                return false;
+            }
+            let descs =
+                unsafe { std::slice::from_raw_parts(map.descriptors, map.num_descriptors as usize) };
+            let mut out = lock(&MEMORY_MAP);
+            out.clear();
+            for d in descs {
+                if d.ptr.is_null() || d.len == 0 {
+                    continue;
+                }
+                out.push(MappedRegion {
+                    start: d.start,
+                    select: d.select,
+                    disconnect: d.disconnect,
+                    len: d.len,
+                    offset: d.offset,
+                    ptr: d.ptr as usize,
+                });
+            }
             true
         }
         // Accepted and ignored. Refusing these makes some cores noisy.
