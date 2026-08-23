@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/smb3-harness"]
+members = ["crates/smb3-harness", "crates/dkc-harness"]
 
 [workspace.package]
 edition = "2021"

@@ -1,0 +1,21 @@
+[package]
+name = "dkc-harness"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Phase 2, first half. The *second* single-game harness, deliberately still
+# game-specific and still standing alone: nothing here is shared with
+# `smb3-harness` yet. Comparing the two is what Phase 2's second half does
+# (ADR 0012); this crate exists so there is something to compare against.
+
+[dependencies]
+libloading = "0.8"   # load the libretro core ourselves (ADR 0001)
+minifb = "0.27"      # window + framebuffer blit + keyboard
+cpal = "0.15"        # audio out (WASAPI on Windows)
+gilrs = "0.11"       # gamepad (XInput/DirectInput)
+
+[[bin]]
+name = "dkc-harness"
+path = "src/main.rs"
