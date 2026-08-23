@@ -35,6 +35,8 @@ OPTIONS:
     --scale <1-4>    Window scale. Default: 3
     --watch <ADDRS>  Comma-separated RAM addresses to report on change,
                      e.g. --watch 0x0014,0x0727,0x0736
+                     An entry may be a range lo-hi to sweep for an address,
+                     e.g. --watch 0x0090-0x00ff
     --no-audio       Run without sound, paced off the wall clock instead
     -h, --help       This text
 
@@ -367,12 +369,24 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--watch" => {
                 let list = value("--watch")?;
+                let parse_one = |s: &str| -> Result<usize, String> {
+                    let hex = s.trim().trim_start_matches("0x").trim_start_matches('$');
+                    usize::from_str_radix(hex, 16)
+                        .map_err(|_| format!("--watch wants hex addresses, got {s}"))
+                };
                 for part in list.split(',') {
                     let part = part.trim();
-                    let hex = part.trim_start_matches("0x").trim_start_matches('$');
-                    let addr = usize::from_str_radix(hex, 16)
-                        .map_err(|_| format!("--watch wants hex addresses, got {part}"))?;
-                    args.watch.push(addr);
+                    match part.split_once('-') {
+                        Some((lo, hi)) => {
+                            let lo = parse_one(lo)?;
+                            let hi = parse_one(hi)?;
+                            if hi < lo {
+                                return Err(format!("--watch range {part} has hi < lo"));
+                            }
+                            args.watch.extend(lo..=hi);
+                        }
+                        None => args.watch.push(parse_one(part)?),
+                    }
                 }
             }
             other => return Err(format!("unknown argument {other}; try --help")),

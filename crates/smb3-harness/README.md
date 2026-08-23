@@ -65,17 +65,27 @@ This is the part most likely to be wrong, and the part worth checking first.
 | `$0727` | world − 1 | verified |
 | `$0014` | "flag to return to map" | verified |
 | `$0078` / `$0079` | map position, used as the level id | verified |
+| `$0578` | powerup/form (00-06: small, super, fire, raccoon, frog, tanooki, hammer) | documented (Data Crystal), not yet playtested |
+| `$0552` | hit-invulnerability timer; rising from 0 means Mario just took damage | documented (Data Crystal), not yet playtested |
+| `$0510` | pipe transit countdown; rising from 0 means entering/exiting a pipe | documented (Data Crystal), not yet playtested |
+| `$05F4` | stomp counter; increments on a stomp kill only — fireball/shell/star kills don't touch it | documented (Data Crystal), not yet playtested |
 
 SMB3 has no documented "current level number" — a level is identified by the map
-tile you entered from, so the map position pair *is* the level id. If that reads
-wrong in practice, `--watch` is how to find the right byte:
+tile you entered from, so the map position pair *is* the level id. If any of the
+above reads wrong in practice, `--watch` is how to check it:
 
 ```sh
-cargo run --release -p smb3-harness -- --watch 0x0014,0x0727,0x0736,0x0078,0x0079
+cargo run --release -p smb3-harness -- --watch 0x0014,0x0727,0x0736,0x0078,0x0079,0x0578,0x0552,0x0510,0x05F4
 ```
 
-Every watched address prints on change with its frame number. All six constants
-live at the top of `src/smb3.rs`.
+Every watched address prints on change with its frame number. All ten constants
+live at the top of `src/smb3.rs`. An entry can also be a range, `lo-hi`, to sweep
+for a byte with no known address yet (e.g. an enemy-death signal that isn't
+stomp-specific):
+
+```sh
+cargo run --release -p smb3-harness -- --watch 0x0090-0x00ff
+```
 
 An SMB3 RAM map containing other addresses to test can be found at https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map
 
