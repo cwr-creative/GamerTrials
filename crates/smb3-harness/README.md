@@ -41,7 +41,7 @@ The ROM defaults to `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes`.
 There is no savestate in the repo — one has to be made from your own ROM.
 
 ```sh
-# play to the start of 1-4, then press F1
+# to launch from a specific state
 cargo run --release -p smb3-harness -- --state assets/states/smb3_1-4.state
 
 # from then on, that same command boots straight into 1-4 at frame 0
@@ -55,16 +55,16 @@ The stage label ("1-4") comes from the savestate filename, not from RAM. Stage
 identity belongs to the entry point that put you there; RAM only confirms world
 and lives.
 
-## Verifying the RAM addresses
+## RAM addresses
 
 This is the part most likely to be wrong, and the part worth checking first.
 
 | Address | Meaning | Confidence |
 |---|---|---|
-| `$0736` | Mario lives | documented |
-| `$0727` | world − 1 | documented |
-| `$0014` | "flag to return to map" | documented as a flag; **exact semantics unverified** |
-| `$0078` / `$0079` | map position, used as the level id | documented as position |
+| `$0736` | Mario lives | verified |
+| `$0727` | world − 1 | verified |
+| `$0014` | "flag to return to map" | verified |
+| `$0078` / `$0079` | map position, used as the level id | verified |
 
 SMB3 has no documented "current level number" — a level is identified by the map
 tile you entered from, so the map position pair *is* the level id. If that reads
@@ -76,6 +76,8 @@ cargo run --release -p smb3-harness -- --watch 0x0014,0x0727,0x0736,0x0078,0x007
 
 Every watched address prints on change with its frame number. All six constants
 live at the top of `src/smb3.rs`.
+
+An SMB3 RAM map containing other addresses to test can be found at https://datacrystal.tcrf.net/wiki/Super_Mario_Bros._3/RAM_map
 
 ## Stage completion
 

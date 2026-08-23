@@ -40,7 +40,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | # | Title | Status |
 |---|---|---|
 | 0001 | Embed libretro cores directly rather than driving RetroArch | Accepted |
-| 0002 | Use savestates for stage entry rather than ROM patching | Accepted |
+| 0002 | Use savestates for stage entry | Accepted |
 | 0003 | Stream video for spectating rather than replicating inputs | Accepted |
 | 0004 | Delegate head-to-head netcode to external per-game solutions | Accepted |
 | 0005 | Measure timing in emulated frames rather than wall-clock | Accepted |
