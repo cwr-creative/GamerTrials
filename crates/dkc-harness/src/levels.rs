@@ -285,9 +285,10 @@ pub fn name(code: u16) -> Option<&'static str> {
 /// qualifier stripped, so every way of being in Jungle Hijinx — the start, the
 /// checkpoint, its two bonus rooms, the Banana Hoard — answers `Jungle Hijinx`.
 ///
-/// This is what makes leaving a stage detectable without knowing the route.
-/// The player wanders between codes inside one family for the whole attempt;
-/// the family changing is the stage actually ending.
+/// This used to be how leaving a stage was detected, by watching for the
+/// family to change. `in_stage` ($7E0527) answers that question directly now,
+/// so the family is kept for naming and grouping in the log only — nothing
+/// scores off it.
 pub fn family(code: u16) -> Option<&'static str> {
     let n = name(code)?;
     // " - " introduces a sub-room ("Jungle Hijinx - Bonus 1"), " (" an
@@ -300,28 +301,6 @@ pub fn family(code: u16) -> Option<&'static str> {
         (None, None) => n.len(),
     };
     Some(n[..end].trim())
-}
-
-/// Whether a code is a room the player can enter mid-stage and come back from.
-///
-/// Family alone very nearly settles this — a level's own bonus rooms are named
-/// after it and so share its family. The exception is the shared animal-token
-/// rooms (`Winky Bonus`, `Rambi Bonus`, `Expresso Bonus`, `Enguarde Bonus`,
-/// `Animal Token Room`), which belong to no level because several levels lead
-/// to them. Without this they would read as a family change, and a token room
-/// would be scored as a clear — the same class of false positive the fade
-/// counting had, just rarer and harder to notice.
-pub fn is_side_room(code: u16) -> bool {
-    match name(code) {
-        Some(n) => {
-            n.contains("Bonus")
-                || n.contains("Animal Token Room")
-                || n.contains("Winky Room")
-                || n.contains("Banana Hoard")
-                || n.contains("Kong's Cabin")
-        }
-        None => false,
-    }
 }
 
 /// Renders a code for logging: `0x16 Jungle Hijinx (level start)`, or just the
@@ -353,11 +332,10 @@ mod tests {
     fn a_code_past_the_table_is_not_a_stage() {
         assert_eq!(name(230), None);
         assert_eq!(family(230), None);
-        assert!(!is_side_room(230));
     }
 
-    /// Every way of being inside Jungle Hijinx answers the same family. This
-    /// is the property the completion rule rests on.
+    /// Every way of being inside Jungle Hijinx answers the same family. The
+    /// completion rule no longer rests on this, but the log's grouping does.
     #[test]
     fn every_entrance_and_sub_room_shares_one_family() {
         for code in [0x06, 0x08, 0x0E, 0x16, 0x1A, 0x25, 0x47, 0x4C, 0x5C, 0x5F, 0x6E] {
@@ -365,18 +343,5 @@ mod tests {
         }
         assert_eq!(family(0x01), Some("Reptile Rumble"));
         assert_ne!(family(0x16), family(0x01));
-    }
-
-    /// A level's own bonus rooms share its family, so family alone would carry
-    /// them — but the shared animal rooms do not, and they are the reason
-    /// `is_side_room` exists at all.
-    #[test]
-    fn shared_animal_rooms_are_side_rooms_despite_their_own_family() {
-        for code in [0x34, 0x6C, 0xA6, 0xD2, 0xD3] {
-            assert!(is_side_room(code), "{} should be a side room", show(code));
-        }
-        // ...and a real stage is not one.
-        assert!(!is_side_room(0x16));
-        assert!(!is_side_room(0x01));
     }
 }

@@ -19,63 +19,82 @@
 //!
 //! # Provenance
 //!
-//! Not one address here has been playtested. That is the point of this
-//! commit: the harness exists so the addresses can be *checked*, and every
-//! one of them is a constant with a documented source and an
-//! `--addr <name>=<addr>` override, so a wrong guess costs a flag rather than
-//! a rebuild.
+//! Almost every address here now has a second, independent source: the
+//! RetroAchievements code notes for game 337, transcribed in
+//! `RA-CODE-NOTES.md`. Those are notes written by achievement authors against
+//! running code, and RA's SNES address space is WRAM one-for-one, so an RA
+//! address *is* the offset form below. Where a note and an older source agree,
+//! the address is about as confirmed as it gets without a playtest; where they
+//! disagree, the note wins, because the older sources were wikis that could
+//! not be reached at all.
 //!
-//!   $7E003E level id       confirmed: the RainbowZ Editor transcribes the
-//!                          game's own bound lookup as `LDA $3E` followed by
-//!                          `levelCode << 1`, so this is read off working code
-//!                          rather than a wiki. `levels.rs` maps its 230 values
-//!                          to names, which is what makes a stage boundary
-//!                          classifiable.
-//!   $7E0577 lives          reported: widely-cited DKC RAM map, attributed to
-//!                          TCRF / DKC Atlas. Both of those pages currently
-//!                          serve unrelated content, so this could not be
-//!                          confirmed at the source. Treat as a lead.
-//!   $7E057B bananas        reported, same source and same caveat
-//!   $7E057F KONG letters   reported, same source and same caveat
-//!   $7E051B fade type      source: `Lui37/dkc1-hack` src/defines.asm, an
-//!                          assembling speedrun-practice hack — so these three
-//!                          are load-bearing in working code rather than
-//!                          transcribed from a wiki. This is the fade-to-black
-//!                          speed the game sets on a scene change, and it is
-//!                          set to STAGE_COMPLETE_FADE (0x82) on the way out of
-//!                          a stage. Playtested: a death produces no fade at
-//!                          all, but entering a bonus room produces the same
-//!                          0x82 as clearing the stage does. So the value says
-//!                          "the stage is being left", not "the stage was
-//!                          cleared" — the level code that follows says which,
-//!                          see `Watcher::tick`.
-//!   $7E0579 pause flags    same source. Its bit 6 is the paused flag; the
-//!                          hack tests it with BIT/BVS.
-//!   $7E1929 accept inputs  same source. Nonzero once the level hands control
-//!                          to the player, which is a plausible "stage really
-//!                          started" gate.
-//!   $7E0B19 player X       documented: Data Crystal, "Object 1 (DK) X"
-//!   $7E0BC1 player Y       documented: Data Crystal, "Object 1 (DK) Y"
+//!   $7E0527 in stage       RA: "00=In a Stage 01=In Overworld". The spine of
+//!                          stage completion — see `Watcher::tick`.
+//!   $7E003E level id       confirmed twice: the RainbowZ Editor transcribes
+//!                          the game's own bound lookup as `LDA $3E`, and RA
+//!                          calls it "Room ID (last exit used)". `levels.rs`
+//!                          maps its 230 values to names. Used for naming
+//!                          only now, not for the verdict.
+//!   $7E0040 room id        RA: "Last Room ID inside a level (else 0)". A
+//!                          second, independent in-a-stage indicator, kept as
+//!                          a cross-check on $0527.
+//!   $7E0575 lives          RA: "[2 Byte] Lives". Note that $0577, which every
+//!                          older map quotes and this harness used to watch,
+//!                          is "[2 Byte] Lives (Display)" — the copy the HUD
+//!                          draws from. The real counter is the one that moves
+//!                          on the frame of death.
+//!   $7E057B bananas        RA: "Bananas / Mini Animal Tokens (Up to 999)",
+//!                          agreeing with the older map. Shared with the mini
+//!                          animal token count inside an animal bonus.
+//!   $7E057F KONG letters   RA: "KONG letters flag". Unmarked in the notes,
+//!                          which in that set means 8-bit — so this is read as
+//!                          a byte, not the 16 bits the older map implied.
+//!   $7E051B fade type      confirmed twice: `Lui37/dkc1-hack` src/defines.asm
+//!                          and RA's "82 = Screen is Fading-Out". Playtested:
+//!                          a death produces no fade, a bonus barrel produces
+//!                          the same 0x82 the exit does. Timing only.
+//!   $7E0579 state flags    RA: "b0=2 Kongs, b1=Invulnerable?, b3=Inside
+//!                          Barrel/Bouncing?, b6=Pause, b7=Launched from
+//!                          barrel". The dkc1-hack agreed on bit 6. Bit 0 is
+//!                          what the damage detector now watches.
+//!   $7E16D1 hit timer      RA: "[2 Byte] Timer: Donkey flashes (when taking
+//!                          hit)". Diddy's is $16D3; the invulnerability
+//!                          timers are $16D5 and $16D7.
+//!   $7E0516 animal buddy   RA: "Riding Buddy? No=0, Rambi=9, Expresso=0a,
+//!                          Winky=0b, Enguarde=0c".
+//!   $7E1E17 enemy kills    RA: "Enemies stomped in a row". A combo counter,
+//!                          not a running total — it resets. Good enough to
+//!                          see a stomp happen, not to count a stage's worth.
+//!   $7E005E player X       RA: "[2 Byte] Character's X coord", and $0060 for
+//!   $7E0060 player Y       Y. These follow whichever Kong is active.
+//!   $7E0FC3 DK X           RA: "[16-Bits] DK's Position X", and $0FF7 for Y.
+//!   $7E0FF7 DK Y           Diddy's are $0FC5 and $0FF9. Carried alongside the
+//!                          pair above because the two disagree about what
+//!                          "the player's position" means and only a playtest
+//!                          can settle which one progress should be measured
+//!                          from.
+//!   $7E1929 accept inputs  dkc1-hack defines.asm. The one address here with
+//!                          no RA note, so the one still resting on a single
+//!                          source.
 //!
-//! $0577 / $057B / $057F sit four bytes apart, which reads like a stats block
-//! with one entry per field (or per save slot — DKC has two contest players).
-//! Sweeping `--watch 0x0570-0x05a0` is the first thing to try if any of the
-//! three is wrong.
+//! `$0B19` / `$0BC1`, the "Object 1 (DK) X/Y" pair this harness used to watch,
+//! have *no* RA note at all. They are still reachable with `--addr`, but they
+//! are no longer the default, and PROGRESS-HANDOFF.md is written against them,
+//! so that document is now the least trustworthy thing in this crate.
 //!
-//! # What has no address at all
+//! # What still has no address
 //!
-//! Taking damage, losing a Kong, picking up an animal buddy, and killing an
-//! enemy have no published address that survived checking. They are declared
-//! below with `at: None`, which means their detector is simply off; startup
-//! says which detectors are live. Finding them is a playtest job, and
-//! `ramsearch.rs` is the tool for it — `Search` for anything that behaves like
-//! a counter, `Probe` for one-shot events like a hit.
+//! A dedicated Kong counter. Damage instead reads bit 0 of the state flags,
+//! which RA calls "2 Kongs" — losing the partner clears it. `kong_count`
+//! remains as an overridable field in case a real counter turns up.
 //!
-//! DKC may not *have* an enemy-kill counter; it has no score. If a session of
-//! `Probe` reports on a stomp turns up nothing stable, the honest answer is
-//! that enemy kills need the sprite table, which is a bigger job than this
-//! phase.
-
+//! A running enemy-kill total. `$1E17` counts a stomp *streak*. If a real
+//! total is wanted, the better lead is the per-object table RA documents at
+//! `$7E102F`-`$7E1049`: one flag per object slot, `01 = Object _N Defeated`,
+//! parallel to the object ids at `$7E0D4B`-`$7E0D61`. Counting set flags there
+//! would be a real kill count, and it is the sprite table this harness was
+//! told it could not have.
+//!
 use std::fmt;
 
 use crate::levels;
@@ -236,19 +255,23 @@ macro_rules! ram_fields {
 }
 
 ram_fields! {
-    level_id,      Some(0x003E), U16, "Data Crystal: current level";
-    lives,         Some(0x0577), U16, "reported RAM map, unconfirmed at source";
-    bananas,       Some(0x057B), U16, "reported RAM map, unconfirmed at source";
-    kong_letters,  Some(0x057F), U16, "reported RAM map, unconfirmed at source";
-    fade_type,     Some(0x051B), U8,  "dkc1-hack defines.asm; 0x82 = stage complete";
-    pause_flags,   Some(0x0579), U16, "dkc1-hack defines.asm, bit 6 = paused";
-    accept_inputs, Some(0x1929), U16, "dkc1-hack defines.asm";
-    player_x,      Some(0x0B19), U16, "Data Crystal: object 1 (DK) X";
-    player_y,      Some(0x0BC1), U16, "Data Crystal: object 1 (DK) Y";
-    kong_count,    None,         U16, "UNKNOWN - find with Probe on a hit";
-    hit_timer,     None,         U8,  "UNKNOWN - find with Probe on a hit";
-    enemy_kills,   None,         U16, "UNKNOWN - DKC may have no such counter";
-    animal,        None,         U16, "UNKNOWN - find with Probe on a pickup";
+    in_stage,      Some(0x0527), U8,  "RA notes: 00 = in a stage, 01 = overworld";
+    level_id,      Some(0x003E), U16, "RA notes + RainbowZ: room id (last exit used)";
+    room_id,       Some(0x0040), U16, "RA notes: last room id inside a level, else 0";
+    lives,         Some(0x0575), U16, "RA notes: lives ($0577 is the display copy)";
+    bananas,       Some(0x057B), U16, "RA notes: bananas / mini animal tokens, up to 999";
+    kong_letters,  Some(0x057F), U8,  "RA notes: KONG letters flag";
+    fade_type,     Some(0x051B), U8,  "RA notes + dkc1-hack: 0x82 = screen fading out";
+    state_flags,   Some(0x0579), U8,  "RA notes: b0 = 2 Kongs, b6 = paused";
+    hit_timer,     Some(0x16D1), U16, "RA notes: DK flash timer, set on taking a hit";
+    animal,        Some(0x0516), U8,  "RA notes: riding buddy; 9 Rambi A Expresso B Winky C Enguarde";
+    enemy_kills,   Some(0x1E17), U8,  "RA notes: enemies stomped in a row (a streak, not a total)";
+    player_x,      Some(0x005E), U16, "RA notes: character's X coord";
+    player_y,      Some(0x0060), U16, "RA notes: character's Y coord";
+    dk_x,          Some(0x0FC3), U16, "RA notes: DK's position X (Diddy $0FC5)";
+    dk_y,          Some(0x0FF7), U16, "RA notes: DK's position Y (Diddy $0FF9)";
+    accept_inputs, Some(0x1929), U16, "dkc1-hack defines.asm; no RA note, single source";
+    kong_count,    None,         U16, "UNKNOWN - damage reads state_flags b0 instead";
 }
 
 impl fmt::Display for Snapshot {
@@ -261,15 +284,25 @@ impl fmt::Display for Snapshot {
         }
         write!(
             f,
-            "level {}  lives {}  bananas {}  KONG {}  kongs {}  fade {}  at ({},{})",
+            "{}  level {}  room {}  lives {}  bananas {}  KONG {}  {}  fade {}  at ({},{})",
+            match self.in_stage {
+                Some(IN_STAGE) => "in-stage",
+                Some(_) => "overworld",
+                None => "where?",
+            },
             v(self.level_id),
+            v(self.room_id),
             v(self.lives),
             v(self.bananas),
             match self.kong_letters {
                 Some(b) => kong_letters(b),
                 None => "-".into(),
             },
-            v(self.kong_count),
+            match self.state_flags {
+                Some(st) if st & STATE_TWO_KONGS != 0 => "2 kongs".to_string(),
+                Some(_) => "1 kong".to_string(),
+                None => "? kongs".to_string(),
+            },
             match self.fade_type {
                 Some(f) => format!("{f:02X}"),
                 None => "-".into(),
@@ -315,6 +348,10 @@ impl fmt::Display for Item {
 pub enum FailReason {
     /// A life was lost.
     Death,
+    /// The player left the stage from the pause menu. Reaching the exit and
+    /// abandoning the attempt both put the overworld on screen; the pause flag
+    /// at the moment the fade started is what tells them apart.
+    Quit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -323,31 +360,44 @@ pub enum Event {
     Death,
     EnemyKilled(u16),
     ItemGained(Item),
-    /// A transition out of the stage has started. Reported on its own because
-    /// it is the frame a clear is *timed* to, but it is not a verdict: the
-    /// level code that follows says whether this was the exit or a bonus room.
+    /// A transition out of the *room* has started. Reported on its own
+    /// because it is the frame a clear is *timed* to, but it is not a verdict:
+    /// a bonus barrel raises it exactly as the exit does. `in_stage` says
+    /// whether the room being left was the last one.
     Fade { at: u64 },
     StageComplete { at: u64 },
     StageFailed { at: u64, reason: FailReason },
 }
 
-/// The fade-to-black speed the game sets at `fade_type` on the scene change
-/// that takes the player out of a stage.
+/// The fade-to-black speed the game sets at `fade_type` on any scene change
+/// that takes the player out of the current *room*.
 ///
-/// A death causes no fade at all, so this can never fire from one — which is
-/// what makes it a good *timing* signal and why no grace window is needed. It
-/// is not a verdict on its own, though: entering a bonus barrel sets the same
-/// value as reaching the exit. The fade says *when* the stage was left; the
-/// level code it lands on says *whether* it was left for good.
+/// A death causes no fade at all, so this can never fire from one. It is not a
+/// verdict on its own — a bonus barrel sets the same value the exit does — and
+/// it is no longer asked to be one. All it supplies now is the frame: the
+/// stage ended when the screen started to go dark, not when the overworld
+/// finished loading (ADR 0005).
 pub const STAGE_COMPLETE_FADE: u16 = 0x82;
 
-/// How long after a fade to keep waiting for the level code to catch up.
+/// The value of `in_stage` ($7E0527) while the player is inside a stage.
+/// Anything else means the overworld map.
+pub const IN_STAGE: u16 = 0x00;
+
+/// `state_flags` bit 0: both Kongs are present. Losing the partner clears it,
+/// which is what the damage detector watches.
+pub const STATE_TWO_KONGS: u16 = 1 << 0;
+
+/// `state_flags` bit 6: the pause menu is up.
+pub const STATE_PAUSED: u16 = 1 << 6;
+
+/// How long a fade stays good for as the timing of a stage end.
 ///
-/// The fade starts the transition and the level code changes when the next
-/// room loads, a little later. That gap is the whole reason the fade is worth
-/// having — it is the honest frame the stage ended — but a fade with no level
-/// change behind it means something else happened, and the harness should stop
-/// holding it open. Two seconds at 60 Hz is far longer than the hand-off.
+/// The fade starts the transition; `in_stage` flips when the overworld is
+/// actually up, a little later. That gap is the whole reason the fade is worth
+/// keeping — it is the honest frame the stage ended — but a fade with nothing
+/// behind it means something else happened, and it must not be left armed to
+/// mis-time a later, unrelated exit. Two seconds at 60 Hz is far longer than
+/// the hand-off.
 pub const DEFAULT_TRANSITION_WINDOW_FRAMES: u64 = 120;
 
 pub struct Watcher {
@@ -358,15 +408,16 @@ pub struct Watcher {
     /// over the fade is what made the bonus-room behaviour invisible, because
     /// the first fade silenced every one after it.
     failed: bool,
-    /// The stage this attempt is in, as a level *family* — every entrance,
-    /// checkpoint and bonus room of one level answers the same name. Captured
-    /// on the first tick after a state load rather than hardcoded, for the
-    /// same reason the stage label comes from the savestate: stage identity
-    /// belongs to the entry point.
-    entry_family: Option<&'static str>,
-    /// A fade seen with no level change behind it yet, and the frame it
-    /// happened on. That frame is what a clear is timed to.
+    /// Set once this attempt has produced a verdict, so the overworld
+    /// arriving cannot report twice.
+    ended: bool,
+    /// A fade whose destination is not known yet, and the frame it happened
+    /// on. That frame is what a stage end is timed to.
     pending_fade: Option<u64>,
+    /// Whether the pause menu was up when `pending_fade` was armed. A player
+    /// who quits from the menu gets the same fade and the same overworld as
+    /// one who reached the exit; this is the only thing separating them.
+    faded_while_paused: bool,
     /// How long to hold `pending_fade` open waiting for the level code.
     transition_window: u64,
     /// Extra addresses to report on change, from `--watch`.
@@ -380,8 +431,9 @@ impl Watcher {
             addrs,
             prev: None,
             failed: false,
-            entry_family: None,
+            ended: false,
             pending_fade: None,
+            faded_while_paused: false,
             transition_window,
             prev_watched: vec![None; watched.len()],
             watched,
@@ -393,8 +445,9 @@ impl Watcher {
     pub fn reset(&mut self) {
         self.prev = None;
         self.failed = false;
-        self.entry_family = None;
+        self.ended = false;
         self.pending_fade = None;
+        self.faded_while_paused = false;
         self.prev_watched.fill(None);
     }
 
@@ -412,18 +465,22 @@ impl Watcher {
                 // only. The level code read here is what "this stage" means
                 // for the rest of the attempt.
                 println!("[ram] frame {frame}  {cur}");
-                self.entry_family = cur.level_id.and_then(levels::family);
-                match (cur.level_id, self.entry_family) {
-                    (Some(c), Some(fam)) => {
-                        println!("[stage] in {} — stage is `{fam}`", levels::show(c))
+                // Stage identity still comes from the entry point, not from
+                // RAM. What RAM says here is only where the player is, and the
+                // level name is context for reading the log.
+                if let Some(c) = cur.level_id {
+                    match levels::family(c) {
+                        Some(fam) => println!("[stage] entered at {} — in `{fam}`", levels::show(c)),
+                        None => println!("[stage] entered at {}", levels::show(c)),
                     }
-                    (Some(c), None) => println!(
-                        "[stage] {} is not in the level table, so leaving it cannot be \
-                         detected; no stage-complete detector this attempt",
-                        levels::show(c)
+                }
+                match cur.in_stage {
+                    Some(IN_STAGE) => {}
+                    Some(v) => println!(
+                        "[stage] in_stage reads {v:02X}, not {IN_STAGE:02X}: this state is not inside a stage"
                     ),
-                    (None, _) => println!(
-                        "[stage] no level_id address, so no stage-complete detector"
+                    None => println!(
+                        "[stage] no in_stage address, so there is no stage-complete detector"
                     ),
                 }
                 self.prev = Some(cur);
@@ -453,11 +510,18 @@ impl Watcher {
         }
 
         // ---- damage ------------------------------------------------------
-        // Losing the lead Kong while the other is still alive: a hit that did
-        // not cost a life. Both detectors are off until playtesting finds an
-        // address. A death already reported this frame suppresses them, since
-        // dying with one Kong drops the count to zero too.
+        // Losing the partner Kong while the lead one survives: a hit that did
+        // not cost a life. RA documents bit 0 of $7E0579 as "2 Kongs", so the
+        // hit is that bit falling. A death already reported this frame
+        // suppresses it, since dying with one Kong clears the bit too.
         if !died {
+            if let (Some(p), Some(c)) = (prev.state_flags, cur.state_flags) {
+                if p & STATE_TWO_KONGS != 0 && c & STATE_TWO_KONGS == 0 {
+                    println!("[event] frame {frame}  DAMAGE  lost the partner Kong");
+                    events.push(Event::Damage);
+                }
+            }
+            // Kept as an override for a real Kong counter, if one turns up.
             if let (Some(p), Some(c)) = (prev.kong_count, cur.kong_count) {
                 if c < p {
                     println!("[event] frame {frame}  DAMAGE  kongs {p} -> {c}");
@@ -478,7 +542,7 @@ impl Watcher {
         if let (Some(p), Some(c)) = (prev.enemy_kills, cur.enemy_kills) {
             if c > p {
                 let n = c - p;
-                println!("[event] frame {frame}  ENEMY KILLED  x{n} (total {c})");
+                println!("[event] frame {frame}  ENEMY KILLED  x{n} (streak {c})");
                 events.push(Event::EnemyKilled(n));
             }
         }
@@ -517,83 +581,94 @@ impl Watcher {
             }
         }
 
-        // ---- leaving the stage ---------------------------------------------
-        // $7E051B is the fade-to-black speed, set to STAGE_COMPLETE_FADE on
-        // the scene change that takes the player out of a stage. A death
-        // produces no fade, so this edge can never fire from one — no grace
-        // window, no ordering to race, verdict on the frame it is seen.
+        // ---- leaving the stage -------------------------------------------
+        // $7E0527 is the game's own answer to "is the player inside a stage?"
+        // — RA's code notes call it "00=In a Stage 01=In Overworld". Every way
+        // of *staying* in a level leaves it at 00: a bonus room, the return
+        // from one, a checkpoint, a death and the reload it causes. Only
+        // actually leaving flips it.
         //
-        // What it cannot do is say what kind of transition it is — a bonus
-        // barrel raises it exactly as the exit does.
+        // That replaces the previous rule, which paired the fade with the
+        // level code at $7E003E and asked whether the new code was in the same
+        // level "family" as the entry code. It needed a 230-entry table, an
+        // explicit list of shared animal rooms, and a per-attempt notion of
+        // which family the stage belonged to — all of it reconstructing, from
+        // the outside, a fact the game already stores in one byte.
         //
-        // The level code at $7E003E is the *classification*. It changes when
-        // the next room loads, a little after the fade, and where it lands
-        // says whether the stage was really left: a bonus room, a checkpoint
-        // or a return all stay inside the stage's level family, and anything
-        // else is outside it.
-        //
-        // Pairing them gives a verdict that does not care about the route —
-        // the point of the exercise, since the previous fade-counting scheme
-        // silently depended on whether a player took the bonus barrels.
-        if let (Some(p), Some(c)) = (prev.fade_type, cur.fade_type) {
-            if c == STAGE_COMPLETE_FADE && p != STAGE_COMPLETE_FADE && self.pending_fade.is_none() {
+        // The fade at $7E051B stays, but only for timing. It rises a little
+        // before the overworld is up, and ADR 0005 says the hand-off is not
+        // the player's time.
+        // Expire a stale fade before looking for a new one. A fade nothing
+        // explained must not be left armed — the next exit would get timed to
+        // a transition it had nothing to do with — and it must not block a
+        // fresh fade arriving on this same frame either.
+        if let Some(at) = self.pending_fade {
+            if frame.saturating_sub(at) >= self.transition_window {
                 println!(
-                    "[event] frame {frame}  FADE  {p:02X} -> {c:02X}  — leaving the stage, \
-                     waiting for the level code to say where to"
+                    "[stage] the fade at frame {at} led nowhere out of the stage; discarding it"
                 );
-                events.push(Event::Fade { at: frame });
-                self.pending_fade = Some(frame);
+                self.pending_fade = None;
+                self.faded_while_paused = false;
             }
         }
 
-        if let (Some(entry), Some(pc), Some(cc)) = (self.entry_family, prev.level_id, cur.level_id) {
-            if pc != cc {
-                // A side room is somewhere the player comes back from. A
-                // level's own bonus rooms share its family and are carried by
-                // the family check alone; the shared animal-token rooms belong
-                // to no level, which is what `is_side_room` is really for.
-                let stayed = levels::family(cc) == Some(entry) || levels::is_side_room(cc);
-                println!("[stage] level {} -> {}", levels::show(pc), levels::show(cc));
+        if let (Some(p), Some(c)) = (prev.fade_type, cur.fade_type) {
+            if c == STAGE_COMPLETE_FADE && p != STAGE_COMPLETE_FADE && self.pending_fade.is_none() {
+                println!("[event] frame {frame}  FADE  {p:02X} -> {c:02X}");
+                events.push(Event::Fade { at: frame });
+                self.pending_fade = Some(frame);
+                // Read now rather than when the overworld arrives: by then the
+                // menu is long gone.
+                self.faded_while_paused =
+                    cur.state_flags.is_some_and(|st| st & STATE_PAUSED != 0);
+            }
+        }
 
-                match (stayed, self.pending_fade.take()) {
-                    (true, _) => println!("[stage] still inside `{entry}` — attempt continues"),
-                    // Timed to the fade, not to this frame: the fade is when
-                    // the stage actually ended, and the level code catching up
-                    // is hand-off (ADR 0005).
-                    (false, Some(at)) if !self.failed => {
-                        events.push(Event::StageComplete { at })
-                    }
-                    // Left the stage with no fade behind it. A death reload
-                    // looks like this, and so would anything else that moves
-                    // the level code without a transition — neither is a
-                    // clear, and refusing to guess is the conservative answer.
-                    (false, None) => println!(
-                        "[stage] left `{entry}` with no fade — not scoring this as a clear"
-                    ),
-                    (false, Some(_)) => {}
+        if let (Some(p), Some(c)) = (prev.in_stage, cur.in_stage) {
+            if p == IN_STAGE && c != IN_STAGE {
+                // Timed to the fade when there is a fresh one, because that is
+                // when the stage actually ended. Without one — which should
+                // not happen, since leaving always fades — this frame is the
+                // best answer available and is better than no verdict.
+                let at = self.pending_fade.take().unwrap_or(frame);
+                let quit = self.faded_while_paused;
+                self.faded_while_paused = false;
+
+                println!("[stage] left the stage: in_stage {p:02X} -> {c:02X}");
+                if self.ended {
+                    // Nothing to say twice.
+                } else if self.failed {
+                    // The attempt was already lost; this is the game-over
+                    // sequence walking back to the map, not a clear.
+                    self.ended = true;
+                    println!("[stage] the attempt had already failed — not a clear");
+                } else if quit {
+                    self.ended = true;
+                    println!("[stage] the fade began while paused — scoring this as a quit");
+                    events.push(Event::StageFailed { at, reason: FailReason::Quit });
+                    self.failed = true;
+                } else {
+                    self.ended = true;
+                    events.push(Event::StageComplete { at });
                 }
             }
         }
 
-        // A fade no level change ever explained. Letting it stand would mean
-        // the next level change, whenever it came, got timed to a transition
-        // it had nothing to do with.
-        if let Some(at) = self.pending_fade {
-            if frame.saturating_sub(at) >= self.transition_window {
-                println!(
-                    "[stage] the fade at frame {at} was not followed by a level change; \
-                     discarding it"
-                );
-                self.pending_fade = None;
+        // The level code no longer decides anything, but it still says where
+        // the player went, which is most of what makes the log readable.
+        if let (Some(pc), Some(cc)) = (prev.level_id, cur.level_id) {
+            if pc != cc {
+                println!("[stage] level {} -> {}", levels::show(pc), levels::show(cc));
             }
         }
 
         // Anything that moved and is worth a running log line, printed once
         // per change rather than per frame. Position is excluded: it changes
         // every frame the player moves.
-        if (cur.level_id, cur.lives, cur.bananas, cur.kong_letters, cur.kong_count, cur.fade_type)
-            != (prev.level_id, prev.lives, prev.bananas, prev.kong_letters, prev.kong_count, prev.fade_type)
-        {
+        let interesting = |s: &Snapshot| {
+            (s.in_stage, s.level_id, s.lives, s.bananas, s.kong_letters, s.state_flags, s.fade_type)
+        };
+        if interesting(&cur) != interesting(&prev) {
             println!("[ram] frame {frame}  {cur}");
         }
 
@@ -654,22 +729,27 @@ mod tests {
         Watcher::new(Addrs::default(), Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES)
     }
 
-    // Real level codes, so the tests exercise the same table the harness does.
+    // Real level codes. They no longer decide anything, but the log prints
+    // them and a bonus room still has to not be a clear, so the tests keep
+    // walking a real route.
     const JUNGLE_START: u16 = 0x16; // Jungle Hijinx (level start)
     const JUNGLE_BONUS_1: u16 = 0x06; // Jungle Hijinx - Bonus 1
     const JUNGLE_FROM_BONUS_1: u16 = 0x08; // Jungle Hijinx (from Bonus 1)
     const JUNGLE_FROM_SAVE: u16 = 0x25; // Jungle Hijinx (from Save)
     const REPTILE_START: u16 = 0x01; // Reptile Rumble (level start) — another stage
-    const WINKY_BONUS: u16 = 0xD3; // shared animal room, in no level's family
+    const WINKY_BONUS: u16 = 0xD3; // shared animal room
 
-    /// Starts an attempt in `code` and returns a watcher past its baseline
-    /// tick, which is where `entry_family` is captured.
-    fn in_stage(code: u16) -> (Watcher, Vec<u8>) {
+    /// Starts an attempt inside a stage and returns a watcher past its
+    /// baseline tick. `in_stage` reads IN_STAGE, which is what a savestate
+    /// taken inside a level looks like.
+    fn enter_stage(code: u16) -> (Watcher, Vec<u8>) {
         let mut w = watcher();
         let a = Addrs::default();
         let mut r = wram();
         put(&mut r, a.lives, 5);
         put(&mut r, a.level_id, code);
+        put(&mut r, a.in_stage, IN_STAGE);
+        put(&mut r, a.state_flags, STATE_TWO_KONGS);
         w.tick(&r, 1);
         (w, r)
     }
@@ -684,12 +764,30 @@ mod tests {
         ev
     }
 
-    /// The level code catching up a few frames after the fade, which is what
-    /// the real game does and what the verdict is actually read from.
+    /// The room changing under the player, a few frames after a fade. Inside
+    /// one stage this is a bonus room or a checkpoint; it is not an exit.
     fn land_on(w: &mut Watcher, ram: &mut [u8], code: u16, at: u64) -> Vec<Event> {
         let a = Addrs::default();
         put(ram, a.level_id, code);
         w.tick(ram, at)
+    }
+
+    /// The overworld map coming up: the stage is over. This is the only thing
+    /// that ends an attempt now.
+    fn to_overworld(w: &mut Watcher, ram: &mut [u8], at: u64) -> Vec<Event> {
+        let a = Addrs::default();
+        put(ram, a.in_stage, 1);
+        w.tick(ram, at)
+    }
+
+    /// Holds the pause menu open, which is what separates a quit from a clear.
+    fn pause(ram: &mut [u8], on: bool) {
+        let a = Addrs::default();
+        let mut st = STATE_TWO_KONGS;
+        if on {
+            st |= STATE_PAUSED;
+        }
+        put(ram, a.state_flags, st);
     }
 
     fn faded(events: &[Event]) -> Vec<u64> {
@@ -783,12 +881,12 @@ mod tests {
         assert_eq!(failed(&ev), Some((2, FailReason::Death)));
     }
 
-    /// A death produces no fade, so the timing half never arms — and the
-    /// level reload it causes then arrives with nothing behind it. That is the
-    /// case the old level-id signal could score as a clear.
+    /// A death does not put the overworld on screen — DKC drops the player
+    /// back into the level. So the reload that follows one is not an exit, and
+    /// the attempt is failed rather than cleared.
     #[test]
     fn a_death_and_its_level_reload_are_never_a_clear() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         let a = Addrs::default();
 
         put(&mut r, a.lives, 4);
@@ -797,115 +895,119 @@ mod tests {
         assert_eq!(failed(&ev), Some((2, FailReason::Death)));
         assert_eq!(completed(&ev), None);
 
-        // The reload drops us somewhere outside the stage, with no fade.
-        let ev = land_on(&mut w, &mut r, REPTILE_START, 60);
-        assert_eq!(completed(&ev), None, "a level change with no fade is not a clear");
+        // The reload moves the room code without leaving the stage.
+        let ev = land_on(&mut w, &mut r, JUNGLE_START, 60);
+        assert_eq!(completed(&ev), None);
         assert_eq!(completed(&idle(&mut w, &r, 61, 400)), None);
     }
 
-    /// The plain clear: fade for the timing, a level code outside the stage
-    /// family for the verdict. The reported frame is the fade, not the later
-    /// level change — the hand-off is not part of the player's time.
+    /// The plain clear: a fade for the timing, the overworld for the verdict.
+    /// The reported frame is the fade, not the later map load — the hand-off
+    /// is not part of the player's time (ADR 0005).
     #[test]
-    fn leaving_the_stage_after_a_fade_completes_it_timed_to_the_fade() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+    fn reaching_the_overworld_completes_the_stage_timed_to_the_fade() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
 
         assert_eq!(faded(&fade(&mut w, &mut r, 900)), vec![900]);
-        let ev = land_on(&mut w, &mut r, REPTILE_START, 930);
+        let ev = to_overworld(&mut w, &mut r, 930);
         assert_eq!(completed(&ev), Some(900));
     }
 
-    /// The case that broke fade counting. A bonus room raises the same fade as
-    /// the exit, but its level code is inside the stage family, so it is not a
-    /// clear — and crucially the attempt stays open for the real exit later.
+    /// The case that broke fade counting, and the case the family table was
+    /// built for. A bonus room raises the same fade the exit does, but the
+    /// player is still inside a stage, so nothing scores and the attempt stays
+    /// open for the real exit.
     #[test]
     fn a_bonus_room_is_not_a_clear_and_the_real_exit_still_is() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
 
-        // Into Bonus 1.
         fade(&mut w, &mut r, 100);
         let ev = land_on(&mut w, &mut r, JUNGLE_BONUS_1, 130);
         assert_eq!(completed(&ev), None, "a bonus room is not a clear");
 
-        // Back out of it.
         fade(&mut w, &mut r, 400);
         let ev = land_on(&mut w, &mut r, JUNGLE_FROM_BONUS_1, 430);
-        assert_eq!(completed(&ev), None, "returning from a bonus is not a clear either");
+        assert_eq!(completed(&ev), None, "returning from a bonus is not one either");
 
-        // The actual exit.
         fade(&mut w, &mut r, 900);
-        let ev = land_on(&mut w, &mut r, REPTILE_START, 930);
-        assert_eq!(completed(&ev), Some(900));
+        assert_eq!(completed(&to_overworld(&mut w, &mut r, 930)), Some(900));
     }
 
-    /// The whole point of the rewrite: the verdict must not depend on how many
-    /// bonus rooms the player entered. Two routes through one stage, same
-    /// answer.
+    /// The property the whole design exists for: two routes through one stage,
+    /// same verdict and same time.
     #[test]
     fn the_verdict_does_not_depend_on_the_route() {
-        // Skipped the bonus entirely.
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         fade(&mut w, &mut r, 900);
-        let direct = completed(&land_on(&mut w, &mut r, REPTILE_START, 930));
+        let direct = completed(&to_overworld(&mut w, &mut r, 930));
 
-        // Took two bonus rooms on the way.
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         fade(&mut w, &mut r, 100);
         land_on(&mut w, &mut r, JUNGLE_BONUS_1, 130);
         fade(&mut w, &mut r, 300);
         land_on(&mut w, &mut r, JUNGLE_FROM_BONUS_1, 330);
         fade(&mut w, &mut r, 500);
-        land_on(&mut w, &mut r, JUNGLE_BONUS_1, 530);
+        land_on(&mut w, &mut r, WINKY_BONUS, 530);
         fade(&mut w, &mut r, 700);
-        land_on(&mut w, &mut r, JUNGLE_FROM_BONUS_1, 730);
+        land_on(&mut w, &mut r, JUNGLE_FROM_SAVE, 730);
         fade(&mut w, &mut r, 900);
-        let scenic = completed(&land_on(&mut w, &mut r, REPTILE_START, 930));
+        let scenic = completed(&to_overworld(&mut w, &mut r, 930));
 
         assert_eq!(direct, Some(900));
         assert_eq!(scenic, direct, "the route must not change the verdict");
     }
 
-    /// A checkpoint re-entry is another way to move the level code without
-    /// leaving the stage.
-    #[test]
-    fn a_checkpoint_code_stays_inside_the_stage() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
-        fade(&mut w, &mut r, 200);
-        let ev = land_on(&mut w, &mut r, JUNGLE_FROM_SAVE, 230);
-        assert_eq!(completed(&ev), None);
-    }
-
-    /// The shared animal rooms belong to no level's family, so family alone
-    /// would call them a clear. `is_side_room` is what stops that.
+    /// The shared animal rooms used to need naming explicitly, because they
+    /// belong to no level's family. They need nothing now: the player is
+    /// inside a stage the whole time they are in one.
     #[test]
     fn a_shared_animal_room_is_not_a_clear() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         fade(&mut w, &mut r, 200);
         let ev = land_on(&mut w, &mut r, WINKY_BONUS, 230);
-        assert_eq!(completed(&ev), None, "{} is a side room", levels::show(WINKY_BONUS));
+        assert_eq!(completed(&ev), None, "{} is inside the stage", levels::show(WINKY_BONUS));
 
-        // And the stage can still be cleared afterwards.
         fade(&mut w, &mut r, 800);
-        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 830)), Some(800));
+        assert_eq!(completed(&to_overworld(&mut w, &mut r, 830)), Some(800));
     }
 
-    /// A fade that nothing follows must not be left armed, or the next level
-    /// change — whenever it comes — gets timed to a transition it had nothing
-    /// to do with.
+    /// Quitting from the pause menu reaches the overworld exactly as the exit
+    /// does. The pause flag at the moment of the fade is the only difference,
+    /// and it must not be read later — by the time the map is up the menu is
+    /// gone.
     #[test]
-    fn an_unexplained_fade_is_discarded_after_the_window() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+    fn leaving_from_the_pause_menu_is_a_quit_not_a_clear() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
+
+        pause(&mut r, true);
+        w.tick(&r, 500);
+        fade(&mut w, &mut r, 520);
+        pause(&mut r, false);
+
+        let ev = to_overworld(&mut w, &mut r, 560);
+        assert_eq!(completed(&ev), None, "a menu exit is not a clear");
+        assert_eq!(failed(&ev), Some((520, FailReason::Quit)));
+    }
+
+    /// A fade that led nowhere must not be left armed, or the real exit —
+    /// whenever it comes — gets timed to a transition it had nothing to do
+    /// with.
+    #[test]
+    fn a_fade_that_led_nowhere_is_discarded_after_the_window() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         fade(&mut w, &mut r, 100);
         idle(&mut w, &r, 101, 100 + DEFAULT_TRANSITION_WINDOW_FRAMES + 1);
 
-        let ev = land_on(&mut w, &mut r, REPTILE_START, 5000);
-        assert_eq!(completed(&ev), None, "the stale fade must not time this");
+        // No fresh fade, so the exit is timed to itself rather than to the
+        // stale one. Still a clear: reaching the map is the verdict.
+        let ev = to_overworld(&mut w, &mut r, 5000);
+        assert_eq!(completed(&ev), Some(5000), "the stale fade must not time this");
     }
 
     /// The fade is an edge, so holding 0x82 for many frames arms once.
     #[test]
     fn a_fade_held_at_the_value_arms_once() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         let a = Addrs::default();
 
         put(&mut r, a.fade_type, STAGE_COMPLETE_FADE);
@@ -913,24 +1015,36 @@ mod tests {
         assert!(faded(&idle(&mut w, &r, 3, 60)).is_empty(), "held at 0x82 is one fade");
     }
 
-    /// A fade to some other value is a different kind of scene change and is
-    /// not the signal at all.
+    /// Reaching the map twice reports once. The second crossing is the game
+    /// walking its own menus, not a second clear.
     #[test]
-    fn a_fade_to_another_value_does_not_arm() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+    fn the_stage_only_ends_once() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         let a = Addrs::default();
-        put(&mut r, a.fade_type, 0x04);
-        assert!(faded(&w.tick(&r, 2)).is_empty());
-        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 30)), None);
+        fade(&mut w, &mut r, 900);
+        assert_eq!(completed(&to_overworld(&mut w, &mut r, 930)), Some(900));
+
+        put(&mut r, a.in_stage, IN_STAGE);
+        w.tick(&r, 940);
+        assert_eq!(completed(&to_overworld(&mut w, &mut r, 950)), None);
     }
 
-    /// Starting in a level code the table does not cover means the stage
-    /// cannot be delimited, so no clear is claimed rather than a wrong one.
+    /// With no `in_stage` address there is no completion detector at all,
+    /// rather than a guess from the level code.
     #[test]
-    fn an_unknown_entry_code_disables_the_completion_detector() {
-        let (mut w, mut r) = in_stage(999);
+    fn without_in_stage_no_clear_is_ever_claimed() {
+        let mut a = Addrs::default();
+        a.set("in_stage", None, None).unwrap();
+        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
+        let mut r = wram();
+        put(&mut r, a.lives, 5);
+        put(&mut r, a.level_id, JUNGLE_START);
+        w.tick(&r, 1);
+
         fade(&mut w, &mut r, 100);
-        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 130)), None);
+        let ev = land_on(&mut w, &mut r, REPTILE_START, 130);
+        assert_eq!(completed(&ev), None);
+        assert_eq!(completed(&idle(&mut w, &r, 131, 600)), None);
     }
 
     #[test]
@@ -965,75 +1079,94 @@ mod tests {
         assert!(!ev.contains(&Event::Death));
     }
 
-    /// Damage detectors stay off until an address is found, and turning one on
-    /// is a flag rather than a rebuild.
+    /// Losing the partner Kong is bit 0 of the state flags falling. This is
+    /// the detector that used to be off for want of an address.
     #[test]
-    fn damage_reports_once_an_address_is_supplied() {
-        let mut a = Addrs::default();
-        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
-        let mut r = wram();
-        r[0x08A5] = 2;
-        w.tick(&r, 1);
-        r[0x08A5] = 1;
-        assert!(w.tick(&r, 2).is_empty(), "no detector without an address");
+    fn losing_the_partner_kong_is_damage() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
+        let a = Addrs::default();
 
-        a.set("kong_count", Some(0x7E_08A5), Some(Width::U8)).unwrap();
-        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
-        r[0x08A5] = 2;
-        w.tick(&r, 1);
-        r[0x08A5] = 1;
+        put(&mut r, a.state_flags, 0);
         assert!(w.tick(&r, 2).contains(&Event::Damage));
+
+        // And it is an edge: staying at one Kong is not damage every frame.
+        assert!(!idle(&mut w, &r, 3, 60).contains(&Event::Damage));
     }
 
-    /// Dying with one Kong drops the count to zero as well; that is one event,
-    /// not damage plus a death.
+    /// The hit timer is the other half, and it is the one that fires when a
+    /// solo Kong is hit and there is no partner to lose.
     #[test]
-    fn a_death_suppresses_the_damage_it_also_causes() {
+    fn a_hit_timer_rising_from_zero_is_damage() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
+        let a = Addrs::default();
+
+        put(&mut r, a.hit_timer, 40);
+        assert!(w.tick(&r, 2).contains(&Event::Damage));
+        // Counting down from that hit is not a second one.
+        put(&mut r, a.hit_timer, 39);
+        assert!(!w.tick(&r, 3).contains(&Event::Damage));
+    }
+
+    /// An override still turns a detector off without a rebuild.
+    #[test]
+    fn an_override_can_silence_a_detector() {
         let mut a = Addrs::default();
-        a.set("kong_count", Some(0x08A5), Some(Width::U8)).unwrap();
+        a.set("state_flags", None, None).unwrap();
+        a.set("hit_timer", None, None).unwrap();
         let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
         let mut r = wram();
-        put(&mut r, a.lives, 5);
-        r[0x08A5] = 1;
+        put(&mut r, Addrs::default().state_flags, STATE_TWO_KONGS);
         w.tick(&r, 1);
+        put(&mut r, Addrs::default().state_flags, 0);
+        assert!(!w.tick(&r, 2).contains(&Event::Damage));
+    }
+
+    /// Dying with one Kong clears the two-Kong bit as well; that is one
+    /// event, not damage plus a death.
+    #[test]
+    fn a_death_suppresses_the_damage_it_also_causes() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
+        let a = Addrs::default();
 
         put(&mut r, a.lives, 4);
-        r[0x08A5] = 0;
+        put(&mut r, a.state_flags, 0);
         let ev = w.tick(&r, 2);
         assert!(ev.contains(&Event::Death));
         assert!(!ev.contains(&Event::Damage));
     }
 
+    /// $1E17 is a stomp *streak*, so it rises per stomp and drops back to
+    /// zero when the chain breaks. The rise is the event; the reset is not.
     #[test]
-    fn enemy_kills_report_once_a_counter_is_supplied() {
-        let mut a = Addrs::default();
-        a.set("enemy_kills", Some(0x1000), Some(Width::U16)).unwrap();
-        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
-        let mut r = wram();
-        w.tick(&r, 1);
-        r[0x1000] = 2;
-        assert!(w.tick(&r, 2).contains(&Event::EnemyKilled(2)));
+    fn a_rising_stomp_streak_reports_enemy_kills() {
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
+        let a = Addrs::default();
+
+        put(&mut r, a.enemy_kills, 1);
+        assert!(w.tick(&r, 2).contains(&Event::EnemyKilled(1)));
+        put(&mut r, a.enemy_kills, 3);
+        assert!(w.tick(&r, 3).contains(&Event::EnemyKilled(2)));
+        put(&mut r, a.enemy_kills, 0);
+        let ev = w.tick(&r, 4);
+        assert!(!ev.iter().any(|e| matches!(e, Event::EnemyKilled(_))));
     }
 
-    /// A savestate load reopens the attempt: a fresh rise to
-    /// STAGE_COMPLETE_FADE reports its own result rather than being suppressed
-    /// by the previous attempt's `resolved` flag.
+    /// A savestate load reopens the attempt: the second run reports its own
+    /// clear rather than being suppressed by the first one's `ended` flag.
     #[test]
     fn a_reset_starts_a_fresh_attempt() {
-        let (mut w, mut r) = in_stage(JUNGLE_START);
+        let (mut w, mut r) = enter_stage(JUNGLE_START);
         fade(&mut w, &mut r, 900);
-        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 930)), Some(900));
+        assert_eq!(completed(&to_overworld(&mut w, &mut r, 930)), Some(900));
 
-        // A savestate load drops us back into the stage. The entry family has
-        // to be re-read from RAM rather than remembered from before the load —
-        // otherwise the second attempt is measured against the wrong stage.
         w.reset();
         let a = Addrs::default();
+        put(&mut r, a.in_stage, IN_STAGE);
         put(&mut r, a.level_id, JUNGLE_START);
         assert!(w.tick(&r, 1).is_empty());
 
         fade(&mut w, &mut r, 500);
-        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 530)), Some(500));
+        assert_eq!(completed(&to_overworld(&mut w, &mut r, 530)), Some(500));
     }
 
     #[test]

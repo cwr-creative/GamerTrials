@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 
 use dkc::Width;
-use libretro::{Core, RETRO_MEMORY_SAVE_RAM, RETRO_MEMORY_SYSTEM_RAM, VIDEO};
+use libretro::{Core, RETRO_MEMORY_IDS, RETRO_MEMORY_SAVE_RAM, RETRO_MEMORY_SYSTEM_RAM, VIDEO};
 use ramsearch::{Filter, Probe, Search};
 
 const DEFAULT_ROM: &str = "assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc";
@@ -59,10 +59,16 @@ OPTIONS:
                      e.g. --watch 0x0570-0x05a0. Offsets and full $7Exxxx
                      addresses both work.
     --addr <N=A[:W]> Retarget a watched quantity without rebuilding, e.g.
-                     --addr lives=0x7E0577 --addr hit_timer=0x08A5:u8
+                     --addr lives=0x7E0577 --addr in_stage=0x0527:u8
                      W is u8 or u16 (default u16). --addr <name>=off turns
                      that detector off. Repeatable.
     --list-addrs     Print the address table with its sources, and exit.
+    --dump-memory-map
+                     Print every memory region this core publishes - the four
+                     retro_get_memory_data ids and every SET_MEMORY_MAPS
+                     descriptor - and exit. Run it once per core: what a core
+                     offers beyond work RAM (OAM, CGRAM, VRAM, APU RAM) is the
+                     difference between a detector being possible and not.
     --search-width <u8|u16>
                      Width the F3-F8 RAM search compares at. Default: u16
     --probe-recent <N>
@@ -70,8 +76,8 @@ OPTIONS:
     --probe-stable <N>
                      ...and that held still for N frames before that. Default: 180
     --transition-window <N>
-                     Frames to wait after a fade for the level code to catch
-                     up and say where the stage was left for. Default: 120.
+                     How long a fade stays good for as the timing of a stage
+                     end, while the overworld loads. Default: 120.
     --no-probe       Skip the per-frame change history (saves ~2.3 MB and a
                      full RAM compare each frame; disables F11)
     --no-audio       Run without sound, paced off the wall clock instead
@@ -100,6 +106,7 @@ struct Args {
     watch: Vec<usize>,
     addrs: dkc::Addrs,
     list_addrs: bool,
+    dump_memory_map: bool,
     search_width: Width,
     probe_recent: u64,
     probe_stable: u64,
@@ -172,6 +179,15 @@ fn run() -> Result<(), String> {
         "[av]   {width}x{height} @ {:.4} fps, {} Hz",
         av.timing.fps, av.timing.sample_rate as u32
     );
+
+    if args.dump_memory_map {
+        // A frame first: `SET_MEMORY_MAPS` normally arrives during
+        // `retro_load_game`, but nothing in libretro.h promises that, and a
+        // dump that missed the map would read as "this core publishes none".
+        core.run_frame();
+        print_memory_map(&core);
+        return Ok(());
+    }
 
     // Unlike the NES side, the whole of the address space this harness cares
     // about arrives here: snes9x publishes all 128 KB of work RAM as system
@@ -438,10 +454,7 @@ fn print_addrs(addrs: &dkc::Addrs) {
         }
     }
     if !unset.is_empty() {
-        println!(
-            "[addr] no address yet, so these detectors are off: {}",
-            unset.join(", ")
-        );
+        println!("[addr] unset, so contributing nothing: {}", unset.join(", "));
         println!("[addr] F3-F8/F10 hunt for a counter; F11 reports what a one-shot event wrote");
     }
 }
@@ -449,14 +462,12 @@ fn print_addrs(addrs: &dkc::Addrs) {
 /// How a clear is decided, stated at startup because it rests on two signals
 /// rather than one and the pairing is not obvious from the output alone.
 fn print_completion_rule() {
-    println!(
-        "[stage] a clear is a fade at $7E051B=0x82 (timing; never fires on a death) \
-         followed by the level code at $7E003E leaving this stage's family"
-    );
-    println!(
-        "[stage] bonus rooms, checkpoints and returns stay inside the family, so the \
-         route through a stage does not change the verdict"
-    );
+    println!("[stage] a clear is $7E0527 leaving 0x00: in a stage -> overworld");
+    println!("[stage] it is timed to the preceding fade at $7E051B=0x82, so the map load");
+    println!("[stage] is not charged to the player (ADR 0005)");
+    println!("[stage] bonus rooms, checkpoints, returns and death reloads all stay inside");
+    println!("[stage] a stage, so the route through one does not change the verdict");
+    println!("[stage] a fade that began while paused is a menu quit, and fails the attempt");
 }
 
 fn load_state(
@@ -563,6 +574,138 @@ fn parse_addr_override(spec: &str, addrs: &mut dkc::Addrs) -> Result<(), String>
     addrs.set(name, Some(addr), width)
 }
 
+/// What a region of this size is likely to be on the SNES. A guess from the
+/// size alone — enough to read a dump without a reference table open, not
+/// enough to point a detector at. Confirm anything load-bearing against the
+/// core's source or the `addrspace` name it published.
+fn snes_shape(len: usize) -> Option<&'static str> {
+    match len {
+        0x20000 => Some("work RAM"),
+        // Both are 64 KB, and only the VIDEO_RAM flag or the addrspace name
+        // tells them apart. APU RAM is the one worth having: the sound
+        // driver's state lives there.
+        0x10000 => Some("VRAM or APU RAM"),
+        544 => Some("OAM — the sprite table"),
+        512 => Some("CGRAM, or OAM's low table"),
+        32 => Some("OAM's high table"),
+        0x800 | 0x2000 | 0x8000 => Some("cartridge SRAM"),
+        _ => None,
+    }
+}
+
+fn shape_suffix(len: usize) -> String {
+    match snes_shape(len) {
+        Some(what) => format!("  — looks like {what}"),
+        None => String::new(),
+    }
+}
+
+/// Everything this core is willing to hand out, both routes. The point of it
+/// is what lies *outside* work RAM: a core that publishes OAM makes enemy
+/// kills and damage a sprite-table read rather than a hunt for a counter that
+/// may not exist, and one that publishes APU RAM makes "which music is
+/// playing" a plain RAM watch.
+fn print_memory_map(core: &Core) {
+    println!();
+    println!("retro_get_memory_data ids:");
+    for (id, name) in RETRO_MEMORY_IDS {
+        match core.memory(id) {
+            Some(m) => println!(
+                "  {id}  {name:<10} {:>7} bytes{}",
+                m.len(),
+                shape_suffix(m.len())
+            ),
+            None => println!("  {id}  {name:<10}       — not published"),
+        }
+    }
+
+    let map = libretro::memory_map();
+    println!();
+    if map.is_empty() {
+        println!("SET_MEMORY_MAPS: no descriptors published.");
+        println!();
+        println!("Nothing beyond the ids above is reachable from this core.");
+        return;
+    }
+
+    println!("SET_MEMORY_MAPS descriptors ({}):", map.len());
+    println!("    #  start       length      read  flags / addrspace");
+    for (i, r) in map.iter().enumerate() {
+        let mut tags: Vec<String> = Vec::new();
+        let flags = r.flag_names();
+        if !flags.is_empty() {
+            tags.push(flags);
+        }
+        if let Some(space) = &r.addrspace {
+            tags.push(format!("addrspace={space:?}"));
+        }
+        println!(
+            "  {i:>3}  0x{:08X}  0x{:08X}  {:<4}  {}",
+            r.start,
+            r.len,
+            if r.readable() { "yes" } else { "no" },
+            tags.join(" ")
+        );
+        // The fields that explain a `no`, and the offset, which silently
+        // shifts where a descriptor's bytes actually start. Printed only when
+        // they carry information.
+        if r.select != 0 || r.disconnect != 0 || r.offset != 0 || r.ptr == 0 {
+            let mut why: Vec<String> = Vec::new();
+            if r.ptr == 0 {
+                why.push("no backing buffer".into());
+            }
+            if r.select != 0 {
+                why.push(format!("select=0x{:X}", r.select));
+            }
+            if r.disconnect != 0 {
+                why.push(format!("disconnect=0x{:X}", r.disconnect));
+            }
+            if r.offset != 0 {
+                why.push(format!("offset=0x{:X}", r.offset));
+            }
+            println!("       {}", why.join(", "));
+        }
+        if let Some(what) = snes_shape(r.len) {
+            println!("       looks like {what}");
+        }
+    }
+
+    // The summary is the part worth reading. `read_addr` resolves a plain
+    // start..start+len window only, so a bit-matched descriptor is published
+    // but not reachable — see the note on mirroring in `libretro::read_addr`.
+    let bit_matched = map
+        .iter()
+        .filter(|r| r.ptr != 0 && (r.select != 0 || r.disconnect != 0))
+        .count();
+    let beyond_wram: Vec<&libretro::MappedRegion> = map
+        .iter()
+        .filter(|r| r.readable() && r.len != dkc::WRAM_SIZE)
+        .collect();
+
+    println!();
+    if beyond_wram.is_empty() {
+        println!("Readable beyond work RAM: nothing.");
+    } else {
+        println!("Readable beyond work RAM:");
+        for r in beyond_wram {
+            println!(
+                "  0x{:08X}  {:>7} bytes{}",
+                r.start,
+                r.len,
+                shape_suffix(r.len)
+            );
+        }
+    }
+    if bit_matched > 0 {
+        println!(
+            "{bit_matched} descriptor(s) use select/disconnect bit-matching, which"
+        );
+        println!(
+            "read_addr does not resolve: published by the core, unreachable here."
+        );
+    }
+}
+
 fn parse_args() -> Result<Option<Args>, String> {
     let mut args = Args {
         core: None,
@@ -572,6 +715,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         watch: Vec::new(),
         addrs: dkc::Addrs::default(),
         list_addrs: false,
+        dump_memory_map: false,
         search_width: Width::U16,
         // ~a third of a second either side of the keypress: long enough to
         // cover a human's reaction time, short enough that the frame the game
@@ -597,6 +741,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-audio" => args.audio = false,
             "--no-probe" => args.probe = false,
             "--list-addrs" => args.list_addrs = true,
+            "--dump-memory-map" => args.dump_memory_map = true,
             "--addr" => {
                 let spec = value("--addr")?;
                 parse_addr_override(&spec, &mut args.addrs)?;

@@ -23,7 +23,30 @@ use libloading::{Library, Symbol};
 pub const RETRO_DEVICE_JOYPAD: u32 = 1;
 
 pub const RETRO_MEMORY_SAVE_RAM: u32 = 0;
+pub const RETRO_MEMORY_RTC: u32 = 1;
 pub const RETRO_MEMORY_SYSTEM_RAM: u32 = 2;
+pub const RETRO_MEMORY_VIDEO_RAM: u32 = 3;
+
+/// Every id `retro_get_memory_data` takes, with a printable name. `VIDEO_RAM`
+/// is the interesting one for this harness: a core that answers there is
+/// offering VRAM/OAM/CGRAM, which is where the sprite table lives.
+pub const RETRO_MEMORY_IDS: [(u32, &str); 4] = [
+    (RETRO_MEMORY_SAVE_RAM, "SAVE_RAM"),
+    (RETRO_MEMORY_RTC, "RTC"),
+    (RETRO_MEMORY_SYSTEM_RAM, "SYSTEM_RAM"),
+    (RETRO_MEMORY_VIDEO_RAM, "VIDEO_RAM"),
+];
+
+// Descriptor flags, from libretro.h. The ALIGN/MINSIZE fields are two-bit
+// values shifted up, not single bits, which is why they are masked below
+// rather than tested.
+const MEMDESC_CONST: u64 = 1 << 0;
+const MEMDESC_BIGENDIAN: u64 = 1 << 1;
+const MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
+const MEMDESC_SAVE_RAM: u64 = 1 << 3;
+const MEMDESC_VIDEO_RAM: u64 = 1 << 4;
+const MEMDESC_ALIGN_SHIFT: u32 = 16;
+const MEMDESC_MINSIZE_SHIFT: u32 = 24;
 
 // Joypad button ids, in libretro order. The libretro layout *is* the SNES pad,
 // so unlike the NES harness every id here is used.
@@ -204,6 +227,7 @@ static SYSTEM_DIR: OnceLock<CString> = OnceLock::new();
 /// is a fallback rather than the main route: WRAM ($7E:0000-$7F:FFFF) already
 /// arrives whole as `RETRO_MEMORY_SYSTEM_RAM`, and `dkc::read_byte` prefers
 /// that slice. The map is what answers for anything outside WRAM.
+#[derive(Clone)]
 pub struct MappedRegion {
     pub start: usize,
     pub select: usize,
@@ -211,8 +235,48 @@ pub struct MappedRegion {
     pub len: usize,
     pub offset: usize,
     /// Base pointer of the core-owned buffer. Held as a `usize` so the
-    /// static stays `Send`; only dereferenced on the emulator thread.
+    /// static stays `Send`; only dereferenced on the emulator thread. Zero
+    /// when the core published a descriptor with no backing buffer — such a
+    /// region is unreadable, but it is still recorded so a dump can say so.
     pub ptr: usize,
+    pub flags: u64,
+    /// The core's name for the address space this region belongs to. Usually
+    /// absent; when present it is the fastest way to tell VRAM from APU RAM,
+    /// which are both 64 KB on the SNES.
+    pub addrspace: Option<String>,
+}
+
+impl MappedRegion {
+    /// A region this harness can actually read a byte out of.
+    pub fn readable(&self) -> bool {
+        self.ptr != 0 && self.len != 0 && self.select == 0 && self.disconnect == 0
+    }
+
+    /// Flag names as libretro.h spells them, for a dump. Empty string when the
+    /// core set none, which is common and not an error.
+    pub fn flag_names(&self) -> String {
+        let mut out: Vec<String> = Vec::new();
+        for (bit, name) in [
+            (MEMDESC_CONST, "CONST"),
+            (MEMDESC_BIGENDIAN, "BIGENDIAN"),
+            (MEMDESC_SYSTEM_RAM, "SYSTEM_RAM"),
+            (MEMDESC_SAVE_RAM, "SAVE_RAM"),
+            (MEMDESC_VIDEO_RAM, "VIDEO_RAM"),
+        ] {
+            if self.flags & bit != 0 {
+                out.push(name.to_string());
+            }
+        }
+        let align = (self.flags >> MEMDESC_ALIGN_SHIFT) & 0x3;
+        if align != 0 {
+            out.push(format!("ALIGN_{}", 1 << align));
+        }
+        let minsize = (self.flags >> MEMDESC_MINSIZE_SHIFT) & 0x3;
+        if minsize != 0 {
+            out.push(format!("MINSIZE_{}", 1 << minsize));
+        }
+        out.join("|")
+    }
 }
 
 pub static MEMORY_MAP: Mutex<Vec<MappedRegion>> = Mutex::new(Vec::new());
@@ -220,6 +284,12 @@ pub static MEMORY_MAP: Mutex<Vec<MappedRegion>> = Mutex::new(Vec::new());
 /// True once the core has published a memory map.
 pub fn has_memory_map() -> bool {
     !lock(&MEMORY_MAP).is_empty()
+}
+
+/// A copy of every descriptor the core published, in the order it published
+/// them. For reporting; reading bytes goes through `read_addr`.
+pub fn memory_map() -> Vec<MappedRegion> {
+    lock(&MEMORY_MAP).clone()
 }
 
 /// Reads one byte of the emulated CPU address space through the map the core
@@ -237,7 +307,7 @@ pub fn has_memory_map() -> bool {
 pub fn read_addr(addr: usize) -> Option<u8> {
     let map = lock(&MEMORY_MAP);
     for r in map.iter() {
-        if r.select != 0 || r.disconnect != 0 {
+        if !r.readable() {
             continue;
         }
         if addr >= r.start && addr < r.start + r.len {
@@ -324,10 +394,10 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                 unsafe { std::slice::from_raw_parts(map.descriptors, map.num_descriptors as usize) };
             let mut out = lock(&MEMORY_MAP);
             out.clear();
+            // Unusable descriptors (no buffer, zero length) are recorded
+            // rather than dropped: `read_addr` skips them, and a dump that
+            // silently omitted them would misreport what the core offered.
             for d in descs {
-                if d.ptr.is_null() || d.len == 0 {
-                    continue;
-                }
                 out.push(MappedRegion {
                     start: d.start,
                     select: d.select,
@@ -335,6 +405,11 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                     len: d.len,
                     offset: d.offset,
                     ptr: d.ptr as usize,
+                    flags: d.flags,
+                    addrspace: match unsafe { cstr(d.addrspace) } {
+                        n if n.is_empty() => None,
+                        n => Some(n),
+                    },
                 });
             }
             true
