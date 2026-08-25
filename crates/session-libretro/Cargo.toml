@@ -1,0 +1,27 @@
+[package]
+name = "session-libretro"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The libretro adapter, for every libretro game. What used to be
+# `smb3-harness` and `dkc-harness`; the two dissolved into this crate plus two
+# TOML files in `manifests/` (ADR 0012, ADR 0016). There is no per-game Rust
+# here and there must not be one: a new libretro game is a new manifest.
+
+[dependencies]
+session-api = { path = "../session-api" }
+
+libloading = "0.8"   # load the libretro core ourselves (ADR 0001)
+minifb = "0.27"      # window + framebuffer blit + keyboard
+cpal = "0.15"        # audio out (WASAPI on Windows)
+gilrs = "0.11"       # gamepad (XInput/DirectInput)
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"         # manifests are TOML data in git (ADR 0010)
+
+# The developer harness: run a manifest's game in a window and watch RAM. Not
+# the client — it prints events and scores nothing.
+[[bin]]
+name = "harness"
+path = "src/bin/harness.rs"

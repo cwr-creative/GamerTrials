@@ -44,7 +44,7 @@ These are settled. Do not violate them without writing a superseding ADR.
 |---|---|
 | `challenge-core` | Stage sequencing, scoring, rules. Pure. |
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
-| `session-libretro` | SMB3, DKC. Software cores only for now. |
+| `session-libretro` | SMB3, DKC, and every later libretro game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). |
 | `session-external` | Doom. Process launch + stats-file harvest. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles. |
@@ -55,8 +55,11 @@ These are settled. Do not violate them without writing a superseding ADR.
 ## Conventions
 
 - Manifests are TOML, one per *base* ROM hash, versioned with a `schema_version`
-  field. Generated artifacts get no manifest of their own; they are identified by
-  their derivation key (ADR 0013).
+  field, and live in `manifests/`. The schema is `docs/manifest-schema.md`;
+  `session-libretro` is the authority on what parses. Generated artifacts get no
+  manifest of their own; they are identified by their derivation key (ADR 0013).
+- A manifest reports *facts* — cleared, exited, died, damaged, item. What a run
+  was worth is `challenge-core`'s question. There is no `stage_failed`.
 - Manifests may author durations in seconds. They convert to frames at the game's
   framerate on load — seconds never reach a `SessionEvent` or a wire message.
 - Wire protocol messages carry a version field. Never remove a field; deprecate it.
@@ -71,8 +74,23 @@ rejected for non-obvious reasons.
 
 ## Current phase
 
-Phase 2: Build the second single-game harness for DKC on the SNES core. Compare it against the SMB3 harness, create abstractions, then refactor to create the libretro harness. Create the manifest schema which is -- hopefully -- the same for all libretro games and not core-specific.
+Phase 2 (complete): `smb3-harness` and `dkc-harness` dissolved into
+`session-libretro` + `session-api`, and both games became manifests. The schema
+is `docs/manifest-schema.md` and the decision is ADR 0016. Not core-specific:
+what varies between the two consoles is `[runner.libretro.memory]` and a pad
+layout, both per console family rather than per core.
 
-Phase 1 (complete): single-game libretro harness. Deliberately SMB3-specific and ugly.
-Do not extract abstractions yet — that is Phase 2's job, after DKC exists.
-No generated content, no endurance stages, no head-to-head in this phase.
+Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
+
+What Phase 2 did *not* do, and the next things to settle:
+
+- **No playtest of DKC's addresses.** Almost all have two independent sources
+  and none have been confirmed against the running game. `--frames` and
+  `--addr` are the tools; `docs/games/dkc.md` lists what is unverified.
+- **ADR 0014 is still owed** the external-process half: Doom has no addressable
+  core RAM, and `[runner.external]` is where that answer goes.
+- **`challenge-core` does not exist.** `SessionEvent`s are produced and nothing
+  scores them yet.
+- No generated content (`content-gen`, ADR 0013/0015 — the schema documents
+  `[[challenge]]` patch slots and the loader refuses them), no endurance
+  scoring, no head-to-head.

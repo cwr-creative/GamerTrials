@@ -1,10 +1,11 @@
 //! Two ways to find an address that nobody has written down.
 //!
-//! The NES harness got away without this. SMB3's RAM map is thoroughly
-//! documented, its RAM is 2 KB, and `--watch 0x0090-0x00ff` over a range that
-//! small prints something a human can read. DKC has 128 KB of work RAM and a
-//! RAM map that is mostly missing, so the same approach prints tens of
-//! thousands of lines a second and finds nothing.
+//! The NES got away without this. SMB3's RAM map is thoroughly documented, its
+//! RAM is 2 KB, and `--watch 0x0090-0x00ff` over a range that small prints
+//! something a human can read. DKC has 128 KB of work RAM and a RAM map that is
+//! mostly missing, so the same approach prints tens of thousands of lines a
+//! second and finds nothing. Both tools below work on any console's system-RAM
+//! slice; which one you need depends on how big it is and how well documented.
 //!
 //! So there are two tools here, and they answer different questions.
 //!
@@ -24,10 +25,11 @@
 //! This is the tool for damage, item pickups, and stage clear: things that
 //! happen once and cannot be nudged up and down at will.
 //!
-//! Both work on the WRAM slice as offsets. Everything they print is in the
-//! `$7Exxxxx` form so it can be pasted straight into `--addr` or `--watch`.
+//! Both work on the system-RAM slice as offsets. Everything they print goes
+//! through the manifest's address space first, so it comes out in the same
+//! spelling the manifest uses and pastes straight into `--addr` or `--watch`.
 
-use crate::dkc::{show_addr, WRAM_BASE, Width};
+use crate::memory::{AddressSpace, Width};
 
 /// How a candidate must have moved to survive a filter step. Compared against
 /// the snapshot taken at the previous step, which is the usual cheat-search
@@ -148,7 +150,7 @@ impl Search {
 
     /// Print what is left. Capped, because a search that has not narrowed yet
     /// still holds every address in RAM.
-    pub fn list(&self, ram: &[u8], limit: usize) {
+    pub fn list(&self, space: &AddressSpace, ram: &[u8], limit: usize) {
         if !self.started {
             println!("[search] no search running — take a snapshot first");
             return;
@@ -160,7 +162,7 @@ impl Search {
         );
         for &off in self.candidates.iter().take(limit) {
             let off = off as usize;
-            let at = show_addr(off + WRAM_BASE);
+            let at = space.show(off + space.base);
             match self.value(ram, off) {
                 Some(v) => println!("        {at} = {v:5} ({v:04X})"),
                 None => println!("        {at} = <out of range>"),
@@ -251,7 +253,15 @@ impl Probe {
     /// pressed the key"; `stable` throws out everything that is always busy —
     /// positions, animation timers, the RNG, the audio driver's scratch space
     /// — because those never hold still for a second at a time.
-    pub fn report(&self, ram: &[u8], frame: u64, recent: u64, stable: u64, limit: usize) {
+    pub fn report(
+        &self,
+        space: &AddressSpace,
+        ram: &[u8],
+        frame: u64,
+        recent: u64,
+        stable: u64,
+        limit: usize,
+    ) {
         if !self.armed {
             println!("[probe] not armed yet");
             return;
@@ -279,7 +289,7 @@ impl Probe {
             let now = ram.get(i).copied().unwrap_or(was);
             println!(
                 "        {}  {was:02X} -> {now:02X}  at frame {last} (still for {})",
-                show_addr(i + WRAM_BASE),
+                space.show(i + space.base),
                 last.saturating_sub(self.prior_change[i])
             );
         }

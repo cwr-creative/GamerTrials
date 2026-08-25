@@ -1,0 +1,561 @@
+# Donkey Kong Country (SNES).
+#
+# Everything this project knows about DKC. The schema is documented in
+# docs/manifest-schema.md; the provenance of every address below — almost all
+# of it corroborated against the RetroAchievements code notes — is in
+# docs/games/dkc.md and docs/games/dkc-ra-code-notes.md.
+#
+# Read the address caveat there before trusting a number: most of this has two
+# independent sources and none of it has a full playtest.
+
+schema_version = 1
+
+[game]
+id = "dkc"
+title = "Donkey Kong Country"
+console = "snes"
+region = "usa"
+framerate = 60.0988
+
+[rom]
+name = "Donkey Kong Country (U) (V1.0) [!]"
+path = "assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc"
+# A SNES ROM has no magic number - its header is in-band, at a position that
+# depends on the mapper. All that can be checked cheaply is the size and
+# whether it carries a 512-byte copier header, which shifts every ROM offset.
+header = "copier-optional"
+min_bytes = 32768
+# sha1 deliberately absent; see the note in smb3.toml.
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+# SNES cores live in their own folder so "the single *_libretro.dll" stays
+# unambiguous now that the library has two consoles in it.
+core_dir = "cores/snes"
+pad_layout = "snes"
+
+[runner.libretro.memory]
+# SNES work RAM, $7E:0000-$7F:FFFF. snes9x hands all 128 KB over as system RAM
+# and publishes no SET_MEMORY_MAPS descriptors at all, so the slice is the only
+# route that works here — the opposite of the NES side. Addresses may be
+# written as offsets ($0527) or in full ($7E0527); they mean the same byte.
+base = 0x7E0000
+size = 0x20000
+system_ram_bytes = 131072
+prefer = "system_ram"
+# DKC's game logic runs the 65816 with a 16-bit accumulator, so u16 is the
+# safer default for anything that looks like a count. Fields known to be a
+# single byte say so.
+default_width = "u16"
+
+# ---------------------------------------------------------------- what to read
+
+[watch.in_stage]
+at = 0x0527
+width = "u8"
+note = "RA notes: 00 = in a stage, 01 = overworld. The spine of stage completion"
+
+[watch.level_id]
+at = 0x003E
+note = "RA notes + RainbowZ: room id (last exit used). Naming only"
+
+[watch.room_id]
+at = 0x0040
+note = "RA notes: last room id inside a level, else 0"
+
+[watch.lives]
+at = 0x0575
+note = "RA notes: lives. $0577, which every older map quotes, is the display copy"
+
+[watch.bananas]
+at = 0x057B
+note = "RA notes: bananas / mini animal tokens, up to 999"
+
+[watch.kong_letters]
+at = 0x057F
+width = "u8"
+note = "RA notes: KONG letters flag. Unmarked in the notes, so a byte"
+
+[watch.fade_type]
+at = 0x051B
+width = "u8"
+note = "RA notes + dkc1-hack: 0x82 = screen fading out. Playtested"
+
+[watch.state_flags]
+at = 0x0579
+width = "u8"
+note = "RA notes: b0 = 2 Kongs, b6 = paused"
+
+[watch.hit_timer]
+at = 0x16D1
+note = "RA notes: DK flash timer, set on taking a hit (Diddy $16D3)"
+
+[watch.animal]
+at = 0x0516
+width = "u8"
+note = "RA notes: riding buddy"
+
+[watch.enemy_kills]
+at = 0x1E17
+width = "u8"
+note = "RA notes: enemies stomped in a row - a streak, not a running total"
+
+[watch.player_x]
+at = 0x005E
+note = "RA notes: active character's X coord"
+
+[watch.player_y]
+at = 0x0060
+note = "RA notes: active character's Y coord"
+
+[watch.dk_x]
+at = 0x0FC3
+note = "RA notes: DK's position X (Diddy $0FC5)"
+
+[watch.dk_y]
+at = 0x0FF7
+note = "RA notes: DK's position Y (Diddy $0FF9)"
+
+[watch.accept_inputs]
+at = 0x1929
+note = "dkc1-hack defines.asm; no RA note, so the one address on a single source"
+
+# No address, and so no detector - which is the honest state, not a broken one.
+# Damage reads state_flags bit 0 instead. If a real Kong counter ever turns up,
+# giving this an `at` is the whole change.
+[watch.kong_count]
+note = "UNKNOWN - nobody has found a dedicated Kong counter"
+
+[label.in_stage]
+0x00 = "in a stage"
+0x01 = "overworld"
+
+[label.animal]
+0x00 = "none"
+0x09 = "Rambi"
+0x0A = "Expresso"
+0x0B = "Winky"
+0x0C = "Enguarde"
+
+[display]
+fields = [
+    "in_stage",
+    "level_id",
+    "room_id",
+    "lives",
+    "bananas",
+    "kong_letters",
+    "state_flags",
+    "fade_type",
+]
+
+# ------------------------------------------------------------------- markers
+
+# The fade-to-black the game sets on any scene change that takes the player out
+# of the current room. A death causes no fade at all, so this can never fire
+# from one, and it is not a verdict on its own — a bonus barrel sets the same
+# value the exit does. All it supplies is the frame: the stage ended when the
+# screen started to go dark, not when the overworld finished loading (ADR 0005).
+#
+# 120 frames is two seconds at 60 Hz, far longer than the hand-off. A fade with
+# nothing behind it is discarded rather than left armed to mis-time a later,
+# unrelated exit.
+[[marker]]
+name = "fade"
+field = "fade_type"
+edge = "enters"
+value = 0x82
+window_frames = 120
+
+# Quitting from the pause menu reaches the overworld exactly as the exit does.
+# The pause flag at the moment the fade began is the only thing separating them,
+# and it has to be read then: by the time the map is up, the menu is long gone.
+[[marker.capture]]
+name = "paused"
+field = "state_flags"
+test = "bit_set"
+bit = 6
+
+# --------------------------------------------------------------- what it means
+
+# A life lost means the same thing everywhere in DKC: pit, water, enemy contact
+# with a single Kong. Named, because the damage rules below have to know it
+# fired — dying with one Kong clears the two-Kong bit as well, and that is one
+# event, not damage plus a death.
+[[rule]]
+name = "death"
+field = "lives"
+edge = "decreases"
+emit = "died"
+
+[[rule]]
+field = "lives"
+edge = "decreases"
+emit = "stage_exited"
+reason = "death"
+
+[[rule]]
+field = "state_flags"
+edge = "bit_cleared"
+bit = 0
+unless = ["death"]
+emit = "damaged"
+log = "lost the partner Kong"
+
+[[rule]]
+field = "kong_count"
+edge = "decreases"
+unless = ["death"]
+emit = "damaged"
+log = "kept for a real Kong counter, if one ever turns up"
+
+[[rule]]
+field = "hit_timer"
+edge = "leaves"
+value = 0
+unless = ["death"]
+emit = "damaged"
+log = "the hit that fires when a solo Kong is hit and has no partner to lose"
+
+[[rule]]
+field = "enemy_kills"
+edge = "increases"
+emit = "enemy_defeated"
+log = "a stomp streak, so this undercounts a stage"
+
+[[rule]]
+field = "bananas"
+edge = "increases"
+emit = "item"
+item = "banana"
+
+# One event per letter newly held, out of one byte.
+[[rule]]
+field = "kong_letters"
+edge = "bits_set"
+bit_labels = ["K", "O", "N", "G"]
+emit = "item"
+item = "kong_letter"
+
+[[rule]]
+field = "lives"
+edge = "increases"
+emit = "item"
+item = "extra_life"
+
+# Mounting a buddy, not dismounting one: the guard is what keeps a return to 0
+# from reading as a pickup.
+[[rule]]
+field = "animal"
+edge = "changes"
+guard = { field = "animal", test = "ne", value = 0 }
+emit = "item"
+item = "animal_buddy"
+
+# $7E0527 is the game's own answer to "is the player inside a stage?", and it is
+# the whole completion rule. Every way of *staying* in a level leaves it at 00:
+# a bonus room, the return from one, a checkpoint, a death and the reload it
+# causes. Only actually leaving flips it, so the route a player takes through a
+# stage cannot change the verdict — a property this gets for free, where the
+# scheme it replaced needed all 230 level names and a table of shared animal
+# rooms to reconstruct it from the outside.
+#
+# The quit case is declared first, because both rules watch the same edge and
+# the first match is the verdict.
+[[rule]]
+field = "in_stage"
+edge = "leaves"
+value = 0x00
+timed_to = "fade"
+if_marked = "paused"
+emit = "stage_exited"
+reason = "quit"
+log = "the fade began while paused, so this is a menu quit"
+
+[[rule]]
+field = "in_stage"
+edge = "leaves"
+value = 0x00
+timed_to = "fade"
+emit = "stage_cleared"
+
+# ------------------------------------------------------------------- stages
+
+[[stage]]
+id = "jungle-hijinx"
+name = "Jungle Hijinx"
+entry = { state = "assets/states/dkc_jungle-hijinxs.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "reptile-rumble"
+name = "Reptile Rumble"
+entry = { state = "assets/states/dkc_reptile-rumble.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "ropey-rampage"
+name = "Ropey Rampage"
+entry = { state = "assets/states/dkc_ropey-rampage.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "barrel-cannon-canyon"
+name = "Barrel Cannon Canyon"
+entry = { state = "assets/states/dkc_barrel-cannon-canyon.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "coral-capers"
+name = "Coral Capers"
+entry = { state = "assets/states/dkc_coral-capers.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "mine-cart-carnage"
+name = "Mine Cart Carnage"
+entry = { state = "assets/states/dkc_mine-cart-carnage.state" }
+challenges = ["endurance"]
+note = "forced-scrolling: everyone finishes in the same number of frames, so it cannot be a time trial"
+
+# ----------------------------------------------------- level names, for the log
+#
+# What the byte at $7E003E means, transcribed from the RainbowZ Editor's
+# `ROM.Level.cs`, where the array index *is* the level code. Nothing scores off
+# this any more — `in_stage` decides the verdict — but it is what makes a log
+# readable, and it used to be 347 lines of Rust for exactly the same reason.
+# See docs/games/dkc.md for which of the editor's two tables this is and why.
+
+[label.level_id]
+0x00 = "Jungle Hijinx (Reptile Rumble object map?)"
+0x01 = "Reptile Rumble (level start)"
+0x02 = "Reptile Rumble - Bonus 1"
+0x03 = "Bouncy Bonanza - Winky Room"
+0x04 = "Reptile Rumble - Bonus 3"
+0x05 = "Manic Mincers - Bonus 1"
+0x06 = "Jungle Hijinx - Bonus 1"
+0x07 = "Bouncy Bonanza (level start)"
+0x08 = "Jungle Hijinx (from Bonus 1)"
+0x09 = "Reptile Rumble (from Bonus 1)"
+0x0A = "Misty Mine (level start)"
+0x0B = "Reptile Rumble (from Bonus 3)"
+0x0C = "Ropey Rampage (level start)"
+0x0D = "Orang-utan Gang (level start)"
+0x0E = "Jungle Hijinx (from treehouse)"
+0x0F = "Ropey Rampage (from Save)"
+0x10 = "Bouncy Bonanza (from Winky Room)"
+0x11 = "Bouncy Bonanza - Bonus 2"
+0x12 = "Manic Mincers (level start)"
+0x13 = "Torchlight Trouble (from Save)"
+0x14 = "Torchlight Trouble (level start)"
+0x15 = "Bouncy Bonanza (from Save)"
+0x16 = "Jungle Hijinx (level start)"
+0x17 = "Barrel Cannon Canyon (level start)"
+0x18 = "Elevator Antics (level start)"
+0x19 = "Barrel Cannon Canyon (from Save)"
+0x1A = "Jungle Hijinx - Bonus 2"
+0x1B = "Ropey Rampage - Bonus 2"
+0x1C = "Ropey Rampage - Bonus 1"
+0x1D = "Orang-utan Gang (from Save)"
+0x1E = "Orang-utan Gang - Bonus 3"
+0x1F = "Orang-utan Gang - Bonus 2"
+0x20 = "Orang-utan Gang - Bonus 1"
+0x21 = "empty jungle room + boss music???"
+0x22 = "Poison Pond (level start)"
+0x23 = "Elevator Antics (from Save)"
+0x24 = "Snow Barrel Blast (level start)"
+0x25 = "Jungle Hijinx (from Save)"
+0x26 = "Reptile Rumble (from Save)"
+0x27 = "Mine Cart Madness (level start)"
+0x28 = "Snow Barrel Blast (from Save)"
+0x29 = "Manic Mincers (from Save)"
+0x2A = "Poison Pond (from Save)"
+0x2B = "Platform Perils (level start)"
+0x2C = "Platform Perils (from Save)"
+0x2D = "Misty Mine (from Save)"
+0x2E = "Mine Cart Carnage (level start)"
+0x2F = "Trick Track Trek (level start)"
+0x30 = "Tanked Up Trouble (level start)"
+0x31 = "Stop & Go Station (level start)"
+0x32 = "Misty Mine - Bonus 2"
+0x33 = "Misty Mine - Bonus 1"
+0x34 = "Animal Token Room"
+0x35 = "Millstone Mayhem (from warp)"
+0x36 = "Loopy Lights (level start)"
+0x37 = "Loopy Lights - Bonus 2"
+0x38 = "Mine Cart Carnage (from Save)"
+0x39 = "Trick Track Trek (from Save)"
+0x3A = "Tanked Up Trouble (from Save)"
+0x3B = "Mine Cart Madness (from Save)"
+0x3C = "Stop & Go Station (from Save)"
+0x3D = "Loopy Lights (from Save)"
+0x3E = "Croctopus Chase (level start)"
+0x3F = "Croctopus Chase (from Save)"
+0x40 = "Oil Drum Alley (level start)"
+0x41 = "Blackout Basement (level start)"
+0x42 = "Millstone Mayhem (level start)"
+0x43 = "Temple Tempest (level start)"
+0x44 = "Oil Drum Alley (from Save)"
+0x45 = "Blackout Basement (from Save)"
+0x46 = "Barrel Cannon Canyon - Bonus 1"
+0x47 = "Jungle Hijinx - Kong's Banana Hoard (empty)"
+0x48 = "Reptile Rumble - Bonus 2"
+0x49 = "Loopy Lights - Bonus 1"
+0x4A = "Stop & Go Station - Bonus 2"
+0x4B = "Stop & Go Station - Bonus 1"
+0x4C = "Jungle Hijinx - Kong's Banana Hoard (full)"
+0x4D = "Mine Cart Madness - Bonus 1"
+0x4E = "Platform Perils - Bonus 1"
+0x4F = "Winky's Walkway - Bonus 1"
+0x50 = "Platform Perils - Bonus 2"
+0x51 = "Winky's Walkway (from Bonus 1)"
+0x52 = "Temple Tempest - Bonus 1"
+0x53 = "Temple Tempest - Bonus 2"
+0x54 = "Tree Top Town (warp)"
+0x55 = "Millstone Mayhem - Bonus 1"
+0x56 = "Millstone Mayhem - Bonus 2"
+0x57 = "Millstone Mayhem - Bonus 3"
+0x58 = "Millstone Mayhem (from Save)"
+0x59 = "Temple Tempest (from Save)"
+0x5A = "Orang-utan Gang - Bonus 5"
+0x5B = "Orang-utan Gang - Bonus 4"
+0x5C = "Jungle Hijinx - Kong's Cabin"
+0x5D = "Barrel Cannon Canyon - Bonus 2"
+0x5E = "Credits"
+0x5F = "Jungle Hijinx (from Hoard)"
+0x60 = "Oil Drum Alley - Bonus 4"
+0x61 = "Oil Drum Alley - Bonus 2"
+0x62 = "Slipslide Ride (warp)"
+0x63 = "Oil Drum Alley - Bonus 1"
+0x64 = "Blackout Basement - Bonus 1"
+0x65 = "Vulture Culture (warp)"
+0x66 = "Snow Barrel Blast - Bonus 3"
+0x67 = "Snow Barrel Blast - Bonus 1"
+0x68 = "Gangplank Galleon"
+0x69 = "Snow Barrel Blast - Bonus 2"
+0x6A = "Ice Age Alley - Bonus 1"
+0x6B = "Ice Age Alley - Bonus 2"
+0x6C = "Expresso Bonus"
+0x6D = "Slipslide Ride (level start)"
+0x6E = "Jungle Hijinx (from Bonus 2)"
+0x6F = "Ropey Rampage (from Bonus 1)"
+0x70 = "Ropey Rampage (from Bonus 2)"
+0x71 = "Orang-utan Gang (from Bonus 4)"
+0x72 = "Orang-utan Gang (from Bonus 2)"
+0x73 = "Orang-utan Gang (from Bonus 1)"
+0x74 = "Orang-utan Gang (from Bonus 3)"
+0x75 = "Orang-utan Gang (from Bonus 5)"
+0x76 = "Barrel Cannon Canyon (from Bonus 1)"
+0x77 = "Barrel Cannon Canyon (from Bonus 2)"
+0x78 = "Bouncy Bonanza (from Bonus 1)"
+0x79 = "Bouncy Bonanza (from Bonus 2)"
+0x7A = "Manic Mincers (from Bonus 1)"
+0x7B = "Manic Mincers (from Ledge Room)"
+0x7C = "Manic Mincers (from Bonus 2)"
+0x7D = "Elevator Antics (from Bonus 1)"
+0x7E = "Elevator Antics (from Bonus 2)"
+0x7F = "Elevator Antics (from Bonus 3)"
+0x80 = "Misty Mine (from Bonus 1)"
+0x81 = "Misty Mine (from Bonus 2)"
+0x82 = "Stop & Go Station (from Bonus 1)"
+0x83 = "Stop & Go Station (from Bonus 2)"
+0x84 = "Loopy Lights (from Bonus 1)"
+0x85 = "Loopy Lights (from Bonus 2)"
+0x86 = "Platform Perils (from Bonus 1)"
+0x87 = "Platform Perils (from Bonus 2)"
+0x88 = "Trick Track Trek (from Bonus 1)"
+0x89 = "Trick Track Trek (from Bonus 3)"
+0x8A = "Trick Track Trek (from Bonus 2)"
+0x8B = "Tanked Up Trouble (from Bonus 1)"
+0x8C = "Mine Cart Madness (from Bonus 1)"
+0x8D = "Mine Cart Madness (from Bonus 2)"
+0x8E = "Mine Cart Madness (from Bonus 3)"
+0x8F = "Oil Drum Alley (from Bonus 1)"
+0x90 = "Oil Drum Alley (from Bonus 2/3)"
+0x91 = "Oil Drum Alley (from Bonus 4)"
+0x92 = "Blackout Basement (from Bonus 1)"
+0x93 = "Blackout Basement (from Bonus 2)"
+0x94 = "Snow Barrel Blast (from Bonus 1)"
+0x95 = "Snow Barrel Blast (from Bonus 2)"
+0x96 = "Snow Barrel Blast (from Bonus 3)"
+0x97 = "Bouncy Bonanza - Bonus 1"
+0x98 = "Manic Mincers - Bonus 2"
+0x99 = "Manic Mincers - Ledge Room"
+0x9A = "Elevator Antics - Bonus 1"
+0x9B = "Elevator Antics - Bonus 2"
+0x9C = "Elevator Antics - Bonus 3"
+0x9D = "Trick Track Trek - Bonus 3"
+0x9E = "Trick Track Trek - Bonus 2"
+0x9F = "Tanked Up Trouble - Bonus 1"
+0xA0 = "Mine Cart Madness - Bonus 2"
+0xA1 = "Trick Track Trek - Bonus 1"
+0xA2 = "Mine Cart Madness - Bonus 3"
+0xA3 = "Blackout Basement - Bonus 2"
+0xA4 = "Tree Top Town (level start)"
+0xA5 = "Vulture Culture (level start)"
+0xA6 = "Enguarde Bonus"
+0xA7 = "Ice Age Alley (level start)"
+0xA8 = "Ice Age Alley (from Save)"
+0xA9 = "Tree Top Town (from Save)"
+0xAA = "Vulture Culture (from Save)"
+0xAB = "Slipslide Ride (from Save)"
+0xAC = "Ice Age Alley (from Bonus 1)"
+0xAD = "Ice Age Alley (from Bonus 2)"
+0xAE = "Millstone Mayhem (from Bonus 1)"
+0xAF = "Millstone Mayhem (from Bonus 2)"
+0xB0 = "Millstone Mayhem (from Bonus 3)"
+0xB1 = "Temple Tempest (from Bonus 1)"
+0xB2 = "Temple Tempest (from Bonus 2)"
+0xB3 = "Tree Top Town - Bonus 2"
+0xB4 = "Tree Top Town - Bonus 1"
+0xB5 = "Tree Top Town (from Bonus 1)"
+0xB6 = "Tree Top Town (from Bonus 2)"
+0xB7 = "Vulture Culture - Bonus 1"
+0xB8 = "Vulture Culture - Bonus 2"
+0xB9 = "Vulture Culture - Bonus 3"
+0xBA = "Vulture Culture (from Bonus 1)"
+0xBB = "Vulture Culture (from Bonus 2)"
+0xBC = "Vulture Culture (from Bonus 3)"
+0xBD = "Trick Track Trek (warp)"
+0xBE = "Oil Drum Alley - Bonus 3"
+0xBF = "Coral Capers (level start)"
+0xC0 = "Coral Capers (from Save)"
+0xC1 = "Torchlight Trouble - Bonus 1"
+0xC2 = "Torchlight Trouble (from Bonus 1)"
+0xC3 = "Torchlight Trouble - Bonus 2"
+0xC4 = "Torchlight Trouble (from Bonus 2)"
+0xC5 = "Slipslide Ride - Bonus 2"
+0xC6 = "Slipslide Ride - Bonus 3"
+0xC7 = "Slipslide Ride (from Bonus 1)"
+0xC8 = "Slipslide Ride (from Bonus 2)"
+0xC9 = "Reptile Rumble (from Bonus 2)"
+0xCA = "Slipslide Ride - Bonus 1"
+0xCB = "Slipslide Ride (from Bonus 3)"
+0xCC = "Mine Cart Carnage (warp)"
+0xCD = "Stop & Go Station (warp)"
+0xCE = "Rope Bridge Rumble (level start)"
+0xCF = "Rope Bridge Rumble (from Save)"
+0xD0 = "Forest Frenzy (level start)"
+0xD1 = "Forest Frenzy (from Save)"
+0xD2 = "Rambi Bonus"
+0xD3 = "Winky Bonus"
+0xD4 = "Forest Frenzy - Bonus 2"
+0xD5 = "Rope Bridge Rumble - Bonus 1"
+0xD6 = "Rope Bridge Rumble (from Bonus 2)"
+0xD7 = "Rope Bridge Rumble - Bonus 2"
+0xD8 = "Rope Bridge Rumble (from Bonus 1)"
+0xD9 = "Winky's Walkway (level start)"
+0xDA = "Winky's Walkway (from Save)"
+0xDB = "Forest Frenzy (from Bonus 2)"
+0xDC = "Forest Frenzy - Bonus 1"
+0xDD = "Forest Frenzy (from Bonus 1)"
+0xDE = "Clam City (level start)"
+0xDF = "Clam City (from Save)"
+0xE0 = "Very Gnawty's Lair"
+0xE1 = "Necky's Nuts"
+0xE2 = "Really Gnawty Rampage"
+0xE3 = "Boss Dumb Drum"
+0xE4 = "Necky's Revenge"
+0xE5 = "Bumble B Rumble"

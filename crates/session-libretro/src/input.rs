@@ -1,31 +1,44 @@
 //! Keyboard and gamepad collapsed into one libretro joypad bitmask.
 //!
-//! Port 0 only. Phase 1 has one local player.
+//! Port 0 only; one local player.
+//!
+//! The libretro joypad layout *is* the SNES pad, so all twelve ids are always
+//! mapped and a NES core simply ignores the four it does not have. The one
+//! thing a manifest picks is how a modern controller's face diamond lands on
+//! it — see [`PadLayout`] — because that is a genuine difference between the
+//! two consoles rather than a preference: a two-button game wants both the "A
+//! is on the right" and "A is on the bottom" habits to work, and a four-button
+//! game cannot have that, because every position is already taken.
 
 use gilrs::{Axis, Button, Gilrs};
 use minifb::{Key, Window};
 
-use crate::libretro::{JOY_A, JOY_B, JOY_DOWN, JOY_LEFT, JOY_RIGHT, JOY_SELECT, JOY_START, JOY_UP};
+use crate::libretro::{
+    JOY_A, JOY_B, JOY_DOWN, JOY_L, JOY_LEFT, JOY_R, JOY_RIGHT, JOY_SELECT, JOY_START, JOY_UP,
+    JOY_X, JOY_Y,
+};
+use crate::manifest::PadLayout;
 
 /// Past this, a stick counts as a d-pad press.
 const STICK_DEADZONE: f32 = 0.5;
 
 pub struct Pads {
     gilrs: Option<Gilrs>,
+    layout: PadLayout,
 }
 
 impl Pads {
-    pub fn new() -> Self {
+    pub fn new(layout: PadLayout) -> Self {
         match Gilrs::new() {
             Ok(g) => {
                 for (_id, pad) in g.gamepads() {
                     println!("[input] gamepad: {}", pad.name());
                 }
-                Pads { gilrs: Some(g) }
+                Pads { gilrs: Some(g), layout }
             }
             Err(e) => {
                 eprintln!("[input] no gamepad support ({e}); keyboard only");
-                Pads { gilrs: None }
+                Pads { gilrs: None, layout }
             }
         }
     }
@@ -48,10 +61,25 @@ impl Pads {
             if !pad.is_connected() {
                 continue;
             }
-            // South/East as A and West/North as B, so both the "A is on the
-            // right" and "A is on the bottom" habits work without remapping.
-            set(&mut bits, JOY_A, pad.is_pressed(Button::South) || pad.is_pressed(Button::East));
-            set(&mut bits, JOY_B, pad.is_pressed(Button::West) || pad.is_pressed(Button::North));
+            match self.layout {
+                // Two face buttons, so South *or* East is A and West *or*
+                // North is B, and neither habit needs remapping.
+                PadLayout::Nes => {
+                    set(&mut bits, JOY_A, pad.is_pressed(Button::South) || pad.is_pressed(Button::East));
+                    set(&mut bits, JOY_B, pad.is_pressed(Button::West) || pad.is_pressed(Button::North));
+                }
+                // The SNES pad has the same diamond every modern pad has, so
+                // the mapping is positional and every button is where the
+                // original hardware had it.
+                PadLayout::Snes => {
+                    set(&mut bits, JOY_B, pad.is_pressed(Button::South));
+                    set(&mut bits, JOY_A, pad.is_pressed(Button::East));
+                    set(&mut bits, JOY_Y, pad.is_pressed(Button::West));
+                    set(&mut bits, JOY_X, pad.is_pressed(Button::North));
+                    set(&mut bits, JOY_L, pad.is_pressed(Button::LeftTrigger));
+                    set(&mut bits, JOY_R, pad.is_pressed(Button::RightTrigger));
+                }
+            }
             set(&mut bits, JOY_START, pad.is_pressed(Button::Start));
             set(&mut bits, JOY_SELECT, pad.is_pressed(Button::Select));
 
@@ -66,6 +94,8 @@ impl Pads {
     }
 }
 
+/// The keyboard mapping does not vary by layout: Z/X are B/A on both consoles,
+/// and A/S/Q/W simply do nothing on a NES core.
 pub fn keyboard(window: &Window) -> u32 {
     let mut bits = 0u32;
     set(&mut bits, JOY_UP, window.is_key_down(Key::Up));
@@ -74,6 +104,10 @@ pub fn keyboard(window: &Window) -> u32 {
     set(&mut bits, JOY_RIGHT, window.is_key_down(Key::Right));
     set(&mut bits, JOY_B, window.is_key_down(Key::Z));
     set(&mut bits, JOY_A, window.is_key_down(Key::X));
+    set(&mut bits, JOY_Y, window.is_key_down(Key::A));
+    set(&mut bits, JOY_X, window.is_key_down(Key::S));
+    set(&mut bits, JOY_L, window.is_key_down(Key::Q));
+    set(&mut bits, JOY_R, window.is_key_down(Key::W));
     set(&mut bits, JOY_START, window.is_key_down(Key::Enter));
     set(&mut bits, JOY_SELECT, window.is_key_down(Key::RightShift));
     bits

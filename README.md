@@ -24,6 +24,12 @@ Vertical slice, in progress: a fully playable version with a three-game library 
 Super Mario Bros. 3 (NES), Donkey Kong Country (SNES), and Doom (PC). Players
 supply their own ROMs; the client verifies them by hash.
 
-Currently in Phase 2, a second single-game libretro harness. See `CLAUDE.md` for the
-crate layout and the invariants, and `docs/adr/` for why the architecture is the
-way it is — start with `docs/adr/README.md`.
+Phase 2 is done: the two single-game harnesses became one libretro adapter plus
+two game manifests, and adding a libretro game is now a TOML file rather than a
+crate. See `docs/manifest-schema.md` for what that file contains, `CLAUDE.md`
+for the crate layout and the invariants, and `docs/adr/` for why the
+architecture is the way it is — start with `docs/adr/README.md`.
+
+```sh
+cargo run --release -p session-libretro --bin harness -- --game dkc --stage jungle-hijinx
+```

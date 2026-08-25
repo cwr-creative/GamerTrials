@@ -1,0 +1,208 @@
+# Super Mario Bros. 3 (NES).
+#
+# Everything this project knows about SMB3. The harness that used to hold it
+# was ~900 lines of Rust; this file replaced all of it (invariant 5). The
+# schema is documented in docs/manifest-schema.md, and the address provenance
+# — which of these are playtested and which are only documented — is in
+# docs/games/smb3.md.
+
+schema_version = 1
+
+[game]
+id = "smb3"
+title = "Super Mario Bros. 3"
+console = "nes"
+region = "usa"
+# NTSC NES. Every duration a challenge authors in seconds is converted at this
+# rate, once, at load.
+framerate = 60.0988
+
+[rom]
+name = "Super Mario Bros. 3 (USA) (Rev 1)"
+path = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
+header = "ines"
+# sha1 is deliberately absent: no hash has been taken against a verified dump.
+# `asset-store` will require one before a ROM can be accepted from a player.
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+core_dir = "cores"
+pad_layout = "nes"
+
+[runner.libretro.memory]
+# NES CPU addresses. Internal RAM is $0000-$07FF and arrives as system RAM.
+base = 0x0000
+size = 0x0800
+system_ram_bytes = 2048
+default_width = "u8"
+# The map first, and this is load-bearing rather than a preference: the card
+# counter at $7D9C is in cartridge WRAM, Mesen does not publish that as save
+# RAM (it is not battery-backed on this cart), and the memory map the core
+# publishes through SET_MEMORY_MAPS is the only route to it. A core that
+# publishes no map still resolves $0000-$07FF through the fallback, and
+# startup says which addresses went unreadable.
+prefer = "memory_map"
+
+# ---------------------------------------------------------------- what to read
+
+[watch.return_to_map]
+at = 0x0014
+note = "verified: flag to return to the map"
+
+[watch.map_y]
+at = 0x0078
+note = "verified: map position, half of the level id"
+
+[watch.map_x]
+at = 0x0079
+note = "verified: map position, half of the level id"
+
+[watch.object_set]
+at = 0x070A
+note = "verified: level object set"
+
+[watch.world]
+at = 0x0727
+note = "verified: world - 1, so world 1 reads 0"
+
+[watch.lives]
+at = 0x0736
+note = "verified: Mario lives"
+
+[watch.powerup]
+at = 0x0578
+note = "Data Crystal: powerup/form. Not playtested here"
+
+[watch.hit_timer]
+at = 0x0552
+note = "Data Crystal: hit-invulnerability timer. Not playtested here"
+
+[watch.pipe_timer]
+at = 0x0510
+note = "Data Crystal: pipe transit countdown. Not playtested here"
+
+[watch.stomp_counter]
+at = 0x05F4
+note = "Data Crystal: stomp kills only - fireball/shell/star do not touch it"
+
+[watch.cards]
+at = 0x7D9C
+note = "verified: card count, in cartridge WRAM. Needs the core's memory map"
+
+# $0727 holds world - 1, and a manifest does no arithmetic on purpose — a rule
+# language that could add one to a byte would be a rule language that could do
+# anything. A label says what the byte means instead, which is the same
+# information and stays readable next to the raw value.
+[label.world]
+0x00 = "world 1"
+0x01 = "world 2"
+0x02 = "world 3"
+0x03 = "world 4"
+0x04 = "world 5"
+0x05 = "world 6"
+0x06 = "world 7"
+0x07 = "world 8"
+
+[label.powerup]
+0x00 = "small"
+0x01 = "super"
+0x02 = "fire"
+0x03 = "raccoon"
+0x04 = "frog"
+0x05 = "tanooki"
+0x06 = "hammer"
+
+[display]
+fields = ["world", "map_x", "map_y", "object_set", "lives", "powerup", "cards"]
+
+# --------------------------------------------------------------- what it means
+
+# A card is an early, unambiguous win signal for the levels that award one. It
+# fires seconds before $0014 moves — 348 frames, measured — and it never fires
+# on a death, so there is no lives check to disambiguate it. Declared first, so
+# that on a frame where both could fire, the card is the verdict.
+[[rule]]
+field = "cards"
+edge = "increases"
+emit = "stage_cleared"
+log = "a card was awarded"
+
+# A decrease in lives means the player died
+[[rule]]
+field = "lives"
+edge = "decreases"
+emit = "died"
+log = "you suck at mario 3"
+
+# Everything else that leaves the level. $0014 alone cannot tell a death from a
+# card-less level (fortress, castle, airship) cleared normally, so the reason is
+# `unknown` and it is honestly unknown — not a placeholder. ADR 0014 is where
+# that gap has to be closed.
+[[rule]]
+field = "return_to_map"
+edge = "leaves"
+value = 0
+emit = "stage_exited"
+reason = "unknown"
+log = "no card was seen: this is a death, or a card-less level cleared"
+
+[[rule]]
+field = "hit_timer"
+edge = "leaves"
+value = 0
+emit = "damaged"
+
+[[rule]]
+field = "stomp_counter"
+edge = "increases"
+emit = "enemy_defeated"
+log = "stomps only; a fireball or shell kill does not count here"
+
+[[rule]]
+field = "powerup"
+edge = "changes"
+emit = "note"
+log = "powerup/form changed"
+
+
+# The flag clearing again means the hand-off to the map has finished, so the
+# next attempt gets a clean slate. Without this the verdict latches for the
+# whole process: one card early in a run would silence every later death, which
+# is a bug this project has already shipped once.
+[[attempt.reset_on]]
+field = "return_to_map"
+edge = "enters"
+value = 0
+
+# ------------------------------------------------------------------- stages
+
+# The stage a state drops you into is known from the entry point that put you
+# there, never read out of RAM. SMB3 has no "current level number" at all: a
+# level is identified by the map tile you entered from.
+
+[[stage]]
+id = "1-1"
+name = "World 1-1"
+entry = { state = "assets/states/smb3_1-1.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "1-2"
+name = "World 1-2"
+entry = { state = "assets/states/smb3_1-2.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "1-3"
+name = "World 1-3"
+entry = { state = "assets/states/smb3_1-3.state" }
+challenges = ["time_trial", "endurance"]
+
+[[stage]]
+id = "1-4"
+name = "World 1-4"
+entry = { state = "assets/states/smb3_1-4.state" }
+challenges = ["endurance"]
+note = "forced-scrolling: everyone finishes in the same number of frames, so it cannot be a time trial"

@@ -1,22 +1,23 @@
-# dkc-harness
+# Donkey Kong Country (SNES)
 
-Phase 2, first half. Loads a SNES libretro core directly (ADR 0001), runs
-Donkey Kong Country in a window with sound and a gamepad, enters a stage from a
-savestate, watches RAM for death / damage / stage clear / enemy kills / items,
-and prints what it sees.
+The manifest is [`manifests/dkc.toml`](../../manifests/dkc.toml). This document
+is the part that does not belong in it: where each address came from, what is
+playtested and what is only documented, and the reasoning behind the completion
+rule.
 
-This is the *second* single-game harness. It is deliberately written as a
-sibling of `smb3-harness` rather than on top of it: ADR 0012 says the
-`StageRunner` interface gets extracted once two independent implementations
-exist to read it off. Merging the two is the next job, not this one.
+This used to be `crates/dkc-harness`, written as a deliberate sibling of the
+SMB3 harness so that ADR 0012's interface could be read off two independent
+implementations rather than guessed at from one. ADR 0016 is what came of that
+comparison: both harnesses' game knowledge is now data, and the code that runs
+it is `session-libretro`, which has no idea which game it is running.
 
-**Barely any of this has been playtested.** What has changed is the *sourcing*:
-almost every address now has a second, independent origin in the
+**Barely any of this has been playtested.** What is good about the sourcing is
+that almost every address has a second, independent origin in the
 RetroAchievements code notes for DKC, transcribed in
-[RA-CODE-NOTES.md](RA-CODE-NOTES.md). Notes written by achievement authors
-against running code are much better evidence than the wikis the first pass
-relied on, several of which could not be reached at all. They are still not a
-playtest — see "Verifying the addresses" below.
+[dkc-ra-code-notes.md](dkc-ra-code-notes.md). Notes written by achievement
+authors against running code are much better evidence than the wikis the first
+pass relied on, several of which could not be reached at all. They are still not
+a playtest — see "Verifying the addresses" below.
 
 ## Prerequisites
 
@@ -32,8 +33,8 @@ playtest — see "Verifying the addresses" below.
    <https://buildbot.libretro.com/nightly/windows/x86_64/latest/>.
 
    The SNES core lives in its own folder rather than in `cores/` alongside the
-   NES core, so "the single `*_libretro.dll`" stays unambiguous now that there
-   are two harnesses.
+   NES core, so "the single `*_libretro.dll`" stays unambiguous now that the
+   library has two consoles in it. That folder is the manifest's `core_dir`.
 3. **The ROM**, at `assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc`.
    Any revision will run, but the addresses below were reported against the US
    1.0 ROM, so a different revision is one more reason for a value to read
@@ -43,7 +44,13 @@ playtest — see "Verifying the addresses" below.
 ## Run
 
 ```sh
-cargo run --release -p dkc-harness
+cargo run --release -p session-libretro --bin harness -- --game dkc --stage jungle-hijinx
+
+# what stages there are
+cargo run --release -p session-libretro --bin harness -- --game dkc --list-stages
+
+# 600 frames with no window, for checking a rule against the real ROM
+cargo run --release -p session-libretro --bin harness -- --game dkc --frames 600
 ```
 
 Use `--release`. The debug build compares 128 KB of RAM every frame for the
@@ -63,14 +70,14 @@ probe and does not hold 60 fps.
 
 Plus the RAM discovery keys, which are the subject of their own section below.
 
-## Launching from a savestate
+## Entering a stage
 
-```sh
-cargo run --release -p dkc-harness -- --state assets/states/dkc_jungle-hijinxs.state
-```
+`--stage <id>` picks one of the entry points the manifest declares; `--state
+<path>` overrides it with a file directly, which is how a new one gets
+authored (F1 saves to whichever of the two is in play).
 
-Frame counting restarts at 0 every time a state loads, so the number in
-`STAGE COMPLETE at frame N` is frames since stage entry — not since launch.
+Frame counting restarts at 0 every time the stage is entered, so the number in
+`STAGE CLEARED at frame N` is frames since stage entry — not since launch.
 That is what makes two players comparable (ADR 0005).
 
 The stage label comes from the savestate filename, not from RAM. Stage identity
@@ -84,8 +91,8 @@ Every default is printed at startup with where it came from, and every one can
 be retargeted without a rebuild:
 
 ```sh
-cargo run --release -p dkc-harness -- --list-addrs
-cargo run --release -p dkc-harness -- --addr lives=0x7E08A6 --addr hit_timer=0x08A5:u8
+harness --game dkc --list-addrs
+harness --game dkc --addr lives=0x7E08A6 --addr hit_timer=0x08A5:u8
 ```
 
 (`--dump-memory-map` is the companion to these: it says which regions exist to
@@ -131,13 +138,15 @@ in the low byte), but a 16-bit `kong_letters` read was dragging in `$0580`.
 They are still reachable with `--addr`, but the defaults are now the attested
 `$005E` / `$0060`, and `$0FC3` / `$0FF7` are carried alongside as `dk_x` /
 `dk_y` so a playtest can see both at once and settle which one progress should
-be measured from. Note that [PROGRESS-HANDOFF.md](PROGRESS-HANDOFF.md) is
-written against `$0B19`, which makes it the least trustworthy document here.
+be measured from. Note that PROGRESS-HANDOFF.md — referenced here and in
+"Partial progress within a stage" below — is written against `$0B19`, which
+would make it the least trustworthy document here **if it still existed**; it is
+not in the repository, so what is left of it is the summary below.
 
 If a value still reads wrong, sweep its neighbourhood:
 
 ```sh
-cargo run --release -p dkc-harness -- --watch 0x0570-0x05a0
+harness --game dkc --watch 0x0570-0x05a0
 ```
 
 Every watched address prints on change with its frame number, and `--watch`
@@ -145,8 +154,8 @@ takes ranges as well as single addresses.
 
 ## Finding an address nobody wrote down
 
-**Look in [RA-CODE-NOTES.md](RA-CODE-NOTES.md) first.** 134 addresses for DKC,
-already in the offset form `--addr` takes. Most of what this section was
+**Look in [dkc-ra-code-notes.md](dkc-ra-code-notes.md) first.** 134 addresses
+for DKC, already in the offset form `--addr` takes. Most of what this section was
 written to find turned out to be in there.
 
 For what is not: `--watch` over a range is how the NES harness hunted for a
@@ -198,7 +207,8 @@ thousands.
 Costs about 2.3 MB and a full RAM compare per frame. `--no-probe` turns it off.
 
 Every address the harness prints is in `$7Exxxx` form, ready to paste into
-`--addr` or `--watch`.
+`--addr` or `--watch`. That is the manifest's `base = 0x7E0000` doing the work:
+`0x0527` and `0x7E0527` are the same byte written two ways, and both parse.
 
 ## Stage completion
 
@@ -221,13 +231,13 @@ bit 6 was set *at the moment the fade began* — by the time the map is up the
 menu is long gone — and scores a paused fade as `StageFailed { Quit }`.
 
 ```
-[ram] frame 1  in-stage  level 8  room 8  lives 6  bananas 59  KONG -ON-  2 kongs  fade 00  at (5376,503)
-[stage] entered at 0x08 Jungle Hijinx (from Bonus 1) — in `Jungle Hijinx`
-[event] frame 1442  FADE  00 -> 82
-[stage] level 0x08 Jungle Hijinx (from Bonus 1) -> 0x06 Jungle Hijinx - Bonus 1
-[event] frame 4780  FADE  00 -> 82
-[stage] left the stage: in_stage 00 -> 01
-STAGE COMPLETE at frame 4780
+[stage] entered jungle-hijinx from assets/states/dkc_jungle-hijinxs.state
+[ram] frame 1  in_stage 0 (in a stage)  level_id 8 (Jungle Hijinx (from Bonus 1))  ...
+[event] frame 1442  FADE
+[ram] frame 1450  in_stage 0 (in a stage)  level_id 6 (Jungle Hijinx - Bonus 1)  ...
+[event] frame 4780  FADE
+[event] frame 4810  STAGE CLEARED  in_stage 0 -> 1 (overworld)  (timed to frame 4780)
+STAGE CLEARED at frame 4780
 ```
 
 ### What this replaced, and why
@@ -243,9 +253,9 @@ clear was claimed for it.
 
 Route-independence was the property that scheme existed to buy, and the new
 rule has it for free rather than by construction — bonus rooms are not special
-cases any more, they are simply not exits. `levels.rs` keeps its table for
-naming and grouping in the log; `is_side_room` is gone, because the hole it
-patched no longer exists.
+cases any more, they are simply not exits. The 230-name table survives as
+`[label.level_id]` in the manifest, for naming in the log only; `is_side_room`
+is gone, because the hole it patched no longer exists.
 
 Cases still covered by tests:
 
@@ -259,6 +269,7 @@ Cases still covered by tests:
   same frame (this ordering was a real bug the tests caught).
 - Reaching the map twice — reported once.
 - No `in_stage` address — no completion detector at all, rather than a guess.
+  (`--addr in_stage=off` is how that case is reproduced.)
 
 Death is independent of all of it: a decrease in `lives` at `$7E0575`.
 
@@ -306,7 +317,7 @@ stage state.
 ### What a core actually publishes
 
 ```sh
-cargo run --release -p dkc-harness -- --dump-memory-map
+harness --game dkc --dump-memory-map
 ```
 
 Lists both routes — all four `retro_get_memory_data` ids and every
@@ -341,12 +352,14 @@ try, and it is not in `cores/snes/`.
 ## Tests
 
 ```sh
-cargo test -p dkc-harness
+cargo test -p session-libretro
 ```
 
-The watcher and both discovery tools are unit-tested against synthetic WRAM
-buffers, so they need no ROM, no core and no savestate. Anything needing a real
-ROM stays a manual test.
+Every behavioural test the old harness had lives in
+`crates/session-libretro/src/manifest_tests.rs`, driving *this manifest* rather
+than a fixture — so if `manifests/dkc.toml` stops expressing "a bonus room is
+not a clear", they fail. They need no ROM, no core and no savestate. Anything
+needing a real ROM is a manual test, or `--frames`.
 
 The tests worth reading first are the stage-boundary ones:
 `the_verdict_does_not_depend_on_the_route` (two routes through one stage, same
@@ -359,38 +372,47 @@ a real ordering bug, where a stale fade blocked a fresh one arriving on the
 same frame. They walk real level codes even though the codes no longer decide
 anything, so the routes are the ones a player would take.
 
-`levels.rs` has its own tests pinning the transcription: spot-checked names at
-known codes, and that every Jungle Hijinx entrance and sub-room resolves to one
-family.
+The level table keeps a transcription test —
+`the_dkc_level_table_survived_the_move_into_the_manifest` — spot-checking names
+at known codes. What did *not* survive the move is the "family" test, because
+`family()` supported the completion rule that `in_stage` replaced.
 
 ## Partial progress within a stage
 
-Not implemented. The groundwork is written up in
-[PROGRESS-HANDOFF.md](PROGRESS-HANDOFF.md): DKC keeps per-level X bounds in a
-ROM table indexed by the level code, the lookup is verified against the real
-ROM, and player X is at `$7E0B19`.
+Not implemented, and there is nothing in the schema for it — no `emit` reports
+progress, because nobody has settled what it would be measured from.
 
-**Read that file with the address caveat in mind.** `$7E0B19` has no RA code
-note, and the attested position addresses are `$7E005E` (active character) and
-`$7E0FC3` (DK specifically). The ROM-table half of that document is unaffected —
-it is a property of the ROM — but the RAM half needs re-checking against
-`player_x` and `dk_x`, which the harness now carries side by side for exactly
-this reason.
+The groundwork was written up in a PROGRESS-HANDOFF.md that is **no longer in
+the repository**; what it recorded was that DKC keeps per-level X bounds in a
+ROM table indexed by the level code, that the lookup was verified against the
+real ROM, and that it took player X to be at `$7E0B19`.
 
-## Deliberately absent
+**Read that last part with the address caveat in mind.** `$7E0B19` has no RA
+code note, and the attested position addresses are `$7E005E` (active character)
+and `$7E0FC3` (DK specifically). The ROM-table half is unaffected — it is a
+property of the ROM — but the RAM half needs re-checking against `player_x` and
+`dk_x`, which the manifest carries side by side for exactly this reason.
 
-No `StageRunner`, no traits, no manifest, no config files. This crate and
-`smb3-harness` duplicate their libretro FFI, audio and input layers on purpose;
-that duplication is the raw material for the extraction, and deleting it early
-would mean guessing at the interface instead of reading it (ADR 0012).
+Whatever it turns into will need a new `emit` kind and a `SessionEvent` to go
+with it, which makes it a change to `session-api` and not only to a manifest.
 
-## Notes for future manifest
+## Stages
 
-No savestates exist yet. Once they do, the same shape as the SMB3 notes applies:
-one state per stage entry point, each recording whether the stage is viable as a
-time trial, an endurance run, or both.
+Six entry points. All are cleared by the same rule — `in_stage` leaving `0x00`,
+timed to the fade — which answers the open question this section used to end on:
+**stage completion needs nothing per-stage from the manifest.** One rule covers
+every level in the game. If a stage ever seems to need its own completion flag,
+that is evidence the general rule is wrong rather than a reason to add a
+per-stage override (see "Deliberately absent" in `docs/manifest-schema.md`).
 
-Stage completion still needs **nothing** from the manifest, and needs less than
-it did: `$7E0527` is one address for every stage in the game, so not even the
-level table is load-bearing any more. Invariant 5 holds — adding a stage stays
-a data change.
+| Stage | Challenges |
+|---|---|
+| `jungle-hijinx` | time trial, endurance |
+| `reptile-rumble` | time trial, endurance |
+| `ropey-rampage` | time trial, endurance |
+| `barrel-cannon-canyon` | time trial, endurance |
+| `coral-capers` | time trial, endurance |
+| `mine-cart-carnage` | endurance only — forced-scrolling, so everyone finishes in the same number of frames |
+
+That constraint is in the manifest now (`challenges = ["endurance"]`), not in
+this document's prose.

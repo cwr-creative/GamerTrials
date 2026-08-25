@@ -53,9 +53,11 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0012 | Extract the StageRunner interface in Phase 2, not Phase 1 | Accepted |
 | 0013 | Generate stage content on each client from a server-issued seed | Proposed |
 | 0014 | Detect stage completion and death by watching emulator RAM | Proposed |
+| 0015 | Scope custom-challenge ROM generation to declarative value-substitution patches | Accepted |
+| 0016 | Describe game telemetry as declarative RAM rules in the manifest | Accepted |
 
-0003 and 0013 are written up; 0003 is the exemplar. Fill in the rest as you
-implement each area; an unwritten ADR is fine, a wrong one is not.
+0003, 0013, 0015 and 0016 are written up; 0003 is the exemplar. Fill in the rest as
+you implement each area; an unwritten ADR is fine, a wrong one is not.
 
 ## Notes on a few unwritten ones
 
@@ -80,7 +82,12 @@ Selective use only, for mature titles. Record the framerate-locking requirement.
 **0012** — Records *when* to abstract, not *what*. Included because the reasoning
 generalises: build the second implementation before extracting the interface.
 
-**0014** — Endurance challenges ("survive without dying") and time trials
+**0014** — Half of it is now built and written down elsewhere: 0016 settles how
+RAM watching is *expressed*, and `docs/manifest-schema.md` is the schema. What
+0014 still owes is the part 0016 does not touch — what an external-process
+adapter does instead.
+
+Endurance challenges ("survive without dying") and time trials
 ("reach the end point") both need the runner to recognise events the game never
 announces. The presumed answer is watching emulator RAM with RetroAchievements-
 style memory maps, which is also the reuse argument 0007 leans on — but it has to

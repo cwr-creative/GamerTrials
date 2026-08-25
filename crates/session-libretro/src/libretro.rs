@@ -1,5 +1,12 @@
 //! Raw libretro FFI plus a `Core` that loads a core DLL directly (ADR 0001).
 //!
+//! This is the merge of the two harnesses' copies. They turned out to differ
+//! by four joypad button ids, three environment calls SNES cores make, and a
+//! richer record of what `SET_MEMORY_MAPS` published — all of it additive, so
+//! the union is what both consoles now run. Nothing in here is per-game or
+//! per-core: what differs between games is which regions they read, and that
+//! lives in `memory.rs` and the manifest.
+//!
 //! libretro callbacks are bare `extern "C"` function pointers with no user data,
 //! so frontend state has to be global. It lives in the statics below. Everything
 //! except the audio drain runs on the emulator thread.
@@ -17,10 +24,35 @@ use libloading::{Library, Symbol};
 pub const RETRO_DEVICE_JOYPAD: u32 = 1;
 
 pub const RETRO_MEMORY_SAVE_RAM: u32 = 0;
+pub const RETRO_MEMORY_RTC: u32 = 1;
 pub const RETRO_MEMORY_SYSTEM_RAM: u32 = 2;
+pub const RETRO_MEMORY_VIDEO_RAM: u32 = 3;
 
-// Joypad button ids, in libretro order.
+/// Every id `retro_get_memory_data` takes, with a printable name. `VIDEO_RAM`
+/// is the interesting one for this harness: a core that answers there is
+/// offering VRAM/OAM/CGRAM, which is where the sprite table lives.
+pub const RETRO_MEMORY_IDS: [(u32, &str); 4] = [
+    (RETRO_MEMORY_SAVE_RAM, "SAVE_RAM"),
+    (RETRO_MEMORY_RTC, "RTC"),
+    (RETRO_MEMORY_SYSTEM_RAM, "SYSTEM_RAM"),
+    (RETRO_MEMORY_VIDEO_RAM, "VIDEO_RAM"),
+];
+
+// Descriptor flags, from libretro.h. The ALIGN/MINSIZE fields are two-bit
+// values shifted up, not single bits, which is why they are masked below
+// rather than tested.
+const MEMDESC_CONST: u64 = 1 << 0;
+const MEMDESC_BIGENDIAN: u64 = 1 << 1;
+const MEMDESC_SYSTEM_RAM: u64 = 1 << 2;
+const MEMDESC_SAVE_RAM: u64 = 1 << 3;
+const MEMDESC_VIDEO_RAM: u64 = 1 << 4;
+const MEMDESC_ALIGN_SHIFT: u32 = 16;
+const MEMDESC_MINSIZE_SHIFT: u32 = 24;
+
+// Joypad button ids, in libretro order. The libretro layout *is* the SNES pad,
+// so unlike the NES harness every id here is used.
 pub const JOY_B: u32 = 0;
+pub const JOY_Y: u32 = 1;
 pub const JOY_SELECT: u32 = 2;
 pub const JOY_START: u32 = 3;
 pub const JOY_UP: u32 = 4;
@@ -28,8 +60,9 @@ pub const JOY_DOWN: u32 = 5;
 pub const JOY_LEFT: u32 = 6;
 pub const JOY_RIGHT: u32 = 7;
 pub const JOY_A: u32 = 8;
-// Ids 1 (Y) and 9 (X) exist in the libretro layout but the NES has no such
-// buttons, so nothing maps to them.
+pub const JOY_X: u32 = 9;
+pub const JOY_L: u32 = 10;
+pub const JOY_R: u32 = 11;
 /// Cores that negotiated GET_INPUT_BITMASKS ask for every button at once.
 const JOY_MASK: u32 = 256;
 
@@ -49,11 +82,22 @@ const ENV_SET_VARIABLES: u32 = 16;
 const ENV_GET_VARIABLE_UPDATE: u32 = 17;
 const ENV_SET_SUPPORT_NO_GAME: u32 = 18;
 const ENV_GET_SAVE_DIRECTORY: u32 = 31;
+const ENV_SET_SUBSYSTEM_INFO: u32 = 34;
 const ENV_SET_CONTROLLER_INFO: u32 = 35;
-/// `36 | RETRO_ENVIRONMENT_EXPERIMENTAL(0x10000)`. Mesen publishes the whole
-/// NES address space here, including the $6000-$7FFF cartridge WRAM that it
-/// does not expose as `RETRO_MEMORY_SAVE_RAM`.
+/// `36 | RETRO_ENVIRONMENT_EXPERIMENTAL(0x10000)`. Not load-bearing here the
+/// way it is on the NES side: snes9x exposes all 128 KB of WRAM through
+/// `RETRO_MEMORY_SYSTEM_RAM`, and every address this harness watches lives in
+/// it. The map is still recorded, because it is the only route to anything
+/// outside WRAM (cartridge SRAM, ROM) if a detector ever needs one.
 const ENV_SET_MEMORY_MAPS: u32 = 36 | 0x10000;
+/// snes9x raises this when the picture switches to hi-res or interlace.
+/// `cb_video_refresh` already reads the real dimensions off every frame, so
+/// answering it is a formality — but refusing makes the core log about it.
+const ENV_SET_GEOMETRY: u32 = 37;
+/// Accepted and ignored, which is a small lie: if a core ever changed its
+/// framerate or sample rate mid-run the pacing in `main` would keep using the
+/// values from startup. No SNES core does, and refusing outright is worse.
+const ENV_SET_SYSTEM_AV_INFO: u32 = 32;
 const ENV_SET_SUPPORT_ACHIEVEMENTS: u32 = 42;
 const ENV_SET_CORE_OPTIONS_V2: u32 = 67;
 const ENV_SET_CORE_OPTIONS_V2_INTL: u32 = 68;
@@ -180,9 +224,13 @@ static PIXEL_FORMAT: AtomicU32 = AtomicU32::new(PIXEL_FORMAT_0RGB1555);
 static SYSTEM_DIR: OnceLock<CString> = OnceLock::new();
 
 /// Regions the core published via `SET_MEMORY_MAPS`, copied out of the
-/// core-owned descriptor array at the moment it is offered. Mesen exposes
-/// only `RETRO_MEMORY_SYSTEM_RAM` through `retro_get_memory_data`, so this is
-/// the only route to cartridge WRAM at $6000-$7FFF.
+/// core-owned descriptor array at the moment it is offered.
+///
+/// Whether this is the main route to a byte or the fallback is per console and
+/// is stated in the manifest — on the NES it is the only way to reach cartridge
+/// WRAM, and on the SNES it is a fallback for the little that lies outside work
+/// RAM. `memory::AddressSpace` is where that choice is applied.
+#[derive(Clone)]
 pub struct MappedRegion {
     pub start: usize,
     pub select: usize,
@@ -190,8 +238,48 @@ pub struct MappedRegion {
     pub len: usize,
     pub offset: usize,
     /// Base pointer of the core-owned buffer. Held as a `usize` so the
-    /// static stays `Send`; only dereferenced on the emulator thread.
+    /// static stays `Send`; only dereferenced on the emulator thread. Zero
+    /// when the core published a descriptor with no backing buffer — such a
+    /// region is unreadable, but it is still recorded so a dump can say so.
     pub ptr: usize,
+    pub flags: u64,
+    /// The core's name for the address space this region belongs to. Usually
+    /// absent; when present it is the fastest way to tell VRAM from APU RAM,
+    /// which are both 64 KB on the SNES.
+    pub addrspace: Option<String>,
+}
+
+impl MappedRegion {
+    /// A region this harness can actually read a byte out of.
+    pub fn readable(&self) -> bool {
+        self.ptr != 0 && self.len != 0 && self.select == 0 && self.disconnect == 0
+    }
+
+    /// Flag names as libretro.h spells them, for a dump. Empty string when the
+    /// core set none, which is common and not an error.
+    pub fn flag_names(&self) -> String {
+        let mut out: Vec<String> = Vec::new();
+        for (bit, name) in [
+            (MEMDESC_CONST, "CONST"),
+            (MEMDESC_BIGENDIAN, "BIGENDIAN"),
+            (MEMDESC_SYSTEM_RAM, "SYSTEM_RAM"),
+            (MEMDESC_SAVE_RAM, "SAVE_RAM"),
+            (MEMDESC_VIDEO_RAM, "VIDEO_RAM"),
+        ] {
+            if self.flags & bit != 0 {
+                out.push(name.to_string());
+            }
+        }
+        let align = (self.flags >> MEMDESC_ALIGN_SHIFT) & 0x3;
+        if align != 0 {
+            out.push(format!("ALIGN_{}", 1 << align));
+        }
+        let minsize = (self.flags >> MEMDESC_MINSIZE_SHIFT) & 0x3;
+        if minsize != 0 {
+            out.push(format!("MINSIZE_{}", 1 << minsize));
+        }
+        out.join("|")
+    }
 }
 
 pub static MEMORY_MAP: Mutex<Vec<MappedRegion>> = Mutex::new(Vec::new());
@@ -201,20 +289,28 @@ pub fn has_memory_map() -> bool {
     !lock(&MEMORY_MAP).is_empty()
 }
 
+/// A copy of every descriptor the core published, in the order it published
+/// them. For reporting; reading bytes goes through `read_addr`.
+pub fn memory_map() -> Vec<MappedRegion> {
+    lock(&MEMORY_MAP).clone()
+}
+
 /// Reads one byte of the emulated CPU address space through the map the core
 /// published. `None` when no descriptor covers `addr`, including when the core
 /// published no map at all.
 ///
 /// Only descriptors with `select == 0` are resolved — a plain
-/// `start..start+len` window. Mesen describes the NES as 64 such 256-byte
-/// pages, so that covers every address this harness asks for. The `select` /
-/// `disconnect` bit-matching form in libretro.h is deliberately not
-/// implemented: nothing here needs it, and guessing at it would silently
-/// return the wrong byte rather than nothing.
+/// `start..start+len` window. The `select` / `disconnect` bit-matching form in
+/// libretro.h is deliberately not implemented, and on the SNES that matters
+/// more than it did on the NES: bank mirroring is exactly what those fields
+/// describe, so a mirrored address may not resolve here even though the core
+/// published it. Every default address this harness watches is in WRAM and
+/// never takes this path. Guessing at the bit-matching would silently return
+/// the wrong byte rather than nothing, which is worse than not answering.
 pub fn read_addr(addr: usize) -> Option<u8> {
     let map = lock(&MEMORY_MAP);
     for r in map.iter() {
-        if r.select != 0 || r.disconnect != 0 {
+        if !r.readable() {
             continue;
         }
         if addr >= r.start && addr < r.start + r.len {
@@ -301,10 +397,10 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                 unsafe { std::slice::from_raw_parts(map.descriptors, map.num_descriptors as usize) };
             let mut out = lock(&MEMORY_MAP);
             out.clear();
+            // Unusable descriptors (no buffer, zero length) are recorded
+            // rather than dropped: `read_addr` skips them, and a dump that
+            // silently omitted them would misreport what the core offered.
             for d in descs {
-                if d.ptr.is_null() || d.len == 0 {
-                    continue;
-                }
                 out.push(MappedRegion {
                     start: d.start,
                     select: d.select,
@@ -312,6 +408,11 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                     len: d.len,
                     offset: d.offset,
                     ptr: d.ptr as usize,
+                    flags: d.flags,
+                    addrspace: match unsafe { cstr(d.addrspace) } {
+                        n if n.is_empty() => None,
+                        n => Some(n),
+                    },
                 });
             }
             true
@@ -321,7 +422,10 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
         | ENV_SET_INPUT_DESCRIPTORS
         | ENV_SET_VARIABLES
         | ENV_SET_SUPPORT_NO_GAME
+        | ENV_SET_SUBSYSTEM_INFO
         | ENV_SET_CONTROLLER_INFO
+        | ENV_SET_GEOMETRY
+        | ENV_SET_SYSTEM_AV_INFO
         | ENV_SET_SUPPORT_ACHIEVEMENTS
         | ENV_SET_CORE_OPTIONS_V2
         | ENV_SET_CORE_OPTIONS_V2_INTL => true,

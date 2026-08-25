@@ -44,9 +44,6 @@ prepares a stage before handing it to a `StageRunner`. `challenge-core` and
 `session-api` learn nothing about them: a generator's output is an ordinary
 artifact plus an `EntryPoint`.
 
-**Not built in Phase 1 or Phase 2.** This ADR records the constraints generation
-places on decisions being made now. It does not schedule the work.
-
 ## Alternatives considered
 
 **Server generates and distributes the artifact.** Guarantees byte-identical
@@ -60,10 +57,6 @@ ordinary content. Simple, and compatible with today's asset pipeline. Rejected
 because a fixed pool is memorisable, which removes the point — the challenge is
 reading an unfamiliar layout under pressure. Keep as the fallback if a generator
 proves not to be reproducible.
-
-**Generate a savestate rather than a ROM.** Would reuse the ADR 0002 entry path
-unchanged. Rejected because savestate-only generation can vary enemy placement
-and initial state but not level geometry, and does nothing for Doom.
 
 ## Consequences
 

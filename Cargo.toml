@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/smb3-harness", "crates/dkc-harness"]
+members = ["crates/session-api", "crates/session-libretro"]
 
 [workspace.package]
 edition = "2021"
