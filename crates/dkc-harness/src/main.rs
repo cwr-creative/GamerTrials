@@ -15,6 +15,7 @@
 mod audio;
 mod dkc;
 mod input;
+mod levels;
 mod libretro;
 mod ramsearch;
 
@@ -68,11 +69,9 @@ OPTIONS:
                      F11 reports bytes that changed within N frames. Default: 20
     --probe-stable <N>
                      ...and that held still for N frames before that. Default: 180
-    --result-grace <N>
-                     Frames to wait after the level unloads before calling it
-                     a clear, so a death landing just afterwards can cancel
-                     it. Default: 120. The frame reported is still the frame
-                     the stage ended.
+    --transition-window <N>
+                     Frames to wait after a fade for the level code to catch
+                     up and say where the stage was left for. Default: 120.
     --no-probe       Skip the per-frame change history (saves ~2.3 MB and a
                      full RAM compare each frame; disables F11)
     --no-audio       Run without sound, paced off the wall clock instead
@@ -104,7 +103,7 @@ struct Args {
     search_width: Width,
     probe_recent: u64,
     probe_stable: u64,
-    result_grace: u64,
+    transition_window: u64,
     probe: bool,
     audio: bool,
 }
@@ -205,6 +204,7 @@ fn run() -> Result<(), String> {
     }
 
     print_addrs(&args.addrs);
+    print_completion_rule();
 
     // Audio doubles as the frame clock, so set it up before the loop.
     let audio = if args.audio {
@@ -241,7 +241,7 @@ fn run() -> Result<(), String> {
     .map_err(|e| format!("cannot open window: {e}"))?;
 
     let mut pads = input::Pads::new();
-    let mut watcher = dkc::Watcher::new(args.addrs, args.watch, args.result_grace);
+    let mut watcher = dkc::Watcher::new(args.addrs, args.watch, args.transition_window);
     let mut search = Search::new(args.search_width);
     let mut probe = args.probe.then(Probe::new);
     let state_path = args.state.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_STATE));
@@ -381,20 +381,15 @@ fn run() -> Result<(), String> {
                 p.tick(ram, frame);
             }
             for event in watcher.tick(ram, frame) {
-                // `at` is the frame the stage ended, which a held verdict
-                // reports some frames after the fact. The number that matters
-                // is `at`, not the frame it was printed on (ADR 0005).
                 match event {
                     dkc::Event::StageComplete { at } => println!("STAGE COMPLETE at frame {at}"),
                     dkc::Event::StageFailed { at, reason: dkc::FailReason::Death } => {
                         println!("STAGE FAILED at frame {at} (died)")
                     }
-                    // No death detector was configured, so a level change
-                    // proves only that the stage ended, not how.
-                    dkc::Event::StageFailed { at, reason: dkc::FailReason::LeftStage } => println!(
-                        "STAGE FAILED at frame {at} (left the stage; no death \
-                         detector configured, so a clear cannot be claimed)"
-                    ),
+                    // Already printed its own [event] line with the count and
+                    // what the count means; listed explicitly so it is clear
+                    // it is deliberately not a verdict of its own.
+                    dkc::Event::Fade { .. } => {}
                     // The rest already printed their own [event] line; they
                     // are returned so a caller that is not a console — the
                     // real client, later — has them too.
@@ -449,6 +444,19 @@ fn print_addrs(addrs: &dkc::Addrs) {
         );
         println!("[addr] F3-F8/F10 hunt for a counter; F11 reports what a one-shot event wrote");
     }
+}
+
+/// How a clear is decided, stated at startup because it rests on two signals
+/// rather than one and the pairing is not obvious from the output alone.
+fn print_completion_rule() {
+    println!(
+        "[stage] a clear is a fade at $7E051B=0x82 (timing; never fires on a death) \
+         followed by the level code at $7E003E leaving this stage's family"
+    );
+    println!(
+        "[stage] bonus rooms, checkpoints and returns stay inside the family, so the \
+         route through a stage does not change the verdict"
+    );
 }
 
 fn load_state(
@@ -572,7 +580,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         // Three seconds of holding still. Anything busier than that is a
         // timer, a position, or the RNG, and is not what a hit wrote.
         probe_stable: 180,
-        result_grace: dkc::DEFAULT_RESULT_GRACE_FRAMES,
+        transition_window: dkc::DEFAULT_TRANSITION_WINDOW_FRAMES,
         probe: true,
         audio: true,
     };
@@ -606,11 +614,11 @@ fn parse_args() -> Result<Option<Args>, String> {
                     .parse()
                     .map_err(|_| format!("--probe-stable wants a frame count, got {v}"))?;
             }
-            "--result-grace" => {
-                let v = value("--result-grace")?;
-                args.result_grace = v
+            "--transition-window" => {
+                let v = value("--transition-window")?;
+                args.transition_window = v
                     .parse()
-                    .map_err(|_| format!("--result-grace wants a frame count, got {v}"))?;
+                    .map_err(|_| format!("--transition-window wants a frame count, got {v}"))?;
             }
             "--scale" => {
                 let v = value("--scale")?;

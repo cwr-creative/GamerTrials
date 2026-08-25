@@ -92,11 +92,11 @@ with a noisy neighbour.
 
 | Address | Meaning | Confidence |
 |---|---|---|
-| `$7E003E` | current level | documented (Data Crystal), not playtested |
+| `$7E003E` | current level | **confirmed** — RainbowZ Editor transcribes `LDA $3E` from game code; see `levels.rs` |
 | `$7E0577` | lives | reported, **could not be confirmed at source** |
 | `$7E057B` | bananas | reported, **could not be confirmed at source** |
 | `$7E057F` | KONG letters (bitfield) | reported, **could not be confirmed at source** |
-| `$7E051B` | fade type | from `Lui37/dkc1-hack` — load-bearing in working code |
+| `$7E051B` | fade type; 0x82 = leaving a stage | from `Lui37/dkc1-hack`; playtested — set on both the exit and bonus-room entry, never on a death |
 | `$7E0579` | pause flags, bit 6 = paused | same |
 | `$7E1929` | accept inputs | same |
 | `$7E0B19` | object 1 (DK) X | documented (Data Crystal) |
@@ -174,37 +174,60 @@ Costs about 2.3 MB and a full RAM compare per frame. `--no-probe` turns it off.
 Every address the harness prints is in `$7Exxxx` form, ready to paste into
 `--addr` or `--watch`.
 
-## Stage completion, and why it is not trustworthy yet
+## Stage completion
 
-The only end-of-stage signal available is the level id leaving the value it had
-at stage entry. That has three known problems, in increasing order of how much
-they matter.
+Two signals, each doing the job it is good at. Neither works alone.
 
-**It is late.** The level id moves when the level *unloads*, not when the exit
-target is touched, so the reported time includes several seconds of hand-off.
-This is exactly the gap the NES harness had before the card counter was found,
-and the fix is the same: find the earlier signal. Do not build scoring on this.
+**`$7E051B` rising to `0x82` is the timing.** It is the fade-to-black speed,
+set the moment a transition out of the stage begins. A death sets it never, so
+it cannot fire on one, and no grace window is needed. What it cannot tell you
+is *what kind* of transition — a bonus barrel raises it exactly as the exit
+does.
 
-**A bonus barrel looks like the exit.** Entering a bonus room changes the level
-id too, so it currently reads as a clear. Coming back out reopens the attempt
-and prints a warning saying the previous result may have been a false positive,
-but it cannot retract what it already reported.
+**`$7E003E`, the level code, is the verdict.** It changes when the next room
+loads, shortly after the fade. `levels.rs` maps all 230 of its values to names,
+and every way of being inside one level — the start, the checkpoint, its bonus
+rooms, a return from one — shares a level *family*. The family changing is the
+stage actually ending.
 
-**Death ordering is unknown.** A death and the unload it causes are not
-simultaneous, and with the life counter unverified it is not known which lands
-first. If lives drops first, the death wins outright. If the level id moves
-first, an immediate verdict would score a death as a clear — the failure mode
-ADR 0003 calls the worst one available. So a clear is *held* for
-`--result-grace` frames (default 120) and cancelled by a death arriving inside
-that window. The verdict prints late; the frame it reports is still the frame
-the stage ended, so nothing is lost from the measurement (ADR 0005).
+So a clear is: **a fade, then a level code outside the stage's family.** The
+frame reported is the fade's, not the level change's, so the hand-off is not
+charged to the player (ADR 0005).
 
-If no `lives` address is configured at all, an unexplained level change is
-reported as `STAGE FAILED`, not as a clear — with no death detector running,
-"no death was seen" proves nothing. Same conservative choice the NES harness
-makes.
+```
+[stage] in 0x16 Jungle Hijinx (level start) — stage is `Jungle Hijinx`
+[event] frame 1442  FADE  00 -> 82  — leaving the stage, waiting for the level code
+[stage] level 0x16 Jungle Hijinx (level start) -> 0x06 Jungle Hijinx - Bonus 1
+[stage] still inside `Jungle Hijinx` — attempt continues
+[event] frame 4780  FADE  00 -> 82  — leaving the stage, waiting for the level code
+[stage] level 0x08 Jungle Hijinx (from Bonus 1) -> 0x01 Reptile Rumble (level start)
+STAGE COMPLETE at frame 4780
+```
 
-Unwritten ADR 0014 is where this has to be replaced with something that also
+This is **route-independent**, which is the whole reason it replaced fade
+counting. Whether a player takes both bonus barrels, one, or none, the verdict
+and the time are the same. The previous `--complete-on-fade N` scheme silently
+assumed every player took the same number of detours, and is gone.
+
+Cases it is built to get right, all covered by tests:
+
+- A bonus room, and a return from one — inside the family, attempt continues.
+- A checkpoint re-entry — same.
+- The shared animal rooms (`Winky Bonus`, `Rambi Bonus`, `Expresso Bonus`,
+  `Enguarde Bonus`, `Animal Token Room`) belong to no level's family, so they
+  are recognised as side rooms explicitly. Without that they would read as a
+  clear.
+- A death and the level reload it causes — no fade, so nothing is armed, and
+  the reload is refused as a clear rather than guessed at.
+- A fade nothing follows — discarded after `--transition-window` frames
+  (default 120) so it cannot mis-time a later, unrelated level change.
+- An entry level code outside the table — the stage cannot be delimited, so no
+  clear is claimed at all.
+
+Death is independent of all of it: still a decrease in the (unverified) `lives`
+counter.
+
+Unwritten ADR 0014 is where this has to be reconciled with something that also
 answers for Doom, which has no addressable core RAM.
 
 ## What each event currently rests on
@@ -212,7 +235,8 @@ answers for Doom, which has no addressable core RAM.
 | Event | Signal | Status |
 |---|---|---|
 | Death | lives decreased | live by default, address unverified |
-| Stage clear | level id left its entry value | live, late and bonus-room-confused |
+| Stage left | fade type ($7E051B) rises to 0x82 | live, playtested |
+| Stage clear | that fade, then $7E003E leaves the stage family | live, route-independent |
 | Item | bananas up, a KONG bit set, lives up | live, addresses unverified |
 | Damage | Kong count down, or a hit timer rising from 0 | **off — no address** |
 | Enemy kill | a kill counter increasing | **off — no address, may not exist** |
@@ -251,10 +275,25 @@ The watcher and both discovery tools are unit-tested against synthetic WRAM
 buffers, so they need no ROM, no core and no savestate. Anything needing a real
 ROM stays a manual test.
 
-The tests worth reading first are the stage-boundary ones: a death before the
-unload, a death just after it, a bonus-room round trip, and a state load
-landing mid-grace. Those are the four orderings the verdict logic exists to get
-right.
+The tests worth reading first are the stage-boundary ones:
+`the_verdict_does_not_depend_on_the_route` (two routes through one stage, same
+answer — the property the whole design exists for),
+`a_bonus_room_is_not_a_clear_and_the_real_exit_still_is`,
+`a_death_and_its_level_reload_are_never_a_clear`, and
+`a_shared_animal_room_is_not_a_clear`. They use real level codes, so they
+exercise the same table the harness does.
+
+`levels.rs` has its own tests pinning the transcription: spot-checked names at
+known codes, and that every Jungle Hijinx entrance and sub-room resolves to one
+family.
+
+## Partial progress within a stage
+
+Not implemented. The groundwork is done and written up in
+[PROGRESS-HANDOFF.md](PROGRESS-HANDOFF.md): DKC keeps per-level X bounds in a
+ROM table indexed by the level code, the lookup is verified against the real
+ROM, and player X is at `$7E0B19`. That file has the algorithm, the self-test
+numbers, and the caveats — vertical levels, bonus-room spans, non-monotonicity.
 
 ## Deliberately absent
 
@@ -269,7 +308,10 @@ No savestates exist yet. Once they do, the same shape as the SMB3 notes applies:
 one state per stage entry point, each recording whether the stage is viable as a
 time trial, an endurance run, or both.
 
-A DKC-specific wrinkle to record when those states are made: levels with a bonus
-barrel are the ones where the current stage-clear signal misfires, so either
-they need the earlier signal found first, or they are endurance-only until it
-is.
+Good news for the manifest: stage completion needs **nothing** from it. The
+level-code table is a property of the ROM, not of the stage or the route, so
+`levels.rs` answers for every DKC stage without a per-stage constant. That is
+invariant 5 holding — adding a stage stays a data change.
+
+What a manifest still has to carry is the savestate per entry point, and
+whether each stage is viable as a time trial, an endurance run, or both.

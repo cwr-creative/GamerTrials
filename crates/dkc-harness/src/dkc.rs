@@ -25,8 +25,12 @@
 //! `--addr <name>=<addr>` override, so a wrong guess costs a flag rather than
 //! a rebuild.
 //!
-//!   $7E003E level id       documented: Data Crystal DKC RAM map,
-//!                          "Current level"
+//!   $7E003E level id       confirmed: the RainbowZ Editor transcribes the
+//!                          game's own bound lookup as `LDA $3E` followed by
+//!                          `levelCode << 1`, so this is read off working code
+//!                          rather than a wiki. `levels.rs` maps its 230 values
+//!                          to names, which is what makes a stage boundary
+//!                          classifiable.
 //!   $7E0577 lives          reported: widely-cited DKC RAM map, attributed to
 //!                          TCRF / DKC Atlas. Both of those pages currently
 //!                          serve unrelated content, so this could not be
@@ -36,7 +40,15 @@
 //!   $7E051B fade type      source: `Lui37/dkc1-hack` src/defines.asm, an
 //!                          assembling speedrun-practice hack — so these three
 //!                          are load-bearing in working code rather than
-//!                          transcribed from a wiki
+//!                          transcribed from a wiki. This is the fade-to-black
+//!                          speed the game sets on a scene change, and it is
+//!                          set to STAGE_COMPLETE_FADE (0x82) on the way out of
+//!                          a stage. Playtested: a death produces no fade at
+//!                          all, but entering a bonus room produces the same
+//!                          0x82 as clearing the stage does. So the value says
+//!                          "the stage is being left", not "the stage was
+//!                          cleared" — the level code that follows says which,
+//!                          see `Watcher::tick`.
 //!   $7E0579 pause flags    same source. Its bit 6 is the paused flag; the
 //!                          hack tests it with BIT/BVS.
 //!   $7E1929 accept inputs  same source. Nonzero once the level hands control
@@ -65,6 +77,8 @@
 //! phase.
 
 use std::fmt;
+
+use crate::levels;
 
 /// SNES work RAM: $7E:0000-$7F:FFFF.
 pub const WRAM_SIZE: usize = 0x2_0000;
@@ -226,7 +240,7 @@ ram_fields! {
     lives,         Some(0x0577), U16, "reported RAM map, unconfirmed at source";
     bananas,       Some(0x057B), U16, "reported RAM map, unconfirmed at source";
     kong_letters,  Some(0x057F), U16, "reported RAM map, unconfirmed at source";
-    fade_type,     Some(0x051B), U16, "dkc1-hack defines.asm";
+    fade_type,     Some(0x051B), U8,  "dkc1-hack defines.asm; 0x82 = stage complete";
     pause_flags,   Some(0x0579), U16, "dkc1-hack defines.asm, bit 6 = paused";
     accept_inputs, Some(0x1929), U16, "dkc1-hack defines.asm";
     player_x,      Some(0x0B19), U16, "Data Crystal: object 1 (DK) X";
@@ -247,7 +261,7 @@ impl fmt::Display for Snapshot {
         }
         write!(
             f,
-            "level {}  lives {}  bananas {}  KONG {}  kongs {}  at ({},{})",
+            "level {}  lives {}  bananas {}  KONG {}  kongs {}  fade {}  at ({},{})",
             v(self.level_id),
             v(self.lives),
             v(self.bananas),
@@ -256,6 +270,10 @@ impl fmt::Display for Snapshot {
                 None => "-".into(),
             },
             v(self.kong_count),
+            match self.fade_type {
+                Some(f) => format!("{f:02X}"),
+                None => "-".into(),
+            },
             v(self.player_x),
             v(self.player_y),
         )
@@ -297,9 +315,6 @@ impl fmt::Display for Item {
 pub enum FailReason {
     /// A life was lost.
     Death,
-    /// The level ended and no death explained it — but no death detector was
-    /// running either, so a clear cannot be claimed.
-    LeftStage,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -308,68 +323,78 @@ pub enum Event {
     Death,
     EnemyKilled(u16),
     ItemGained(Item),
-    /// `at` is the frame the stage actually ended, which is not always the
-    /// frame the event is emitted — see `result_grace`.
+    /// A transition out of the stage has started. Reported on its own because
+    /// it is the frame a clear is *timed* to, but it is not a verdict: the
+    /// level code that follows says whether this was the exit or a bonus room.
+    Fade { at: u64 },
     StageComplete { at: u64 },
     StageFailed { at: u64, reason: FailReason },
 }
 
-/// Default for `Watcher::result_grace`, two seconds at 60 Hz.
-pub const DEFAULT_RESULT_GRACE_FRAMES: u64 = 120;
+/// The fade-to-black speed the game sets at `fade_type` on the scene change
+/// that takes the player out of a stage.
+///
+/// A death causes no fade at all, so this can never fire from one — which is
+/// what makes it a good *timing* signal and why no grace window is needed. It
+/// is not a verdict on its own, though: entering a bonus barrel sets the same
+/// value as reaching the exit. The fade says *when* the stage was left; the
+/// level code it lands on says *whether* it was left for good.
+pub const STAGE_COMPLETE_FADE: u16 = 0x82;
+
+/// How long after a fade to keep waiting for the level code to catch up.
+///
+/// The fade starts the transition and the level code changes when the next
+/// room loads, a little later. That gap is the whole reason the fade is worth
+/// having — it is the honest frame the stage ended — but a fade with no level
+/// change behind it means something else happened, and the harness should stop
+/// holding it open. Two seconds at 60 Hz is far longer than the hand-off.
+pub const DEFAULT_TRANSITION_WINDOW_FRAMES: u64 = 120;
 
 pub struct Watcher {
     addrs: Addrs,
     prev: Option<Snapshot>,
-    /// Level id at stage entry. The stage-boundary logic is relative to this,
-    /// so it is captured on the first tick after a state load rather than
-    /// hardcoded — the same reason the NES harness takes its stage label from
-    /// the entry point rather than from RAM.
-    entry_level: Option<u16>,
-    /// Set once this attempt has produced a StageComplete or StageFailed, so
-    /// the level unload that follows a death does not fire a second event.
-    resolved: bool,
-    /// A level change that has not been ruled a clear yet, and the frame it
-    /// happened on. See `result_grace`.
-    pending_end: Option<u64>,
-    /// How long to wait after the level unloads before calling it a clear.
-    ///
-    /// A death and the unload it causes are not simultaneous, and with every
-    /// address here unverified we do not know which lands first. If the life
-    /// counter drops *before* the level id moves, `resolved` alone is enough.
-    /// If it drops *after*, an immediate verdict would score a death as a
-    /// clear — the one failure mode ADR 0003 calls the worst available.
-    ///
-    /// So a clear is held for this many frames and cancelled by a death that
-    /// arrives inside the window. The frame reported is still the frame the
-    /// level ended, so the grace costs latency in the console and nothing in
-    /// the measurement (ADR 0005).
-    result_grace: u64,
+    /// Set once a death has failed this attempt, so one death does not report
+    /// twice. Deliberately does *not* gate the fade counter below: a latch
+    /// over the fade is what made the bonus-room behaviour invisible, because
+    /// the first fade silenced every one after it.
+    failed: bool,
+    /// The stage this attempt is in, as a level *family* — every entrance,
+    /// checkpoint and bonus room of one level answers the same name. Captured
+    /// on the first tick after a state load rather than hardcoded, for the
+    /// same reason the stage label comes from the savestate: stage identity
+    /// belongs to the entry point.
+    entry_family: Option<&'static str>,
+    /// A fade seen with no level change behind it yet, and the frame it
+    /// happened on. That frame is what a clear is timed to.
+    pending_fade: Option<u64>,
+    /// How long to hold `pending_fade` open waiting for the level code.
+    transition_window: u64,
     /// Extra addresses to report on change, from `--watch`.
     watched: Vec<usize>,
     prev_watched: Vec<Option<u8>>,
 }
 
 impl Watcher {
-    pub fn new(addrs: Addrs, watched: Vec<usize>, result_grace: u64) -> Self {
+    pub fn new(addrs: Addrs, watched: Vec<usize>, transition_window: u64) -> Self {
         Watcher {
             addrs,
             prev: None,
-            entry_level: None,
-            resolved: false,
-            pending_end: None,
-            result_grace,
+            failed: false,
+            entry_family: None,
+            pending_fade: None,
+            transition_window,
             prev_watched: vec![None; watched.len()],
             watched,
         }
     }
 
     /// Called after a savestate load or a core reset: the stage restarts, so
-    /// nothing from before is meaningful — including the entry level id.
+    /// nothing from before is meaningful — including which stage it was.
     pub fn reset(&mut self) {
         self.prev = None;
-        self.entry_level = None;
-        self.resolved = false;
-        self.pending_end = None;
+        self.failed = false;
+        self.entry_family = None;
+        self.pending_fade = None;
         self.prev_watched.fill(None);
     }
 
@@ -384,10 +409,23 @@ impl Watcher {
             Some(p) => p,
             None => {
                 // First frame of an attempt: state the baseline, then deltas
-                // only. The level id read here is what "left the stage" means
+                // only. The level code read here is what "this stage" means
                 // for the rest of the attempt.
                 println!("[ram] frame {frame}  {cur}");
-                self.entry_level = cur.level_id;
+                self.entry_family = cur.level_id.and_then(levels::family);
+                match (cur.level_id, self.entry_family) {
+                    (Some(c), Some(fam)) => {
+                        println!("[stage] in {} — stage is `{fam}`", levels::show(c))
+                    }
+                    (Some(c), None) => println!(
+                        "[stage] {} is not in the level table, so leaving it cannot be \
+                         detected; no stage-complete detector this attempt",
+                        levels::show(c)
+                    ),
+                    (None, _) => println!(
+                        "[stage] no level_id address, so no stage-complete detector"
+                    ),
+                }
                 self.prev = Some(cur);
                 return Vec::new();
             }
@@ -409,14 +447,9 @@ impl Watcher {
             }
             _ => false,
         };
-        if died && !self.resolved {
-            // A death cancels a clear that was still being held: the level
-            // change a moment ago was this death on its way back to the map.
-            // The failure is timed to the death itself unless the level had
-            // already gone, in which case that boundary is the honest frame.
-            let at = self.pending_end.take().unwrap_or(frame);
-            events.push(Event::StageFailed { at, reason: FailReason::Death });
-            self.resolved = true;
+        if died && !self.failed {
+            events.push(Event::StageFailed { at: frame, reason: FailReason::Death });
+            self.failed = true;
         }
 
         // ---- damage ------------------------------------------------------
@@ -484,65 +517,82 @@ impl Watcher {
             }
         }
 
-        // ---- stage boundary ----------------------------------------------
-        // The level id leaving its entry value is the only end-of-stage signal
-        // there is so far, and it is a late one: it moves when the level
-        // unloads, not when the exit is touched. That is the same gap the NES
-        // harness had before the card was found, and the same fix applies —
-        // find the earlier signal. Until then a clear is timed to the unload,
-        // which puts several seconds of hand-off inside the reported time.
+        // ---- leaving the stage ---------------------------------------------
+        // $7E051B is the fade-to-black speed, set to STAGE_COMPLETE_FADE on
+        // the scene change that takes the player out of a stage. A death
+        // produces no fade, so this edge can never fire from one — no grace
+        // window, no ordering to race, verdict on the frame it is seen.
         //
-        // It is also not specific to *finishing*. A bonus barrel changes the
-        // level id too, so a bonus room currently looks exactly like a clear.
-        // The re-entry branch below is what notices that after the fact.
-        if let (Some(entry), Some(c)) = (self.entry_level, cur.level_id) {
-            let left = c != entry;
-            let was_inside = prev.level_id == Some(entry);
-
-            if left && was_inside && !self.resolved && self.pending_end.is_none() {
-                println!("[event] frame {frame}  LEVEL ID  {entry:04X} -> {c:04X}");
-                self.pending_end = Some(frame);
-            }
-
-            // Back inside the entry level: the player re-entered from the map,
-            // or came back out of a bonus room. Either way the next death or
-            // clear belongs to a fresh attempt. Without this the first result
-            // latches for the whole session — the bug the NES harness had to
-            // fix twice.
-            if !left && prev.level_id != Some(entry) {
-                if self.resolved {
-                    println!(
-                        "[stage] back in level {entry:04X} — if that result came from a \
-                         bonus barrel rather than the exit, it was a false positive"
-                    );
-                }
-                println!("[stage] attempt reset at frame {frame}");
-                self.resolved = false;
-                self.pending_end = None;
+        // What it cannot do is say what kind of transition it is — a bonus
+        // barrel raises it exactly as the exit does.
+        //
+        // The level code at $7E003E is the *classification*. It changes when
+        // the next room loads, a little after the fade, and where it lands
+        // says whether the stage was really left: a bonus room, a checkpoint
+        // or a return all stay inside the stage's level family, and anything
+        // else is outside it.
+        //
+        // Pairing them gives a verdict that does not care about the route —
+        // the point of the exercise, since the previous fade-counting scheme
+        // silently depended on whether a player took the bonus barrels.
+        if let (Some(p), Some(c)) = (prev.fade_type, cur.fade_type) {
+            if c == STAGE_COMPLETE_FADE && p != STAGE_COMPLETE_FADE && self.pending_fade.is_none() {
+                println!(
+                    "[event] frame {frame}  FADE  {p:02X} -> {c:02X}  — leaving the stage, \
+                     waiting for the level code to say where to"
+                );
+                events.push(Event::Fade { at: frame });
+                self.pending_fade = Some(frame);
             }
         }
 
-        // A held clear that no death arrived to cancel. Emitted late, but
-        // timed to the frame the stage actually ended.
-        if let Some(at) = self.pending_end {
-            if !self.resolved && frame.saturating_sub(at) >= self.result_grace {
-                if self.addrs.lives.at.is_none() {
-                    // No death detector was running, so "no death was seen"
-                    // proves nothing. Refuse to claim a clear.
-                    events.push(Event::StageFailed { at, reason: FailReason::LeftStage });
-                } else {
-                    events.push(Event::StageComplete { at });
+        if let (Some(entry), Some(pc), Some(cc)) = (self.entry_family, prev.level_id, cur.level_id) {
+            if pc != cc {
+                // A side room is somewhere the player comes back from. A
+                // level's own bonus rooms share its family and are carried by
+                // the family check alone; the shared animal-token rooms belong
+                // to no level, which is what `is_side_room` is really for.
+                let stayed = levels::family(cc) == Some(entry) || levels::is_side_room(cc);
+                println!("[stage] level {} -> {}", levels::show(pc), levels::show(cc));
+
+                match (stayed, self.pending_fade.take()) {
+                    (true, _) => println!("[stage] still inside `{entry}` — attempt continues"),
+                    // Timed to the fade, not to this frame: the fade is when
+                    // the stage actually ended, and the level code catching up
+                    // is hand-off (ADR 0005).
+                    (false, Some(at)) if !self.failed => {
+                        events.push(Event::StageComplete { at })
+                    }
+                    // Left the stage with no fade behind it. A death reload
+                    // looks like this, and so would anything else that moves
+                    // the level code without a transition — neither is a
+                    // clear, and refusing to guess is the conservative answer.
+                    (false, None) => println!(
+                        "[stage] left `{entry}` with no fade — not scoring this as a clear"
+                    ),
+                    (false, Some(_)) => {}
                 }
-                self.resolved = true;
-                self.pending_end = None;
+            }
+        }
+
+        // A fade no level change ever explained. Letting it stand would mean
+        // the next level change, whenever it came, got timed to a transition
+        // it had nothing to do with.
+        if let Some(at) = self.pending_fade {
+            if frame.saturating_sub(at) >= self.transition_window {
+                println!(
+                    "[stage] the fade at frame {at} was not followed by a level change; \
+                     discarding it"
+                );
+                self.pending_fade = None;
             }
         }
 
         // Anything that moved and is worth a running log line, printed once
         // per change rather than per frame. Position is excluded: it changes
         // every frame the player moves.
-        if (cur.level_id, cur.lives, cur.bananas, cur.kong_letters, cur.kong_count)
-            != (prev.level_id, prev.lives, prev.bananas, prev.kong_letters, prev.kong_count)
+        if (cur.level_id, cur.lives, cur.bananas, cur.kong_letters, cur.kong_count, cur.fade_type)
+            != (prev.level_id, prev.lives, prev.bananas, prev.kong_letters, prev.kong_count, prev.fade_type)
         {
             println!("[ram] frame {frame}  {cur}");
         }
@@ -600,10 +650,56 @@ mod tests {
         vec![0u8; WRAM_SIZE]
     }
 
-    /// Most tests are about *which* verdict fires, not about the grace window,
-    /// so they run with no grace and get their answer on the same tick.
     fn watcher() -> Watcher {
-        Watcher::new(Addrs::default(), Vec::new(), 0)
+        Watcher::new(Addrs::default(), Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES)
+    }
+
+    // Real level codes, so the tests exercise the same table the harness does.
+    const JUNGLE_START: u16 = 0x16; // Jungle Hijinx (level start)
+    const JUNGLE_BONUS_1: u16 = 0x06; // Jungle Hijinx - Bonus 1
+    const JUNGLE_FROM_BONUS_1: u16 = 0x08; // Jungle Hijinx (from Bonus 1)
+    const JUNGLE_FROM_SAVE: u16 = 0x25; // Jungle Hijinx (from Save)
+    const REPTILE_START: u16 = 0x01; // Reptile Rumble (level start) — another stage
+    const WINKY_BONUS: u16 = 0xD3; // shared animal room, in no level's family
+
+    /// Starts an attempt in `code` and returns a watcher past its baseline
+    /// tick, which is where `entry_family` is captured.
+    fn in_stage(code: u16) -> (Watcher, Vec<u8>) {
+        let mut w = watcher();
+        let a = Addrs::default();
+        let mut r = wram();
+        put(&mut r, a.lives, 5);
+        put(&mut r, a.level_id, code);
+        w.tick(&r, 1);
+        (w, r)
+    }
+
+    /// One rising edge to `STAGE_COMPLETE_FADE` and back down, the way a real
+    /// transition does. Timing only — on its own this decides nothing.
+    fn fade(w: &mut Watcher, ram: &mut [u8], at: u64) -> Vec<Event> {
+        let a = Addrs::default();
+        put(ram, a.fade_type, STAGE_COMPLETE_FADE);
+        let ev = w.tick(ram, at);
+        put(ram, a.fade_type, 0);
+        ev
+    }
+
+    /// The level code catching up a few frames after the fade, which is what
+    /// the real game does and what the verdict is actually read from.
+    fn land_on(w: &mut Watcher, ram: &mut [u8], code: u16, at: u64) -> Vec<Event> {
+        let a = Addrs::default();
+        put(ram, a.level_id, code);
+        w.tick(ram, at)
+    }
+
+    fn faded(events: &[Event]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Fade { at } => Some(*at),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Writes a value at a field's address, in that field's width.
@@ -632,7 +728,7 @@ mod tests {
         })
     }
 
-    /// Runs quiet frames so a grace window can expire.
+    /// Runs a range of quiet frames, for confirming nothing fires again.
     fn idle(w: &mut Watcher, ram: &[u8], from: u64, to: u64) -> Vec<Event> {
         let mut out = Vec::new();
         for f in from..=to {
@@ -687,152 +783,154 @@ mod tests {
         assert_eq!(failed(&ev), Some((2, FailReason::Death)));
     }
 
-    /// The level unloads after the death that caused it. That unload must not
-    /// produce a second verdict.
+    /// A death produces no fade, so the timing half never arms — and the
+    /// level reload it causes then arrives with nothing behind it. That is the
+    /// case the old level-id signal could score as a clear.
     #[test]
-    fn the_level_unload_after_a_death_is_not_a_clear() {
-        let mut w = watcher();
+    fn a_death_and_its_level_reload_are_never_a_clear() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
         let a = Addrs::default();
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
 
         put(&mut r, a.lives, 4);
-        assert!(w.tick(&r, 2).contains(&Event::Death));
-
-        put(&mut r, a.level_id, 0x0000);
-        let ev = idle(&mut w, &r, 3, 300);
-        assert_eq!(completed(&ev), None);
-        assert_eq!(failed(&ev), None);
-    }
-
-    /// The other order. If the game moves the level id first and only then
-    /// decrements lives, an immediate verdict would score the death as a win —
-    /// which is why a clear is held rather than emitted on the spot.
-    #[test]
-    fn a_death_just_after_the_level_unloads_still_fails() {
-        let a = Addrs::default();
-        let mut w = Watcher::new(a, Vec::new(), 120);
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-
-        put(&mut r, a.level_id, 0x0000);
-        let ev = idle(&mut w, &r, 2, 40);
-        assert_eq!(completed(&ev), None, "a clear inside the grace window is not final");
-
-        put(&mut r, a.lives, 4);
-        let ev = w.tick(&r, 41);
-        // Timed to the boundary, not to the frame the life counter caught up.
+        let ev = w.tick(&r, 2);
+        assert!(ev.contains(&Event::Death));
         assert_eq!(failed(&ev), Some((2, FailReason::Death)));
+        assert_eq!(completed(&ev), None);
 
-        // And the held clear is gone for good, not merely postponed.
-        let ev = idle(&mut w, &r, 42, 400);
+        // The reload drops us somewhere outside the stage, with no fade.
+        let ev = land_on(&mut w, &mut r, REPTILE_START, 60);
+        assert_eq!(completed(&ev), None, "a level change with no fade is not a clear");
+        assert_eq!(completed(&idle(&mut w, &r, 61, 400)), None);
+    }
+
+    /// The plain clear: fade for the timing, a level code outside the stage
+    /// family for the verdict. The reported frame is the fade, not the later
+    /// level change — the hand-off is not part of the player's time.
+    #[test]
+    fn leaving_the_stage_after_a_fade_completes_it_timed_to_the_fade() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+
+        assert_eq!(faded(&fade(&mut w, &mut r, 900)), vec![900]);
+        let ev = land_on(&mut w, &mut r, REPTILE_START, 930);
+        assert_eq!(completed(&ev), Some(900));
+    }
+
+    /// The case that broke fade counting. A bonus room raises the same fade as
+    /// the exit, but its level code is inside the stage family, so it is not a
+    /// clear — and crucially the attempt stays open for the real exit later.
+    #[test]
+    fn a_bonus_room_is_not_a_clear_and_the_real_exit_still_is() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+
+        // Into Bonus 1.
+        fade(&mut w, &mut r, 100);
+        let ev = land_on(&mut w, &mut r, JUNGLE_BONUS_1, 130);
+        assert_eq!(completed(&ev), None, "a bonus room is not a clear");
+
+        // Back out of it.
+        fade(&mut w, &mut r, 400);
+        let ev = land_on(&mut w, &mut r, JUNGLE_FROM_BONUS_1, 430);
+        assert_eq!(completed(&ev), None, "returning from a bonus is not a clear either");
+
+        // The actual exit.
+        fade(&mut w, &mut r, 900);
+        let ev = land_on(&mut w, &mut r, REPTILE_START, 930);
+        assert_eq!(completed(&ev), Some(900));
+    }
+
+    /// The whole point of the rewrite: the verdict must not depend on how many
+    /// bonus rooms the player entered. Two routes through one stage, same
+    /// answer.
+    #[test]
+    fn the_verdict_does_not_depend_on_the_route() {
+        // Skipped the bonus entirely.
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+        fade(&mut w, &mut r, 900);
+        let direct = completed(&land_on(&mut w, &mut r, REPTILE_START, 930));
+
+        // Took two bonus rooms on the way.
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+        fade(&mut w, &mut r, 100);
+        land_on(&mut w, &mut r, JUNGLE_BONUS_1, 130);
+        fade(&mut w, &mut r, 300);
+        land_on(&mut w, &mut r, JUNGLE_FROM_BONUS_1, 330);
+        fade(&mut w, &mut r, 500);
+        land_on(&mut w, &mut r, JUNGLE_BONUS_1, 530);
+        fade(&mut w, &mut r, 700);
+        land_on(&mut w, &mut r, JUNGLE_FROM_BONUS_1, 730);
+        fade(&mut w, &mut r, 900);
+        let scenic = completed(&land_on(&mut w, &mut r, REPTILE_START, 930));
+
+        assert_eq!(direct, Some(900));
+        assert_eq!(scenic, direct, "the route must not change the verdict");
+    }
+
+    /// A checkpoint re-entry is another way to move the level code without
+    /// leaving the stage.
+    #[test]
+    fn a_checkpoint_code_stays_inside_the_stage() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+        fade(&mut w, &mut r, 200);
+        let ev = land_on(&mut w, &mut r, JUNGLE_FROM_SAVE, 230);
         assert_eq!(completed(&ev), None);
     }
 
-    /// Once the window passes with no death, the clear stands — and it is
-    /// reported against the frame the stage ended, not the frame the verdict
-    /// was finally emitted. ADR 0005: the number that travels is a frame count
-    /// from stage entry.
+    /// The shared animal rooms belong to no level's family, so family alone
+    /// would call them a clear. `is_side_room` is what stops that.
     #[test]
-    fn a_held_clear_is_timed_to_the_boundary_not_to_the_verdict() {
-        let a = Addrs::default();
-        let mut w = Watcher::new(a, Vec::new(), 120);
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
+    fn a_shared_animal_room_is_not_a_clear() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+        fade(&mut w, &mut r, 200);
+        let ev = land_on(&mut w, &mut r, WINKY_BONUS, 230);
+        assert_eq!(completed(&ev), None, "{} is a side room", levels::show(WINKY_BONUS));
 
-        put(&mut r, a.level_id, 0x0000);
-        let ev = idle(&mut w, &r, 2, 121);
-        assert_eq!(completed(&ev), None);
-        let ev = idle(&mut w, &r, 122, 122);
-        assert_eq!(completed(&ev), Some(2));
+        // And the stage can still be cleared afterwards.
+        fade(&mut w, &mut r, 800);
+        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 830)), Some(800));
     }
 
+    /// A fade that nothing follows must not be left armed, or the next level
+    /// change — whenever it comes — gets timed to a transition it had nothing
+    /// to do with.
     #[test]
-    fn leaving_the_level_with_no_death_completes_the_stage() {
-        let mut w = watcher();
-        let a = Addrs::default();
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-        put(&mut r, a.level_id, 0x0000);
-        assert_eq!(completed(&w.tick(&r, 500)), Some(500));
+    fn an_unexplained_fade_is_discarded_after_the_window() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+        fade(&mut w, &mut r, 100);
+        idle(&mut w, &r, 101, 100 + DEFAULT_TRANSITION_WINDOW_FRAMES + 1);
+
+        let ev = land_on(&mut w, &mut r, REPTILE_START, 5000);
+        assert_eq!(completed(&ev), None, "the stale fade must not time this");
     }
 
-    /// Regression guard borrowed from the NES harness: a result must not latch
-    /// for the whole session. Re-entering the level starts over.
+    /// The fade is an edge, so holding 0x82 for many frames arms once.
     #[test]
-    fn a_second_attempt_reports_its_own_result() {
-        let mut w = watcher();
+    fn a_fade_held_at_the_value_arms_once() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
         let a = Addrs::default();
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
 
-        put(&mut r, a.level_id, 0x0000);
-        assert_eq!(completed(&w.tick(&r, 2)), Some(2));
-
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 3);
-        put(&mut r, a.lives, 4);
-        assert_eq!(failed(&w.tick(&r, 4)), Some((4, FailReason::Death)));
+        put(&mut r, a.fade_type, STAGE_COMPLETE_FADE);
+        assert_eq!(faded(&w.tick(&r, 2)), vec![2]);
+        assert!(faded(&idle(&mut w, &r, 3, 60)).is_empty(), "held at 0x82 is one fade");
     }
 
-    /// A bonus barrel moves the level id as surely as the exit does, so the
-    /// trip into a bonus room currently reads as a clear. Coming back out has
-    /// to reopen the attempt — otherwise the death that follows is never
-    /// reported at all.
+    /// A fade to some other value is a different kind of scene change and is
+    /// not the signal at all.
     #[test]
-    fn returning_from_a_bonus_room_reopens_the_attempt() {
-        let mut w = watcher();
+    fn a_fade_to_another_value_does_not_arm() {
+        let (mut w, mut r) = in_stage(JUNGLE_START);
         let a = Addrs::default();
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-
-        put(&mut r, a.level_id, 0x0042);
-        assert_eq!(completed(&w.tick(&r, 60)), Some(60));
-
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 400);
-        put(&mut r, a.lives, 4);
-        assert_eq!(failed(&w.tick(&r, 500)), Some((500, FailReason::Death)));
+        put(&mut r, a.fade_type, 0x04);
+        assert!(faded(&w.tick(&r, 2)).is_empty());
+        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 30)), None);
     }
 
+    /// Starting in a level code the table does not cover means the stage
+    /// cannot be delimited, so no clear is claimed rather than a wrong one.
     #[test]
-    fn a_held_level_change_fires_once() {
-        let mut w = watcher();
-        let a = Addrs::default();
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-        put(&mut r, a.level_id, 0x0000);
-        assert_eq!(completed(&w.tick(&r, 2)), Some(2));
-        assert!(w.tick(&r, 3).is_empty());
-        assert!(w.tick(&r, 4).is_empty());
-    }
-
-    /// With no lives address configured there is no death detector, so an
-    /// unexplained level change cannot be claimed as a clear.
-    #[test]
-    fn without_a_death_detector_a_level_change_is_not_claimed_as_a_clear() {
-        let mut a = Addrs::default();
-        a.set("lives", None, None).unwrap();
-        let mut w = Watcher::new(a, Vec::new(), 0);
-        let mut r = wram();
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-        put(&mut r, a.level_id, 0x0000);
-        assert_eq!(failed(&w.tick(&r, 2)), Some((2, FailReason::LeftStage)));
+    fn an_unknown_entry_code_disables_the_completion_detector() {
+        let (mut w, mut r) = in_stage(999);
+        fade(&mut w, &mut r, 100);
+        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 130)), None);
     }
 
     #[test]
@@ -872,7 +970,7 @@ mod tests {
     #[test]
     fn damage_reports_once_an_address_is_supplied() {
         let mut a = Addrs::default();
-        let mut w = Watcher::new(a, Vec::new(), 0);
+        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
         let mut r = wram();
         r[0x08A5] = 2;
         w.tick(&r, 1);
@@ -880,7 +978,7 @@ mod tests {
         assert!(w.tick(&r, 2).is_empty(), "no detector without an address");
 
         a.set("kong_count", Some(0x7E_08A5), Some(Width::U8)).unwrap();
-        let mut w = Watcher::new(a, Vec::new(), 0);
+        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
         r[0x08A5] = 2;
         w.tick(&r, 1);
         r[0x08A5] = 1;
@@ -893,7 +991,7 @@ mod tests {
     fn a_death_suppresses_the_damage_it_also_causes() {
         let mut a = Addrs::default();
         a.set("kong_count", Some(0x08A5), Some(Width::U8)).unwrap();
-        let mut w = Watcher::new(a, Vec::new(), 0);
+        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
         let mut r = wram();
         put(&mut r, a.lives, 5);
         r[0x08A5] = 1;
@@ -910,50 +1008,32 @@ mod tests {
     fn enemy_kills_report_once_a_counter_is_supplied() {
         let mut a = Addrs::default();
         a.set("enemy_kills", Some(0x1000), Some(Width::U16)).unwrap();
-        let mut w = Watcher::new(a, Vec::new(), 0);
+        let mut w = Watcher::new(a, Vec::new(), DEFAULT_TRANSITION_WINDOW_FRAMES);
         let mut r = wram();
         w.tick(&r, 1);
         r[0x1000] = 2;
         assert!(w.tick(&r, 2).contains(&Event::EnemyKilled(2)));
     }
 
+    /// A savestate load reopens the attempt: a fresh rise to
+    /// STAGE_COMPLETE_FADE reports its own result rather than being suppressed
+    /// by the previous attempt's `resolved` flag.
     #[test]
     fn a_reset_starts_a_fresh_attempt() {
-        let mut w = watcher();
-        let a = Addrs::default();
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-        put(&mut r, a.level_id, 0x0000);
-        assert_eq!(completed(&w.tick(&r, 2)), Some(2));
+        let (mut w, mut r) = in_stage(JUNGLE_START);
+        fade(&mut w, &mut r, 900);
+        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 930)), Some(900));
 
-        // A savestate load drops us back into the level; the entry level has
-        // to be re-read rather than remembered from before the load.
+        // A savestate load drops us back into the stage. The entry family has
+        // to be re-read from RAM rather than remembered from before the load —
+        // otherwise the second attempt is measured against the wrong stage.
         w.reset();
-        put(&mut r, a.level_id, 0x0007);
+        let a = Addrs::default();
+        put(&mut r, a.level_id, JUNGLE_START);
         assert!(w.tick(&r, 1).is_empty());
-        put(&mut r, a.level_id, 0x0000);
-        assert_eq!(completed(&w.tick(&r, 2)), Some(2));
-    }
 
-    /// A state load lands mid-grace often enough to be worth pinning: the held
-    /// clear belongs to the attempt that was thrown away.
-    #[test]
-    fn a_reset_discards_a_held_clear() {
-        let a = Addrs::default();
-        let mut w = Watcher::new(a, Vec::new(), 120);
-        let mut r = wram();
-        put(&mut r, a.lives, 5);
-        put(&mut r, a.level_id, 0x0007);
-        w.tick(&r, 1);
-        put(&mut r, a.level_id, 0x0000);
-        w.tick(&r, 2);
-
-        w.reset();
-        put(&mut r, a.level_id, 0x0007);
-        let ev = idle(&mut w, &r, 1, 400);
-        assert_eq!(completed(&ev), None);
+        fade(&mut w, &mut r, 500);
+        assert_eq!(completed(&land_on(&mut w, &mut r, REPTILE_START, 530)), Some(500));
     }
 
     #[test]
