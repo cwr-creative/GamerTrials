@@ -8,7 +8,7 @@
 # Read the address caveat there before trusting a number: most of this has two
 # independent sources and none of it has a full playtest.
 
-schema_version = 1
+schema_version = 2
 
 [game]
 id = "dkc"
@@ -282,43 +282,139 @@ timed_to = "fade"
 emit = "stage_cleared"
 
 # ------------------------------------------------------------------- stages
+#
+# Where a run starts, and nothing else. Which kinds a stage can host is not
+# declared here — it is expressed by which [[challenge]] entries name it.
 
 [[stage]]
 id = "jungle-hijinx"
 name = "Jungle Hijinx"
 entry = { state = "assets/states/dkc_jungle-hijinxs.state" }
-challenges = ["time_trial", "endurance"]
 
 [[stage]]
 id = "reptile-rumble"
 name = "Reptile Rumble"
 entry = { state = "assets/states/dkc_reptile-rumble.state" }
-challenges = ["time_trial", "endurance"]
 
 [[stage]]
 id = "ropey-rampage"
 name = "Ropey Rampage"
 entry = { state = "assets/states/dkc_ropey-rampage.state" }
-challenges = ["time_trial", "endurance"]
 
 [[stage]]
 id = "barrel-cannon-canyon"
 name = "Barrel Cannon Canyon"
 entry = { state = "assets/states/dkc_barrel-cannon-canyon.state" }
-challenges = ["time_trial", "endurance"]
 
 [[stage]]
 id = "coral-capers"
 name = "Coral Capers"
 entry = { state = "assets/states/dkc_coral-capers.state" }
-challenges = ["time_trial", "endurance"]
 
 [[stage]]
 id = "mine-cart-carnage"
 name = "Mine Cart Carnage"
 entry = { state = "assets/states/dkc_mine-cart-carnage.state" }
-challenges = ["endurance"]
-note = "forced-scrolling: everyone finishes in the same number of frames, so it cannot be a time trial"
+note = "forced-scrolling: everyone finishes in the same number of frames, so there is no time trial on it"
+
+# --------------------------------------------------------------- challenges
+#
+# Every challenge a player can be dealt in DKC, written out one at a time
+# (ADR 0017). `cleared = true` is `in_stage` leaving 00 without the pause flag —
+# the rule above — so it holds however the player routed through the level.
+
+[[challenge]]
+id = "jungle-hijinx-time-trial"
+stage = "jungle-hijinx"
+kind = "time_trial"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "jungle-hijinx-survival"
+stage = "jungle-hijinx"
+kind = "survival"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "reptile-rumble-time-trial"
+stage = "reptile-rumble"
+kind = "time_trial"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "reptile-rumble-survival"
+stage = "reptile-rumble"
+kind = "survival"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "ropey-rampage-time-trial"
+stage = "ropey-rampage"
+kind = "time_trial"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "ropey-rampage-survival"
+stage = "ropey-rampage"
+kind = "survival"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "barrel-cannon-canyon-time-trial"
+stage = "barrel-cannon-canyon"
+kind = "time_trial"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "barrel-cannon-canyon-survival"
+stage = "barrel-cannon-canyon"
+kind = "survival"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "coral-capers-time-trial"
+stage = "coral-capers"
+kind = "time_trial"
+complete_when = { cleared = true }
+
+[[challenge]]
+id = "coral-capers-survival"
+stage = "coral-capers"
+kind = "survival"
+complete_when = { cleared = true }
+
+# No time trial: a forced-scrolling level is the same length for everyone.
+[[challenge]]
+id = "mine-cart-carnage-survival"
+stage = "mine-cart-carnage"
+kind = "survival"
+complete_when = { cleared = true }
+
+# Two challenges on one stage, which is the normal case rather than an edge one.
+# Forty-five seconds of a mine cart is a different ask from the whole level, and
+# `survive_seconds` is the only criterion that ends a run by itself — the others
+# wait on the player doing something.
+[[challenge]]
+id = "mine-cart-carnage-45s"
+name = "Mine Cart Carnage: 45 Seconds"
+stage = "mine-cart-carnage"
+kind = "survival"
+complete_when = { survive_seconds = 45.0 }
+
+# Conjunction, and the per-bit item naming: `kong_letters` is one byte, and the
+# `bit_labels` on its rule are what turn bit 2 into `kong_letter:N`. All four
+# letters *and* the exit, as fast as you can — either alone is a different
+# challenge, and neither is this one.
+[[challenge]]
+id = "jungle-hijinx-kong"
+name = "Jungle Hijinx: K-O-N-G"
+stage = "jungle-hijinx"
+kind = "time_trial"
+note = "every DKC level holds exactly four letters; the counts are 1 each, not 4 of one"
+
+[challenge.complete_when]
+cleared = true
+items_collected = { "kong_letter:K" = 1, "kong_letter:O" = 1, "kong_letter:N" = 1, "kong_letter:G" = 1 }
 
 # ----------------------------------------------------- level names, for the log
 #

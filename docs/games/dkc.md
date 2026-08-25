@@ -405,14 +405,25 @@ every level in the game. If a stage ever seems to need its own completion flag,
 that is evidence the general rule is wrong rather than a reason to add a
 per-stage override (see "Deliberately absent" in `docs/manifest-schema.md`).
 
-| Stage | Challenges |
+| Stage | Challenges on it |
 |---|---|
-| `jungle-hijinx` | time trial, endurance |
-| `reptile-rumble` | time trial, endurance |
-| `ropey-rampage` | time trial, endurance |
-| `barrel-cannon-canyon` | time trial, endurance |
-| `coral-capers` | time trial, endurance |
-| `mine-cart-carnage` | endurance only — forced-scrolling, so everyone finishes in the same number of frames |
+| `jungle-hijinx` | time trial, survival, and `jungle-hijinx-kong` |
+| `reptile-rumble` | time trial, survival |
+| `ropey-rampage` | time trial, survival |
+| `barrel-cannon-canyon` | time trial, survival |
+| `coral-capers` | time trial, survival |
+| `mine-cart-carnage` | survival, and `mine-cart-carnage-45s` — no time trial, since forced scrolling means everyone finishes in the same number of frames |
 
-That constraint is in the manifest now (`challenges = ["endurance"]`), not in
-this document's prose.
+Nothing above is declared as a constraint anywhere: a stage with no time trial
+simply has no time-trial `[[challenge]]` naming it (ADR 0017). Read the current
+list back with `--list-challenges` rather than trusting this table.
+
+Two of these are worked examples of the parts of `complete_when` the plain
+levels do not exercise:
+
+* `mine-cart-carnage-45s` — `survive_seconds`, the only criterion that ends a
+  run without the player doing anything.
+* `jungle-hijinx-kong` — a conjunction, and the per-bit item naming. The
+  `bit_labels` on the `kong_letters` rule are what make `kong_letter:N` the name
+  a criterion has to use; the bare `kong_letter` is refused at load. Every level
+  holds exactly four letters, so the counts are 1 each rather than 4 of one.

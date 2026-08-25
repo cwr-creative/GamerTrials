@@ -43,7 +43,11 @@ GAME:
     --game <NAME>    Manifest to run: a name (looked up as manifests/<NAME>.toml)
                      or a path to a .toml
     --stage <ID>     Stage to enter at startup. Default: the first one declared
+    --challenge <ID> Challenge to run: enters its stage and prints its criteria.
+                     The harness still scores nothing
     --list-stages    Print the manifest's stages and exit
+    --list-challenges
+                     Print every challenge and what completes it, and exit
     --list-addrs     Print the address table with its sources, and exit
 
 OPTIONS:
@@ -95,6 +99,7 @@ RAM PROBE (find a one-shot event - a hit, a pickup, a stage clear):
 struct Args {
     game: Option<String>,
     stage: Option<String>,
+    challenge: Option<String>,
     core: Option<PathBuf>,
     rom: Option<PathBuf>,
     state: Option<PathBuf>,
@@ -103,6 +108,7 @@ struct Args {
     addrs: Vec<String>,
     list_addrs: bool,
     list_stages: bool,
+    list_challenges: bool,
     dump_memory_map: bool,
     search_width: Width,
     probe_recent: u64,
@@ -141,18 +147,44 @@ fn run() -> Result<(), String> {
         print_stages(&manifest);
         return Ok(());
     }
+    if args.list_challenges {
+        print_challenges(&manifest);
+        return Ok(());
+    }
     if args.list_addrs {
         print_addrs(&manifest);
         return Ok(());
     }
 
+    if args.stage.is_some() && args.challenge.is_some() {
+        return Err("--stage and --challenge both choose where to start; pass one".into());
+    }
+
     // The entry point, chosen before the core is loaded so a bad --stage costs
     // nothing.
-    let stage = match &args.stage {
-        Some(id) => manifest.stage(id).ok_or_else(|| {
-            format!("{game} declares no stage `{id}`; try --list-stages")
-        })?,
-        None => manifest
+    //
+    // A challenge is only ever resolved to its stage here. The harness prints
+    // the criteria and then ignores them: judging a run against them needs
+    // `challenge-core`, and an adapter that decided a run was won would be the
+    // exact mistake ADR 0017 exists to prevent.
+    let stage = match (&args.stage, &args.challenge) {
+        (Some(id), _) => manifest
+            .stage(id)
+            .ok_or_else(|| format!("{game} declares no stage `{id}`; try --list-stages"))?,
+        (None, Some(id)) => {
+            let c = manifest.challenge(id).ok_or_else(|| {
+                format!("{game} declares no challenge `{id}`; try --list-challenges")
+            })?;
+            println!(
+                "[challenge] {} ({}) — completed by: {}",
+                c.id.0,
+                c.kind,
+                describe(&c.complete_when)
+            );
+            println!("[challenge] the harness scores nothing; this is what challenge-core will read");
+            manifest.stage(&c.stage.0).expect("validation proved the stage exists")
+        }
+        (None, None) => manifest
             .stages
             .first()
             .ok_or_else(|| format!("{game} declares no stages at all"))?,
@@ -429,12 +461,58 @@ fn print_addrs(m: &Manifest) {
 fn print_stages(m: &Manifest) {
     println!("[stage] stages declared by {}:", m.id);
     for s in &m.stages {
-        let kinds: Vec<String> = s.challenges.iter().map(|c| c.to_string()).collect();
-        println!("        {:<22} {:<26} {}", s.id.0, s.name, kinds.join(", "));
+        let n = m.challenges_on(&s.id).count();
+        let carries = match n {
+            0 => "no challenges — nothing can be dealt on it".to_string(),
+            1 => "1 challenge".to_string(),
+            n => format!("{n} challenges"),
+        };
+        println!("        {:<22} {:<26} {carries}", s.id.0, s.name);
         if let Some(note) = &s.note {
             println!("        {:<22} {note}", "");
         }
     }
+}
+
+/// Every challenge the game offers, and what completes each. The harness scores
+/// none of them — it prints them so a contributor can read back what the file
+/// they just wrote actually says.
+fn print_challenges(m: &Manifest) {
+    println!("[challenge] challenges declared by {}:", m.id);
+    for c in &m.challenges {
+        println!(
+            "        {:<34} {:<11} on {:<22} {}",
+            c.id.0,
+            c.kind.to_string(),
+            c.stage.0,
+            describe(&c.complete_when)
+        );
+        if let Some(note) = &c.note {
+            println!("        {:<34} {note}", "");
+        }
+    }
+}
+
+/// `complete_when` as one line. Every criterion listed has to hold, so they are
+/// joined with "and" rather than commas — the conjunction is the whole meaning.
+fn describe(c: &session_api::Completion) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if c.cleared {
+        parts.push("cleared".to_string());
+    }
+    if let Some(f) = c.survive_frames {
+        parts.push(format!("survive {f} frames"));
+    }
+    if let Some(n) = c.enemies_defeated {
+        parts.push(format!("defeat {n} enemies"));
+    }
+    for (item, n) in &c.items_collected {
+        parts.push(format!("collect {n} x {item}"));
+    }
+    for o in &c.objectives {
+        parts.push(format!("reach {o}"));
+    }
+    parts.join(" and ")
 }
 
 /// What a region of this size is likely to be. A guess from the size alone —
@@ -584,6 +662,7 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut args = Args {
         game: None,
         stage: None,
+        challenge: None,
         core: None,
         rom: None,
         state: None,
@@ -592,6 +671,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         addrs: Vec::new(),
         list_addrs: false,
         list_stages: false,
+        list_challenges: false,
         dump_memory_map: false,
         search_width: Width::U16,
         // ~a third of a second either side of the keypress: long enough to
@@ -613,6 +693,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "-h" | "--help" => return Ok(None),
             "--game" => args.game = Some(value("--game")?),
             "--stage" => args.stage = Some(value("--stage")?),
+            "--challenge" => args.challenge = Some(value("--challenge")?),
             "--core" => args.core = Some(PathBuf::from(value("--core")?)),
             "--rom" => args.rom = Some(PathBuf::from(value("--rom")?)),
             "--state" => args.state = Some(PathBuf::from(value("--state")?)),
@@ -625,6 +706,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-probe" => args.probe = false,
             "--list-addrs" => args.list_addrs = true,
             "--list-stages" => args.list_stages = true,
+            "--list-challenges" => args.list_challenges = true,
             "--dump-memory-map" => args.dump_memory_map = true,
             "--addr" => args.addrs.push(value("--addr")?),
             "--search-width" => args.search_width = Width::parse(value("--search-width")?.trim())?,

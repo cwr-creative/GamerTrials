@@ -5,14 +5,39 @@ multiple classic games simultaneously; live telemetry and spectating.
 
 Solo developer. Windows targets. Vertical slice = SMB3 (NES), DKC (SNES), Doom (PC).
 
-## Challenge types
+## Challenges
 
-- **Time trial** — reach a defined end point as fast as possible.
-- **Endurance** — survive a defined span without dying.
+A session runs in one of three modes — time trial, survival, or both — and deals
+a randomised series of challenges from the library. Three words, used precisely
+(ADR 0017):
 
-Either type may run on **vanilla** content (a stage as it originally shipped) or
-on **generated** content (layout produced per attempt from a seed — ADR 0013,
-not before Phase 3). Both stage sources feed the same sequencing and scoring.
+- **stage** — a place, and the entry point that reaches it.
+- **challenge** — what a player is dealt: one stage, one kind, and the criteria
+  that complete it. A stage may carry several.
+- **attempt** — one entry-to-terminal-event span. A **run** is a player's whole
+  go at one challenge.
+
+The two kinds differ in what death costs, not in what completes them:
+
+- **Time trial** — on death, re-enter at the stage's entry point with the clock
+  still running. Scored on total frames across every attempt.
+- **Survival** — on death the run is over and the player spectates. Scored on
+  whether the criteria were met at all. "Without dying" is therefore not a
+  criterion; it is what the kind means.
+
+Whoever finishes first spectates the other until they finish too.
+
+**Contributors define every challenge explicitly**, in the manifest. Nothing is
+inferred from a stage: 100 levels as time trials is 100 `[[challenge]]` entries,
+and 200 if they should also be survival runs. Completion criteria are a closed
+predicate set over facts the same manifest emits — never code, never arithmetic.
+
+Neither kind has a failure bound yet, and one is owed before either ships; see
+ADR 0017.
+
+Either kind may run on **vanilla** content (a stage as it originally shipped) or
+on **generated** content (a ROM patched per attempt from a seed — ADR 0013/0015,
+not before Phase 3). Both feed the same sequencing and scoring.
 
 Head-to-head, where players share one running game, is last by choice: it needs
 synchronised netcode rather than one-way telemetry. Nothing in the slice may
@@ -33,9 +58,10 @@ These are settled. Do not violate them without writing a superseding ADR.
 4. **Timing is measured in emulated frames, never wall-clock.** `SessionEvent`
    carries `frame: u64` by design.
 5. **Adding a game is a data change, not a code change.** New game = new manifest.
-   If it requires touching Rust, the abstraction has failed — fix the abstraction.
-   Adding a *generator* for procedural content is code (ADR 0013); its output is
-   still data, and `challenge-core` still never learns generators exist.
+   So is adding a *challenge* to a game (ADR 0017). If either requires touching
+   Rust, the abstraction has failed — fix the abstraction. Adding a *generator*
+   for procedural content is code (ADR 0013); its output is still data, and
+   `challenge-core` still never learns generators exist.
 6. **Every phase ends in something runnable.** No big-bang integration.
 
 ## Structure
@@ -58,8 +84,10 @@ These are settled. Do not violate them without writing a superseding ADR.
   field, and live in `manifests/`. The schema is `docs/manifest-schema.md`;
   `session-libretro` is the authority on what parses. Generated artifacts get no
   manifest of their own; they are identified by their derivation key (ADR 0013).
-- A manifest reports *facts* — cleared, exited, died, damaged, item. What a run
-  was worth is `challenge-core`'s question. There is no `stage_failed`.
+- A manifest reports *facts* — cleared, exited, died, damaged, item, objective —
+  and declares *criteria* (`[[challenge]].complete_when`). It never produces a
+  verdict: an adapter must never decide a run was won, and there is no
+  `stage_failed`. `challenge-core` compares the facts against the criteria.
 - Manifests may author durations in seconds. They convert to frames at the game's
   framerate on load — seconds never reach a `SessionEvent` or a wire message.
 - Wire protocol messages carry a version field. Never remove a field; deprecate it.
@@ -80,17 +108,22 @@ is `docs/manifest-schema.md` and the decision is ADR 0016. Not core-specific:
 what varies between the two consoles is `[runner.libretro.memory]` and a pad
 layout, both per console family rather than per core.
 
+Then `schema_version = 2` (ADR 0017): challenges became contributor-authored
+`[[challenge]]` entries with declared completion criteria, rather than a closed
+Rust enum plus an eligibility list on the stage.
+
 Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
-What Phase 2 did *not* do, and the next things to settle:
+What is *not* done, and the next things to settle:
 
 - **No playtest of DKC's addresses.** Almost all have two independent sources
   and none have been confirmed against the running game. `--frames` and
   `--addr` are the tools; `docs/games/dkc.md` lists what is unverified.
 - **ADR 0014 is still owed** the external-process half: Doom has no addressable
   core RAM, and `[runner.external]` is where that answer goes.
-- **`challenge-core` does not exist.** `SessionEvent`s are produced and nothing
-  scores them yet.
+- **`challenge-core` does not exist.** `SessionEvent`s are produced, challenges
+  declare what completes them, and nothing yet compares the two. It also owes
+  the failure bound neither kind has (ADR 0017) and the crate split that moves
+  `[[challenge]]` parsing out of an adapter.
 - No generated content (`content-gen`, ADR 0013/0015 — the schema documents
-  `[[challenge]]` patch slots and the loader refuses them), no endurance
-  scoring, no head-to-head.
+  patch slots and the loader refuses them), no scoring, no head-to-head.

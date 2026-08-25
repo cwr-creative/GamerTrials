@@ -12,17 +12,23 @@
 //! detector that silently never fires from a typo in a key name, and that looks
 //! exactly like a wrong address.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use session_api::{AssetKey, ChallengeKind, EntryPoint, Framerate, GameId, StageId, StageSpec};
+use session_api::{
+    AssetKey, ChallengeId, ChallengeKind, ChallengeSpec, Completion, EntryPoint, Framerate, GameId,
+    StageId, StageSpec,
+};
 
 use crate::memory::{AddressSpace, Endian, Prefer, Width};
 
 /// The only schema version this build understands. A manifest states its own,
 /// and one from the future is refused rather than half-read.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// 2 is ADR 0017: `[[challenge]]` became the contributor-authored definition of
+/// a challenge, and `[[stage]]` lost `challenges` and `endurance`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 // ------------------------------------------------------------- raw documents
 
@@ -47,12 +53,8 @@ struct Doc {
     attempt: AttemptDoc,
     #[serde(default)]
     stage: Vec<StageDoc>,
-    /// Declared so the error can say what is actually going on. ADR 0015
-    /// settled the shape of a generated challenge's patch slots, and
-    /// `content-gen` will read them — but nothing in this crate does, and a
-    /// half-implemented path is worse than an honest refusal.
     #[serde(default)]
-    challenge: Vec<toml::Value>,
+    challenge: Vec<ChallengeDoc>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -210,6 +212,8 @@ struct RuleDoc {
     #[serde(default)]
     item: Option<String>,
     #[serde(default)]
+    objective: Option<String>,
+    #[serde(default)]
     log: Option<String>,
 }
 
@@ -231,6 +235,9 @@ struct TriggerDoc {
     bit: Option<u32>,
 }
 
+/// Where a run starts, and nothing else. A stage carries no completion
+/// condition of its own and does not say which kinds it can host — that is
+/// expressed by which `[[challenge]]`s name it (ADR 0017).
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 struct StageDoc {
@@ -238,10 +245,6 @@ struct StageDoc {
     #[serde(default)]
     name: Option<String>,
     entry: EntryDoc,
-    #[serde(default)]
-    challenges: Vec<String>,
-    #[serde(default)]
-    endurance: Option<EnduranceDoc>,
     #[serde(default)]
     note: Option<String>,
 }
@@ -258,12 +261,50 @@ struct EntryDoc {
     named: Option<String>,
 }
 
+/// What a player is actually dealt: one stage, one kind, and the criteria that
+/// complete it. Contributors author every one they want to exist; nothing is
+/// inferred from a stage (ADR 0017).
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
-struct EnduranceDoc {
+struct ChallengeDoc {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    stage: String,
+    kind: String,
+    complete_when: CompleteWhenDoc,
+    #[serde(default)]
+    note: Option<String>,
+
+    // ADR 0015's generated-challenge keys. Declared, rather than left to
+    // `deny_unknown_fields`, so the refusal can explain what they are and why
+    // nothing reads them yet — "unknown field `patch_slot`" would read like a
+    // typo in a key that is in fact documented.
+    #[serde(default)]
+    patch_slot: Vec<toml::Value>,
+    #[serde(default)]
+    group: Option<toml::Value>,
+    #[serde(default)]
+    generator_version: Option<i64>,
+}
+
+/// A conjunction over the facts this manifest's own rules emit. Every criterion
+/// present must hold; there is no `any`, no negation, no arithmetic.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct CompleteWhenDoc {
+    #[serde(default)]
+    cleared: Option<bool>,
     /// Authored in seconds, converted to frames at load. Seconds never leave
     /// this module.
-    survive_seconds: f64,
+    #[serde(default)]
+    survive_seconds: Option<f64>,
+    #[serde(default)]
+    enemies_defeated: Option<i64>,
+    #[serde(default)]
+    items_collected: BTreeMap<String, i64>,
+    #[serde(default)]
+    objectives: Vec<String>,
 }
 
 // -------------------------------------------------------------- loaded shape
@@ -317,6 +358,10 @@ pub enum Emit {
     Damaged,
     EnemyDefeated,
     Item(String),
+    /// A named milestone the game announced — a boss dying, a gate opening.
+    /// Still a fact: whether reaching it completes anything is a challenge's
+    /// `complete_when`, not this rule's business.
+    Objective(String),
     /// Logged, and nothing more. For a signal worth watching during a playtest
     /// that is not yet known to mean anything — a powerup change, a pipe
     /// transit — where inventing a `SessionEvent` for it would be a guess.
@@ -352,15 +397,27 @@ pub struct Trigger {
     pub edge: Edge,
 }
 
+/// A place, and the entry point that reaches it. Setup, not scoring.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub id: StageId,
     pub name: String,
     pub entry: EntryPoint,
-    pub challenges: Vec<ChallengeKind>,
-    /// Already in frames. A manifest may author it in seconds; the conversion
-    /// happens here so that seconds never reach a `SessionEvent` or the wire.
-    pub survive_frames: Option<u64>,
+    pub note: Option<String>,
+}
+
+/// One challenge this game offers. Several may share a `stage`: the same place
+/// with different criteria is different challenges, and that is the normal case.
+#[derive(Clone, Debug)]
+pub struct Challenge {
+    pub id: ChallengeId,
+    pub name: String,
+    pub stage: StageId,
+    pub kind: ChallengeKind,
+    /// Already in frames wherever a duration is involved. A manifest may author
+    /// seconds; the conversion happens at load so that seconds never reach a
+    /// `SessionEvent` or the wire.
+    pub complete_when: Completion,
     pub note: Option<String>,
 }
 
@@ -427,6 +484,7 @@ pub struct Manifest {
     pub rules: Vec<Rule>,
     pub reset_on: Vec<Trigger>,
     pub stages: Vec<Stage>,
+    pub challenges: Vec<Challenge>,
     /// Where it was read from, for messages and for resolving relative paths.
     pub source: PathBuf,
 }
@@ -450,6 +508,18 @@ impl Manifest {
 
     pub fn stage(&self, id: &str) -> Option<&Stage> {
         self.stages.iter().find(|s| s.id.0 == id)
+    }
+
+    pub fn challenge(&self, id: &str) -> Option<&Challenge> {
+        self.challenges.iter().find(|c| c.id.0 == id)
+    }
+
+    /// Every challenge that runs on one stage, in declaration order.
+    pub fn challenges_on<'a>(
+        &'a self,
+        stage: &'a StageId,
+    ) -> impl Iterator<Item = &'a Challenge> {
+        self.challenges.iter().filter(move |c| &c.stage == stage)
     }
 
     /// Applies one `--addr name=ADDR[:width]` override, or unsets the field.
@@ -498,6 +568,19 @@ impl Manifest {
         StageSpec { game: self.id.clone(), stage: stage.id.clone(), entry }
     }
 
+    /// The challenge as `challenge-core` will see it. Nothing adapter-shaped
+    /// crosses: a spec names a stage, never the state file behind it.
+    pub fn challenge_spec(&self, challenge: &Challenge) -> ChallengeSpec {
+        ChallengeSpec {
+            id: challenge.id.clone(),
+            name: challenge.name.clone(),
+            game: self.id.clone(),
+            stage: challenge.stage.clone(),
+            kind: challenge.kind,
+            complete_when: challenge.complete_when.clone(),
+        }
+    }
+
     /// Resolves a path a manifest names.
     ///
     /// Absolute paths are left alone. A relative one is tried as written first —
@@ -540,6 +623,17 @@ fn as_usize(v: i64, what: &str) -> Result<usize, String> {
 
 fn as_u32(v: i64, what: &str) -> Result<u32, String> {
     u32::try_from(v).map_err(|_| format!("{what} is out of range, got {v}"))
+}
+
+/// For the tail of a "you named X, this manifest has Y" error. An empty set is
+/// the interesting case — it means the rule was never written, not that the
+/// name was misspelled — so it says so rather than trailing off after a colon.
+fn list_or_none(names: &BTreeSet<String>) -> String {
+    if names.is_empty() {
+        "none at all".to_string()
+    } else {
+        names.iter().cloned().collect::<Vec<_>>().join(", ")
+    }
 }
 
 fn edge(
@@ -616,14 +710,6 @@ impl Doc {
                 "schema_version {} is not {SCHEMA_VERSION}, which is what this build reads",
                 self.schema_version
             ));
-        }
-        if !self.challenge.is_empty() {
-            return Err(
-                "[[challenge]] declares a generated challenge's patch slots (ADR 0015). \
-                 The shape is documented in docs/manifest-schema.md, but no crate reads it \
-                 yet — `content-gen` will. Remove it until then."
-                    .to_string(),
-            );
         }
         if self.runner.kind != "libretro" {
             return Err(format!(
@@ -757,11 +843,14 @@ impl Doc {
                         .clone()
                         .ok_or_else(|| format!("{what}: emit `item` needs an `item` name"))?,
                 ),
+                "objective" => Emit::Objective(r.objective.clone().ok_or_else(|| {
+                    format!("{what}: emit `objective` needs an `objective` name")
+                })?),
                 "note" => Emit::Note,
                 other => {
                     return Err(format!(
                         "{what}: unknown emit `{other}`; try stage_cleared, stage_exited, \
-                         died, damaged, enemy_defeated, item, note"
+                         died, damaged, enemy_defeated, item, objective, note"
                     ))
                 }
             };
@@ -770,6 +859,9 @@ impl Doc {
             }
             if r.item.is_some() && !matches!(emit, Emit::Item(_)) {
                 return Err(format!("{what}: only `item` takes an `item` name"));
+            }
+            if r.objective.is_some() && !matches!(emit, Emit::Objective(_)) {
+                return Err(format!("{what}: only `objective` takes an `objective` name"));
             }
             let guard = match &r.guard {
                 Some(g) => {
@@ -838,27 +930,6 @@ impl Doc {
                     return Err(format!("{what}: entry needs exactly one of `state` or `named`"))
                 }
             };
-            let mut challenges = Vec::new();
-            for c in &s.challenges {
-                challenges.push(match c.as_str() {
-                    "time_trial" => ChallengeKind::TimeTrial,
-                    "endurance" => ChallengeKind::Endurance,
-                    other => {
-                        return Err(format!(
-                            "{what}: challenge `{other}`; try time_trial or endurance"
-                        ))
-                    }
-                });
-            }
-            if let Some(e) = &s.endurance {
-                if !challenges.contains(&ChallengeKind::Endurance) {
-                    return Err(format!(
-                        "{what}: has an [endurance] block but does not list `endurance` \
-                         among its challenges"
-                    ));
-                }
-                let _ = e;
-            }
             if stages.iter().any(|x: &Stage| x.id.0 == s.id) {
                 return Err(format!("{what}: declared twice"));
             }
@@ -866,10 +937,162 @@ impl Doc {
                 id: StageId(s.id.clone()),
                 name: s.name.clone().unwrap_or_else(|| s.id.clone()),
                 entry,
-                challenges,
-                // Seconds in, frames out, once, here.
-                survive_frames: s.endurance.as_ref().map(|e| framerate.frames(e.survive_seconds)),
                 note: s.note.clone(),
+            });
+        }
+
+        // What this manifest's rules can actually announce. A `complete_when`
+        // is checked against these, because a criterion naming a fact nothing
+        // emits is a challenge nobody can ever complete — which looks exactly
+        // like a wrong address, and is the same failure `deny_unknown_fields`
+        // exists to prevent, one level up.
+        let mut emits_cleared = false;
+        let mut emits_enemy = false;
+        let mut item_names: BTreeSet<String> = BTreeSet::new();
+        let mut objective_names: BTreeSet<String> = BTreeSet::new();
+        for r in &rules {
+            match &r.emit {
+                Emit::StageCleared => emits_cleared = true,
+                Emit::EnemyDefeated => emits_enemy = true,
+                Emit::Objective(n) => {
+                    objective_names.insert(n.clone());
+                }
+                Emit::Item(name) => {
+                    // A per-bit rule names one item per bit — `kong_letter`
+                    // becomes `kong_letter:K` — so those are the names a
+                    // criterion has to use. Without labels the watcher falls
+                    // back to the bit number, and there are only ever 32.
+                    if r.edge == Edge::BitsSet {
+                        if r.bit_labels.is_empty() {
+                            item_names.extend((0..32).map(|b| format!("{name}:{b}")));
+                        } else {
+                            item_names
+                                .extend(r.bit_labels.iter().map(|l| format!("{name}:{l}")));
+                        }
+                    } else {
+                        item_names.insert(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut challenges: Vec<Challenge> = Vec::new();
+        for c in &self.challenge {
+            let what = format!("challenge `{}`", c.id);
+            if !c.patch_slot.is_empty() || c.group.is_some() || c.generator_version.is_some() {
+                return Err(format!(
+                    "{what}: `patch_slot`, `group` and `generator_version` declare a \
+                     generated challenge's ROM patches (ADR 0015). The shape is documented \
+                     in docs/manifest-schema.md, but no crate reads them yet — `content-gen` \
+                     will. Remove them until then."
+                ));
+            }
+            if challenges.iter().any(|x| x.id.0 == c.id) {
+                return Err(format!("{what}: declared twice"));
+            }
+            let kind = match c.kind.as_str() {
+                "time_trial" => ChallengeKind::TimeTrial,
+                "survival" => ChallengeKind::Survival,
+                other => {
+                    return Err(format!("{what}: kind `{other}`; try time_trial or survival"))
+                }
+            };
+            let stage = stages.iter().find(|s| s.id.0 == c.stage).ok_or_else(|| {
+                format!("{what}: stage `{}` is not declared by this manifest", c.stage)
+            })?;
+
+            let w = &c.complete_when;
+            let mut complete_when = Completion {
+                cleared: w.cleared.unwrap_or(false),
+                survive_frames: None,
+                enemies_defeated: None,
+                items_collected: BTreeMap::new(),
+                objectives: w.objectives.clone(),
+            };
+
+            if w.cleared == Some(false) {
+                // `cleared = false` reads as a criterion and is not one. Saying
+                // so beats silently dropping it.
+                return Err(format!(
+                    "{what}: `cleared = false` is not a criterion; remove the key instead"
+                ));
+            }
+            if complete_when.cleared && !emits_cleared {
+                return Err(format!(
+                    "{what}: complete_when.cleared, but no [[rule]] emits `stage_cleared`"
+                ));
+            }
+
+            if let Some(secs) = w.survive_seconds {
+                if kind != ChallengeKind::Survival {
+                    return Err(format!(
+                        "{what}: survive_seconds is a survival criterion; \"survive {secs} \
+                         seconds fastest\" is not something a time trial can be won at"
+                    ));
+                }
+                // Infinity and NaN both reach `Framerate::frames`, where the
+                // cast saturates instead of failing, so they are caught here.
+                if !secs.is_finite() || secs <= 0.0 {
+                    return Err(format!(
+                        "{what}: survive_seconds must be a positive number of seconds, got {secs}"
+                    ));
+                }
+                // Seconds in, frames out, once, here.
+                complete_when.survive_frames = Some(framerate.frames(secs));
+            }
+
+            if let Some(n) = w.enemies_defeated {
+                let n = as_u32(n, &format!("{what}: enemies_defeated"))?;
+                if n == 0 {
+                    return Err(format!("{what}: enemies_defeated must be at least 1"));
+                }
+                if !emits_enemy {
+                    return Err(format!(
+                        "{what}: complete_when.enemies_defeated, but no [[rule]] emits \
+                         `enemy_defeated`"
+                    ));
+                }
+                complete_when.enemies_defeated = Some(n);
+            }
+
+            for (item, count) in &w.items_collected {
+                let n = as_u32(*count, &format!("{what}: items_collected.{item}"))?;
+                if n == 0 {
+                    return Err(format!("{what}: items_collected.{item} must be at least 1"));
+                }
+                if !item_names.contains(item) {
+                    return Err(format!(
+                        "{what}: no [[rule]] emits item `{item}`; this manifest emits {}",
+                        list_or_none(&item_names)
+                    ));
+                }
+                complete_when.items_collected.insert(item.clone(), n);
+            }
+
+            for objective in &complete_when.objectives {
+                if !objective_names.contains(objective) {
+                    return Err(format!(
+                        "{what}: no [[rule]] emits objective `{objective}`; this manifest \
+                         emits {}",
+                        list_or_none(&objective_names)
+                    ));
+                }
+            }
+
+            if complete_when.is_empty() {
+                return Err(format!(
+                    "{what}: complete_when has no criteria, so nothing can ever complete it"
+                ));
+            }
+
+            challenges.push(Challenge {
+                id: ChallengeId(c.id.clone()),
+                name: c.name.clone().unwrap_or_else(|| stage.name.clone()),
+                stage: stage.id.clone(),
+                kind,
+                complete_when,
+                note: c.note.clone(),
             });
         }
 
@@ -915,6 +1138,7 @@ impl Doc {
             rules,
             reset_on,
             stages,
+            challenges,
             source: source.to_path_buf(),
         })
     }
@@ -925,7 +1149,7 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = r#"
-schema_version = 1
+schema_version = 2
 [game]
 id = "t"
 title = "Test"
@@ -957,9 +1181,34 @@ at = 0x0736
         assert_eq!(m.watch("lives").unwrap().width, Width::U8);
     }
 
+    /// A stage, and a rule that can clear it. The starting point for anything
+    /// testing challenges.
+    const CLEARABLE: &str = r#"
+[[rule]]
+field = "lives"
+edge = "increases"
+emit = "stage_cleared"
+[[stage]]
+id = "s"
+entry = { state = "a.state" }
+"#;
+
+    fn with_challenge(body: &str) -> Result<Manifest, String> {
+        parse(&format!("{MINIMAL}{CLEARABLE}\n[[challenge]]\nstage = \"s\"\n{body}"))
+    }
+
     #[test]
     fn a_future_schema_version_is_refused_rather_than_half_read() {
-        let text = MINIMAL.replace("schema_version = 1", "schema_version = 2");
+        let text = MINIMAL.replace("schema_version = 2", "schema_version = 3");
+        assert!(parse(&text).unwrap_err().contains("schema_version"));
+    }
+
+    /// Schema 1 put `challenges` and `endurance` on the stage. Both are gone,
+    /// and a manifest still carrying them says so at the version rather than
+    /// dying on an unknown key.
+    #[test]
+    fn a_schema_1_manifest_is_refused_at_the_version() {
+        let text = MINIMAL.replace("schema_version = 2", "schema_version = 1");
         assert!(parse(&text).unwrap_err().contains("schema_version"));
     }
 
@@ -1008,21 +1257,22 @@ at = 0x0736
 
     #[test]
     fn durations_authored_in_seconds_are_stored_as_frames() {
-        let text = format!(
-            "{MINIMAL}\n[[stage]]\nid = \"s\"\nentry = {{ state = \"a.state\" }}\n\
-             challenges = [\"endurance\"]\nendurance = {{ survive_seconds = 30 }}\n"
-        );
-        let m = parse(&text).unwrap();
-        assert_eq!(m.stage("s").unwrap().survive_frames, Some(1800));
+        let m = with_challenge(
+            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { survive_seconds = 30 }\n",
+        )
+        .unwrap();
+        assert_eq!(m.challenge("c").unwrap().complete_when.survive_frames, Some(1800));
     }
 
+    /// "Survive 30 seconds fastest" is not something anyone can win, so the
+    /// criterion belongs to survival alone.
     #[test]
-    fn an_endurance_block_on_a_stage_that_is_not_an_endurance_stage_is_refused() {
-        let text = format!(
-            "{MINIMAL}\n[[stage]]\nid = \"s\"\nentry = {{ state = \"a.state\" }}\n\
-             challenges = [\"time_trial\"]\nendurance = {{ survive_seconds = 30 }}\n"
-        );
-        assert!(parse(&text).is_err());
+    fn survive_seconds_on_a_time_trial_is_refused() {
+        let e = with_challenge(
+            "id = \"c\"\nkind = \"time_trial\"\ncomplete_when = { survive_seconds = 30 }\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("survival criterion"), "{e}");
     }
 
     #[test]
@@ -1031,11 +1281,146 @@ at = 0x0736
         assert!(parse(&text).unwrap_err().contains("exactly one"));
     }
 
-    /// ADR 0015 documented patch slots; nothing implements them. Saying so is
-    /// better than accepting a table that will not do anything.
+    // ------------------------------------------------------------ challenges
+
+    #[test]
+    fn a_challenge_defaults_its_name_to_the_stages() {
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}name = \"The Stage\"\n\
+             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+             complete_when = {{ cleared = true }}\n"
+        );
+        let m = parse(&text).unwrap();
+        assert_eq!(m.challenge("c").unwrap().name, "The Stage");
+        assert_eq!(m.challenge("c").unwrap().kind, ChallengeKind::Survival);
+    }
+
+    /// Several challenges on one stage is the normal case, not an edge case.
+    #[test]
+    fn one_stage_can_carry_several_challenges() {
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"tt\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ cleared = true }}\n\
+             [[challenge]]\nid = \"sv\"\nstage = \"s\"\nkind = \"survival\"\n\
+             complete_when = {{ cleared = true }}\n"
+        );
+        let m = parse(&text).unwrap();
+        let s = StageId("s".into());
+        let on: Vec<&str> = m.challenges_on(&s).map(|c| c.id.0.as_str()).collect();
+        assert_eq!(on, vec!["tt", "sv"]);
+    }
+
+    #[test]
+    fn a_challenge_naming_an_undeclared_stage_is_refused() {
+        let e = with_challenge(
+            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n",
+        );
+        assert!(e.is_ok(), "the control case must pass: {e:?}");
+
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"c\"\nstage = \"nope\"\nkind = \"survival\"\n\
+             complete_when = {{ cleared = true }}\n"
+        );
+        assert!(parse(&text).unwrap_err().contains("is not declared"));
+    }
+
+    #[test]
+    fn two_challenges_cannot_share_an_id() {
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+             complete_when = {{ cleared = true }}\n\
+             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ cleared = true }}\n"
+        );
+        assert!(parse(&text).unwrap_err().contains("declared twice"));
+    }
+
+    #[test]
+    fn a_challenge_with_no_criteria_is_refused() {
+        let e = with_challenge("id = \"c\"\nkind = \"survival\"\ncomplete_when = { }\n")
+            .unwrap_err();
+        assert!(e.contains("no criteria"), "{e}");
+    }
+
+    /// The point of validating criteria at load: a criterion naming a fact this
+    /// manifest never emits is a challenge nobody can ever complete, and it
+    /// looks exactly like a wrong address.
+    #[test]
+    fn a_criterion_over_a_fact_nothing_emits_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[[stage]]\nid = \"s\"\nentry = {{ state = \"a.state\" }}\n\
+             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+             complete_when = {{ cleared = true }}\n"
+        );
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("no [[rule]] emits `stage_cleared`"), "{e}");
+
+        let e = with_challenge(
+            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { enemies_defeated = 3 }\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("`enemy_defeated`"), "{e}");
+
+        let e = with_challenge(
+            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { objectives = [\"boss\"] }\n",
+        )
+        .unwrap_err();
+        assert!(e.contains("none at all"), "{e}");
+    }
+
+    /// A per-bit item rule names one item per bit, so `kong_letter:K` is the
+    /// name a criterion has to use — and the bare `kong_letter` is not one.
+    #[test]
+    fn per_bit_items_are_known_by_their_labelled_names() {
+        let rule = "[[rule]]\nfield = \"lives\"\nedge = \"bits_set\"\n\
+                    bit_labels = [\"K\", \"O\"]\nemit = \"item\"\nitem = \"letter\"\n";
+        let ok = format!(
+            "{MINIMAL}{CLEARABLE}{rule}\
+             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+             [challenge.complete_when]\nitems_collected = {{ \"letter:K\" = 1 }}\n"
+        );
+        let m = parse(&ok).unwrap();
+        assert_eq!(m.challenge("c").unwrap().complete_when.items_collected["letter:K"], 1);
+
+        let bad = ok.replace("\"letter:K\"", "\"letter\"");
+        let e = parse(&bad).unwrap_err();
+        assert!(e.contains("letter:K, letter:O"), "{e}");
+    }
+
+    #[test]
+    fn an_objective_rule_makes_an_objective_criterion_legal() {
+        let rule = "[[rule]]\nfield = \"lives\"\nedge = \"enters\"\nvalue = 0\n\
+                    emit = \"objective\"\nobjective = \"boss-defeated\"\n";
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}{rule}\
+             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ objectives = [\"boss-defeated\"] }}\n"
+        );
+        let m = parse(&text).unwrap();
+        assert_eq!(m.challenge("c").unwrap().complete_when.objectives, vec!["boss-defeated"]);
+    }
+
+    #[test]
+    fn an_objective_emit_needs_a_name() {
+        let text = format!(
+            "{MINIMAL}\n[[rule]]\nfield = \"lives\"\nedge = \"decreases\"\nemit = \"objective\"\n"
+        );
+        assert!(parse(&text).unwrap_err().contains("needs an `objective` name"));
+    }
+
+    /// ADR 0015 documented patch slots; nothing implements them. The challenge
+    /// itself is real now, so the refusal is of the generator keys alone, and it
+    /// says which ones and why.
     #[test]
     fn patch_slots_are_refused_with_an_explanation() {
-        let text = format!("{MINIMAL}\n[[challenge]]\nid = \"reroll\"\n");
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ cleared = true }}\ngenerator_version = 1\n"
+        );
         let e = parse(&text).unwrap_err();
         assert!(e.contains("ADR 0015"), "{e}");
     }

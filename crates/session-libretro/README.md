@@ -34,11 +34,15 @@ repository actually ships.
 
 ## The harness is not the client
 
-It prints `SessionEvent`s and scores nothing. Deciding what a run was worth
-needs a challenge, and that is `challenge-core`'s job. What this binary is for
+It prints `SessionEvent`s and scores nothing — not even against a challenge's
+own `complete_when`, which `--challenge` prints and then ignores. Comparing
+facts to criteria is `challenge-core`'s job, and an adapter that decided a run
+was won would be the mistake ADR 0017 exists to prevent. What this binary is for
 is the other half of the work: checking that an address is the right address.
 
 - `--list-addrs` — every watched quantity and where its address came from
+- `--list-challenges` — every challenge the game offers and what completes each
+- `--challenge <ID>` — start at that challenge's stage, with its criteria printed
 - `--addr name=0x1234[:u8|u16]` / `--addr name=off` — retarget or silence one,
   without a rebuild
 - `--watch 0x0570-0x05a0` — report any address, or a range, on change
@@ -58,9 +62,13 @@ is the other half of the work: checking that an address is the right address.
    one-shot event. Write down where each one came from in its `note`.
 3. Write the rules. Start with death and stage completion; everything else is
    decoration until those two are right.
-4. `--frames` against the real ROM, then add the cases you care about to
+4. Write the stages, then the challenges. Every challenge a player can be dealt
+   is one `[[challenge]]`: nothing is inferred, so a level playable both ways is
+   two entries (ADR 0017). `--list-challenges` reads them back.
+5. `--frames` against the real ROM, then add the cases you care about to
    `manifest_tests.rs`.
 
 If step 3 makes you want arithmetic or a second rule for one stage, stop: that
 is usually a sign a better address exists and has not been found yet. It was,
-twice, for DKC.
+twice, for DKC. Step 4 is where a per-stage difference legitimately goes — two
+challenges on one stage is the normal case.

@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use session_api::{ExitReason, SessionEvent};
+use session_api::{ChallengeKind, ExitReason, SessionEvent, StageId};
 
 use crate::manifest::Manifest;
 use crate::memory::{Endian, Width};
@@ -113,15 +113,89 @@ fn both_shipped_manifests_load() {
     assert_eq!(d.stages.len(), 6);
 }
 
-/// A forced-scrolling level cannot be a time trial: everyone finishes it in
-/// the same number of frames. Both manifests have one, and the schema is where
-/// that fact is recorded now rather than in a README's prose.
+/// A forced-scrolling level cannot be a time trial: everyone finishes it in the
+/// same number of frames. That is not declared anywhere any more — it is
+/// expressed by the time trial simply not existing (ADR 0017), which is the
+/// same fact with one source of truth instead of two.
 #[test]
-fn forced_scrolling_stages_offer_only_endurance() {
-    use session_api::ChallengeKind::*;
-    assert_eq!(smb3().stage("1-4").unwrap().challenges, vec![Endurance]);
-    assert_eq!(dkc().stage("mine-cart-carnage").unwrap().challenges, vec![Endurance]);
-    assert_eq!(smb3().stage("1-1").unwrap().challenges, vec![TimeTrial, Endurance]);
+fn forced_scrolling_stages_carry_no_time_trial() {
+    for (m, stage) in [(smb3(), "1-4"), (dkc(), "mine-cart-carnage")] {
+        let id = StageId(stage.to_string());
+        let kinds: Vec<ChallengeKind> = m.challenges_on(&id).map(|c| c.kind).collect();
+        assert!(!kinds.is_empty(), "{stage} has no challenges at all");
+        assert!(
+            kinds.iter().all(|k| *k == ChallengeKind::Survival),
+            "{stage} should offer survival only, got {kinds:?}"
+        );
+    }
+}
+
+/// Every stage that can host both kinds does, and every challenge points at a
+/// stage that exists. The loader proves the second; this pins the first, which
+/// is content rather than schema and so is easy to half-finish.
+#[test]
+fn every_shipped_stage_can_be_dealt() {
+    for m in [smb3(), dkc()] {
+        for s in &m.stages {
+            assert!(
+                m.challenges_on(&s.id).next().is_some(),
+                "{}: stage `{}` carries no challenge, so it can never be dealt",
+                m.id,
+                s.id
+            );
+        }
+    }
+}
+
+/// Several challenges on one stage is the normal case. Both manifests carry an
+/// example, because a schema that only ever sees one per stage is a schema
+/// whose second case is untested.
+#[test]
+fn a_stage_can_carry_more_than_one_challenge() {
+    let d = dkc();
+    let mine = StageId("mine-cart-carnage".to_string());
+    let on: Vec<&str> = d.challenges_on(&mine).map(|c| c.id.0.as_str()).collect();
+    assert_eq!(on, vec!["mine-cart-carnage-survival", "mine-cart-carnage-45s"]);
+
+    // The second one is the only criterion that ends a run without the player
+    // doing anything, and it is authored in seconds and stored in frames.
+    let c = d.challenge("mine-cart-carnage-45s").unwrap();
+    assert_eq!(c.kind, ChallengeKind::Survival);
+    assert_eq!(c.complete_when.survive_frames, Some(d.framerate.frames(45.0)));
+    assert!(!c.complete_when.cleared);
+}
+
+/// Criteria other than "reach the end", in both directions: a count of a fact,
+/// and a conjunction of several. Both are shipped rather than only documented.
+#[test]
+fn shipped_challenges_use_criteria_other_than_cleared() {
+    let stomps = smb3().challenge("1-1-stomp-rush").unwrap().complete_when.clone();
+    assert_eq!(stomps.enemies_defeated, Some(5));
+    assert!(!stomps.cleared, "the clock stops on the fifth stomp, not at the flagpole");
+
+    // All four letters *and* the exit. The per-bit rule is what makes
+    // `kong_letter:K` the name, and the loader refuses any other spelling.
+    let kong = dkc().challenge("jungle-hijinx-kong").unwrap().complete_when.clone();
+    assert!(kong.cleared);
+    assert_eq!(
+        kong.items_collected.keys().cloned().collect::<Vec<_>>(),
+        ["kong_letter:G", "kong_letter:K", "kong_letter:N", "kong_letter:O"]
+    );
+    assert!(kong.items_collected.values().all(|&n| n == 1));
+}
+
+/// The spec that crosses into `challenge-core`. It names a stage and never the
+/// state file behind it: no adapter vocabulary crosses the boundary
+/// (invariant 3).
+#[test]
+fn a_challenge_spec_carries_no_adapter_vocabulary() {
+    let d = dkc();
+    let spec = d.challenge_spec(d.challenge("jungle-hijinx-time-trial").unwrap());
+    assert_eq!(spec.game.0, "dkc");
+    assert_eq!(spec.stage.0, "jungle-hijinx");
+    assert_eq!(spec.kind, ChallengeKind::TimeTrial);
+    assert_eq!(spec.name, "Jungle Hijinx");
+    assert!(spec.complete_when.cleared);
 }
 
 /// Spot-checks against the RainbowZ Editor's table, which is indexed by the

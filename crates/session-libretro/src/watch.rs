@@ -376,6 +376,9 @@ impl Watcher {
                     },
                     count,
                 }),
+                Emit::Objective(name) => {
+                    Some(SessionEvent::ObjectiveReached { frame: at, objective: name.clone() })
+                }
                 Emit::Note => None,
             };
             if let Some(e) = event {
@@ -409,6 +412,7 @@ impl Watcher {
                 Some(l) => format!("ITEM {item}:{l}"),
                 None => format!("ITEM {item}"),
             },
+            Emit::Objective(name) => format!("OBJECTIVE {name}"),
             Emit::Note => "NOTE".to_string(),
         };
         let movement = format!("{} {p} -> {}", self.names[field], self.labelled(field, c));

@@ -1,9 +1,10 @@
 # Game manifest schema
 
-**Status: proposed, `schema_version = 1`. Implemented by `session-libretro`;
+**Status: proposed, `schema_version = 2`. Implemented by `session-libretro`;
 two manifests in `manifests/` are the worked examples.**
 
-A manifest is everything the platform knows about one game. Adding a libretro
+A manifest is everything the platform knows about one game: how to reach it, how
+to read it, and every challenge a player can be dealt in it. Adding a libretro
 game is adding one of these files and nothing else — no Rust, no rebuild
 (invariant 5). The loader (`crates/session-libretro/src/manifest.rs`) is the
 authority on what parses; this document is the authority on what the fields
@@ -12,6 +13,17 @@ authority on what parses; this document is the authority on what the fields
 One manifest per **base ROM**. A game with two revisions whose addresses differ
 is two manifests. Generated artifacts get no manifest of their own — they are
 identified by a derivation key (ADR 0013).
+
+## Three words
+
+Used precisely throughout, and worth learning before reading further (ADR 0017):
+
+* **stage** — a place, and the entry point that reaches it. Setup, not scoring.
+* **challenge** — what a player is actually dealt: one stage, one kind, and the
+  criteria that complete it. A stage may carry several.
+* **attempt** — one entry-to-terminal-event span, which is what the watcher
+  latches. A **run** is a player's whole go at one challenge: for survival that
+  is one attempt, for a time trial it is every attempt summed.
 
 ## Contents
 
@@ -26,8 +38,9 @@ identified by a derivation key (ADR 0013).
 | [`[[marker]]`](#marker) | a transition that *times* an event announced late |
 | [`[[rule]]`](#rule) | which transition means what |
 | [`[attempt]`](#attempt) | what re-opens scoring after an ending |
-| [`[[stage]]`](#stage) | entry points, and which challenge types each can carry |
-| [`[[challenge]]`](#challenge-patch-slots--not-implemented) | generated-content patch slots — documented, **not implemented** |
+| [`[[stage]]`](#stage) | where a run starts |
+| [`[[challenge]]`](#challenge) | every challenge this game offers, and what completes each |
+| [patch slots](#patch-slots--not-implemented) | generated-content ROM patches — documented, **not implemented** |
 
 Every table rejects unknown keys. That is deliberate: a permissive loader turns
 a mistyped key into a detector that silently never fires, which is
@@ -225,6 +238,7 @@ emit = "died"
 | `emit` | what happened — see below |
 | `reason` | `stage_exited` only: `death`, `quit` or `unknown` |
 | `item` | `item` only: the item's name |
+| `objective` | `objective` only: the milestone's name |
 | `log` | a sentence appended to this rule's console line |
 
 ### Edges
@@ -258,12 +272,28 @@ ignored, because it means the author meant a different edge.
 | `damaged` | `Damaged` | no |
 | `enemy_defeated` | `EnemyDefeated { count }` | no |
 | `item` | `ItemCollected { item, count }` | no |
+| `objective` | `ObjectiveReached { objective }` | no |
 | `note` | nothing — logged only | no |
 
 An emit names a **fact**, never a verdict. "The player died" is something an
-adapter can observe; "the run failed" depends on the challenge — an endurance
-run and a time trial answer it differently — and belongs to `challenge-core`.
-There is deliberately no `stage_failed`.
+adapter can observe; "the run failed" depends on the challenge — a survival run
+and a time trial answer it differently — and belongs to `challenge-core`. There
+is deliberately no `stage_failed`.
+
+`objective` is a **named milestone** the game announced: a boss's health
+reaching zero, a gate opening, a progress counter crossing a threshold. It is
+how "defeat the boss" and "reach the halfway point" are expressed, and it is a
+fact in the same sense the others are — whether reaching it wins anything is
+`[[challenge]]`'s question, not this rule's.
+
+```toml
+[[rule]]
+field = "boss_hp"
+edge = "enters"
+value = 0
+emit = "objective"
+objective = "boss-defeated"
+```
 
 `note` is for a signal worth watching during a playtest that is not yet known to
 mean anything. SMB3's pipe-transit countdown is one: inventing a `SessionEvent`
@@ -291,13 +321,14 @@ every later death — a bug this project has already shipped once.
 
 ## `[[stage]]`
 
+Where a run starts, and nothing else. A stage is not a challenge and carries no
+completion condition of its own.
+
 ```toml
 [[stage]]
 id = "mine-cart-carnage"
 name = "Mine Cart Carnage"
 entry = { state = "assets/states/dkc_mine-cart-carnage.state" }
-challenges = ["endurance"]
-endurance = { survive_seconds = 45 }   # optional
 note = "forced-scrolling: everyone finishes in the same number of frames"
 ```
 
@@ -308,33 +339,133 @@ note = "forced-scrolling: everyone finishes in the same number of frames"
 * `named = "E1M1"` — a location the game itself can be told to start at. Doom's
   `-warp`, which is why the entry point is a choice and not a path (ADR 0002).
 
-`challenges` is the closed set `time_trial` / `endurance`, and listing them is a
-real constraint rather than metadata: a forced-scrolling level cannot be a time
-trial, because everyone finishes it in the same number of frames.
-
-`endurance.survive_seconds` is **converted to frames at load**, at
-`game.framerate`. Seconds never reach a `SessionEvent` or a wire message.
-
 Stage identity always comes from the entry point that put the player there,
 never from RAM. SMB3 has no "current level number" at all — a level is
 identified by the map tile it was entered from.
 
+A stage with no `[[challenge]]` pointing at it is dead weight: it can be entered
+with the harness, and a player will never be dealt it.
+
+## `[[challenge]]`
+
+**What a player is actually dealt.** One stage, one kind, and the criteria that
+complete it. This is the table a contributor spends their time in, and it is the
+reason adding a challenge is a data change (ADR 0017).
+
+```toml
+[[challenge]]
+id = "mine-cart-carnage-survival"
+name = "Mine Cart Carnage"     # optional; defaults to the stage's name
+stage = "mine-cart-carnage"    # a [[stage]] id
+kind = "survival"              # "time_trial" | "survival"
+complete_when = { cleared = true }
+note = "optional, for whatever the id and the criteria do not say"
+```
+
+**Nothing is inferred.** Every challenge that can be dealt is written down. A
+game whose 100 levels should all be playable as time trials carries 100 entries;
+if they should also all be playable as survival runs, that is 200. There is no
+`kind = "both"` shorthand, because the two kinds rarely want the same criteria —
+the survival version of a level is usually "reach the end", while the time trial
+version may be "reach the end" or may be "stomp five enemies as fast as you can"
+— and a shorthand that only works when they coincide hides the challenges that
+exist.
+
+Several challenges may share one stage. That is the normal case, not an edge
+case: one stage plus three sets of criteria is three challenges.
+
+### The two kinds
+
+They differ in what a death costs and what gets scored, **not** in what
+completes them.
+
+| | `time_trial` | `survival` |
+|---|---|---|
+| On death | re-enter at the stage's entry point; the clock keeps running | the run is over; the player spectates |
+| Scored on | total frames across every attempt | whether the criteria were met at all |
+| Ends when | the criteria are met — that is when the clock stops | the criteria are met, or the player dies |
+
+Because a death ends a survival run by definition, **"without dying" is not a
+criterion** — it is what the kind means. That is why one criteria vocabulary
+serves both.
+
+Some challenges only make sense as one kind, and the manifest says so by simply
+not declaring the other: a forced-scrolling level where everyone finishes in the
+same number of frames has no time trial, and a room where the player cannot die
+has no survival run.
+
+### `complete_when`
+
+A closed set of predicates over facts the manifest's own `[[rule]]`s emit.
+**Every criterion listed must hold** — there is no `any`, no negation, no
+nesting, no arithmetic. At least one is required.
+
+| Criterion | Satisfied when | Needs |
+|---|---|---|
+| `cleared = true` | a rule emitting `stage_cleared` fired | some `emit = "stage_cleared"` rule |
+| `survive_seconds = 45.0` | the run reached that many frames. **Survival only** | — |
+| `enemies_defeated = 20` | the `EnemyDefeated` counts sum to at least 20 | some `emit = "enemy_defeated"` rule |
+| `items_collected = { banana = 50 }` | each named item's counts sum to at least its number | a rule emitting each item |
+| `objectives = ["boss-defeated"]` | every named objective was reached | a rule emitting each objective |
+
+```toml
+# Reach the end, without dying.
+[challenge.complete_when]
+cleared = true
+
+# Clear it having stomped five enemies on the way — both, not either.
+[challenge.complete_when]
+cleared = true
+enemies_defeated = 5
+
+# Kill the boss, as fast as possible. The clock stops on the objective; there is
+# no need to reach the end of anything.
+[challenge.complete_when]
+objectives = ["boss-defeated"]
+```
+
+`survive_seconds` is **converted to frames at load**, at `game.framerate`.
+Seconds never reach a `SessionEvent` or a wire message. It is refused on a time
+trial, where "survive 30 seconds fastest" is not a thing that can be won.
+
+Every criterion is checked against the rules in the same manifest at load time.
+An `items_collected` naming an item nothing emits, an objective nothing
+announces, or `cleared` in a manifest with no `stage_cleared` rule is a load
+error, not a challenge that quietly cannot be completed — the same argument that
+makes every table reject unknown keys.
+
+### What is deliberately missing: a failure bound
+
+Neither kind has one yet. A time trial where a death only restarts has no losing
+state, and a survival challenge whose criterion the player can simply decline to
+pursue (`enemies_defeated`, with the player standing somewhere safe) has the
+same problem — `survive_seconds` is the only criterion that terminates itself.
+
+A per-challenge time limit, a per-round cap, or a forfeit will be needed before
+either kind ships. It is not in this schema because nothing enforces it yet, and
+a field that parses but does nothing is exactly what ADR 0015 refused. It is
+`challenge-core`'s to settle, along with the round clock. See ADR 0017.
+
 ---
 
-## `[[challenge]]` — patch slots — *not implemented*
+## Patch slots — *not implemented*
 
 ADR 0015 settled the shape of a generated custom challenge: declarative
-value-substitution, and nothing else. The schema below is what a manifest will
-carry. **No crate reads it today** — `content-gen` will — and the loader
-*refuses* a manifest containing it rather than accepting a table that does
-nothing. ADR 0015 explicitly rejected shipping an unbuilt opt-in path, and an
-accepted-but-inert table is one.
+value-substitution, and nothing else. A generated challenge *is* a challenge —
+same `[[challenge]]` table, same `kind`, same `complete_when` — that
+additionally says how its ROM is derived. The keys below are what it will carry.
+**No crate reads them today** — `content-gen` will — and the loader *refuses* a
+challenge containing them rather than accepting keys that do nothing. ADR 0015
+explicitly rejected shipping an unbuilt opt-in path, and an accepted-but-inert
+table is one.
 
 ```toml
 [[challenge]]
 id = "enemy-reroll"
 name = "Reptile Roulette"
 stage = "reptile-rumble"
+kind = "time_trial"
+complete_when = { cleared = true }
 generator_version = 1          # bumped, never edited in place (ADR 0013)
 
 # Roll one value from an explicit pool of legal ones.
@@ -379,7 +510,8 @@ on.
 ## Deliberately absent
 
 **Arithmetic and expressions.** A rule reads one field's transition, optionally
-guarded by one other field's current value. There is no `+`, no `and`, no
+guarded by one other field's current value; a `complete_when` is a conjunction
+of a closed predicate set. There is no `+`, no `or`, no `not`, no
 subexpression. Everything both shipped games needed fits; anything that does not
 is a sign the game wants a real address found, not a cleverer manifest. The
 moment this grows an expression parser it has become a scripting language living
@@ -388,7 +520,12 @@ in a data file, with none of a language's tooling.
 **Per-stage rule overrides.** Rules are per game. If a stage needs a different
 completion rule, that is evidence the general rule is wrong — DKC's used to need
 a 230-entry table and a list of special-case rooms, and the reason it does not
-any more is that `$7E0527` answers the question directly.
+any more is that `$7E0527` answers the question directly. A *challenge* that
+needs different completion criteria is a different matter, and is what
+`complete_when` is for.
 
-**Scoring.** Nothing here says what a run was worth. Manifests report facts;
-`challenge-core` decides what they mean.
+**Scoring.** `[[challenge]]` says what completes a run. Nothing here says what a
+completed run was *worth* — no points, no ranking, no comparison between
+players, no verdict on a run that ended without completing. Manifests report
+facts and declare criteria; `challenge-core` compares one against the other
+(ADR 0017).

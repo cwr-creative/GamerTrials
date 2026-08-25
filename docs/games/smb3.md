@@ -169,17 +169,25 @@ Every behavioural test the old harness had is in
 than a fixture. They need no ROM, no core and no savestate. Anything needing a
 real ROM is a manual test, or `--frames`.
 
-## Stages
+## Stages and challenges
 
 Four entry points, all in world 1, all cleared by the standard `stage_cleared`
-signal.
+signal — which here is the card rule, so it holds only for card-awarding levels.
+A fortress or an airship awards no card and would need ADR 0014's missing
+detector before it could carry a `cleared = true` criterion.
 
-| Stage | Challenges |
+| Stage | Challenges on it |
 |---|---|
-| `1-1` | time trial, endurance |
-| `1-2` | time trial, endurance |
-| `1-3` | time trial, endurance |
-| `1-4` | endurance only — forced-scrolling, so everyone finishes in the same number of frames |
+| `1-1` | time trial, survival, and `1-1-stomp-rush` |
+| `1-2` | time trial, survival |
+| `1-3` | time trial, survival |
+| `1-4` | survival only — forced-scrolling, so everyone finishes in the same number of frames |
 
-That constraint is in the manifest now (`challenges = ["endurance"]`), not in
-this document's prose.
+Nothing above is declared as a constraint anywhere: a stage with no time trial
+simply has no time-trial `[[challenge]]` naming it (ADR 0017). Read the current
+list back with `--list-challenges` rather than trusting this table.
+
+`1-1-stomp-rush` is a worked example of a criterion other than "reach the end":
+five `enemy_defeated` events and the clock stops, wherever the player is. It is
+**not playtested** — `$05F4` counts stomps only, so a fireball, shell or star
+kill does not advance it, and five stomps means five stomps.

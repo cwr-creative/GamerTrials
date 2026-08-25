@@ -6,11 +6,26 @@ telemetry and spectating.
 
 ## Challenges
 
-A challenge is either a **time trial** (reach a defined end point fastest) or an
-**endurance** run (survive a defined span without dying). Either can run on
+A **challenge** is one stage, one kind, and the criteria that complete it —
+reach the end, survive 45 seconds, defeat the boss, stomp twenty enemies. A
+session runs in time trial mode, survival mode, or both, and deals a randomised
+series of challenges from the library.
+
+The two kinds differ in what a death costs:
+
+- **Time trial** — you re-enter at the start and the clock keeps running. Scored
+  on your total frames across every attempt.
+- **Survival** — the run is over, and you spectate. "Without dying" is not a
+  criterion; it is what survival means.
+
+Whoever finishes first spectates the other until they finish too.
+
+Challenges are **defined by whoever contributes the game**, in its TOML
+manifest, alongside the RAM addresses that make them detectable. Adding a game
+or a challenge is a data change, not a code change. Either kind can run on
 **vanilla** content — a stage as it originally shipped — or on **generated**
-content, where the layout and enemy population are produced fresh for each
-attempt from a seed. Everyone in a session gets the same seed.
+content, where a ROM is patched fresh for each attempt from a seed. Everyone in
+a session gets the same seed.
 
 **Spectating is a core requirement.** A player who finishes a stage can watch
 anyone still playing it, whatever game they are in.

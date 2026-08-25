@@ -55,9 +55,10 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0014 | Detect stage completion and death by watching emulator RAM | Proposed |
 | 0015 | Scope custom-challenge ROM generation to declarative value-substitution patches | Accepted |
 | 0016 | Describe game telemetry as declarative RAM rules in the manifest | Accepted |
+| 0017 | Challenges are contributor-authored manifest entries, not core-defined kinds | Accepted |
 
-0003, 0013, 0015 and 0016 are written up; 0003 is the exemplar. Fill in the rest as
-you implement each area; an unwritten ADR is fine, a wrong one is not.
+0003, 0013, 0015, 0016 and 0017 are written up; 0003 is the exemplar. Fill in the
+rest as you implement each area; an unwritten ADR is fine, a wrong one is not.
 
 ## Notes on a few unwritten ones
 
@@ -87,10 +88,10 @@ RAM watching is *expressed*, and `docs/manifest-schema.md` is the schema. What
 0014 still owes is the part 0016 does not touch — what an external-process
 adapter does instead.
 
-Endurance challenges ("survive without dying") and time trials
+Survival challenges ("survive without dying") and time trials
 ("reach the end point") both need the runner to recognise events the game never
 announces. The presumed answer is watching emulator RAM with RetroAchievements-
 style memory maps, which is also the reuse argument 0007 leans on — but it has to
 answer what an external-process adapter does instead, since Doom has no
-addressable core RAM and reports through a stats file. Write it before endurance
+addressable core RAM and reports through a stats file. Write it before survival
 ships, because a mis-detected death is a lost run.
