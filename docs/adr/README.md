@@ -46,25 +46,39 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0005 | Measure timing in emulated frames rather than wall-clock | Accepted |
 | 0006 | Adopt ports and adapters with a pure challenge core | Accepted |
 | 0007 | Reject the nested "frankenstein ROM" approach | Accepted |
-| 0008 | Treat decomp/recomp PC ports as external-process adapters | Accepted |
+| 0008 | Treat decomp/recomp PC ports as external-process adapters | Superseded by 0018 |
 | 0009 | Server owns challenge sequencing; run it in-process for solo play | Accepted |
 | 0010 | Game manifests are TOML data in git, not code | Accepted |
 | 0011 | Client in Rust + Tauri; server in Go or TypeScript; SQLite storage | Accepted |
 | 0012 | Extract the StageRunner interface in Phase 2, not Phase 1 | Accepted |
 | 0013 | Generate stage content on each client from a server-issued seed | Proposed |
-| 0014 | Detect stage completion and death by watching emulator RAM | Proposed |
+| 0014 | Detect stage completion and death by watching emulator RAM | Accepted |
 | 0015 | Scope custom-challenge ROM generation to declarative value-substitution patches | Accepted |
 | 0016 | Describe game telemetry as declarative RAM rules in the manifest | Accepted |
 | 0017 | Challenges are contributor-authored manifest entries, not core-defined kinds | Accepted |
+| 0018 | Support PC games only through emulation, and retire the external-process adapter | Accepted |
 
-0003, 0013, 0015, 0016 and 0017 are written up; 0003 is the exemplar. Fill in the
-rest as you implement each area; an unwritten ADR is fine, a wrong one is not.
+0003, 0013, 0014, 0015, 0016, 0017 and 0018 are written up; 0003 is the
+exemplar. Fill in the rest as you implement each area; an unwritten ADR is fine,
+a wrong one is not.
 
 ## Notes on a few unwritten ones
 
 **0002** — The savestate decision is load-bearing for the whole content pipeline.
-Note in it that Doom does not have savestates and uses `-warp` instead, which is
-why `EntryPoint` is an enum rather than a file path.
+
+The original justification for `EntryPoint` being an enum rather than a file
+path was that Doom has no savestates and uses `-warp` instead. That premise is
+gone: under `dosbox-pure` (ADR 0018) Doom *does* serialize, and a state restores
+into a fresh process. The enum survives on a better reason — both spellings are
+genuinely used, and `named` is how a state gets captured in the first place. A
+DOS game reaches `named` through a command line in its own bundled
+`dosbox.conf`, not through a process argument.
+
+That is now implemented and measured, and the numbers are the argument: a Doom
+state restores in ~60 frames and a cold boot takes ~960. `manifests/doom.toml`
+declares one stage of each kind for the same place — the `named` one to author
+a state from, the `state` one to race on — which is the pipeline the enum
+exists to express, not two competing options.
 
 Scope it narrowly: it rejects ROM patching as the way to enter a *vanilla* stage.
 Generated challenges patch ROMs for an unrelated reason and are not covered — see
@@ -76,22 +90,33 @@ ability to reuse RetroAchievements RAM maps. Worth writing down because "one
 architecture instead of three" is a genuinely good instinct pointing at a bad
 implementation, and it will come up again.
 
-**0008** — Ports (Ship of Harkinian, N64Recomp output, etc.) buy cheap
-instrumentation via named symbols but cost savestates and rcheevos map reuse.
-Selective use only, for mature titles. Record the framerate-locking requirement.
+**0008** — *Superseded by 0018, and never written.* What it held: ports (Ship of
+Harkinian, N64Recomp output, etc.) buy cheap instrumentation via named symbols
+but cost savestates and rcheevos map reuse; selective use only, for mature
+titles, with a framerate-locking requirement. 0018 rejects the whole category —
+the framerate lock treats a symptom, and a native process also has no
+framebuffer to hand a spectator (0003). Recorded here rather than lost, because
+"just use the good modern port" is a recurring and reasonable-sounding
+instinct.
+
+**0018's spike is gone, and that was the plan.** `crates/dos-spike` is
+referenced by 0018 and no longer exists: what it proved moved into
+`session-libretro` and the crate was deleted, which is what its own README said
+would happen. 0018 is left unedited because ADRs are append-only and it is an
+accurate record of what was done at the time.
+
+Two of its tools were *not* carried over, deliberately, and are worth knowing
+about if either is ever wanted again: PNG screenshots on a headless run
+(`--shot`, `--shot-every`), which is how "the right value for the wrong reason"
+was caught, and a scripted-input language (`--script "right:44 shift+up:400"`)
+for driving a game without a human. Neither is needed to author a manifest and
+both would have to be rebuilt.
 
 **0012** — Records *when* to abstract, not *what*. Included because the reasoning
 generalises: build the second implementation before extracting the interface.
 
-**0014** — Half of it is now built and written down elsewhere: 0016 settles how
-RAM watching is *expressed*, and `docs/manifest-schema.md` is the schema. What
-0014 still owes is the part 0016 does not touch — what an external-process
-adapter does instead.
-
-Survival challenges ("survive without dying") and time trials
-("reach the end point") both need the runner to recognise events the game never
-announces. The presumed answer is watching emulator RAM with RetroAchievements-
-style memory maps, which is also the reuse argument 0007 leans on — but it has to
-answer what an external-process adapter does instead, since Doom has no
-addressable core RAM and reports through a stats file. Write it before survival
-ships, because a mis-detected death is a lost run.
+**0014** — *Written.* It ended up much smaller than it started: 0016 settles
+how RAM watching is *expressed*, `docs/manifest-schema.md` is the schema, and
+0018 answered the part 0016 did not touch by removing it. What was left was the
+decision itself, and the alternatives — video, audio, ROM instrumentation,
+rcheevos as a runtime — which are the part worth keeping.

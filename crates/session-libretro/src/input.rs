@@ -1,6 +1,17 @@
-//! Keyboard and gamepad collapsed into one libretro joypad bitmask.
+//! Host keyboard and gamepad, turned into whatever port 0 is driven by.
 //!
 //! Port 0 only; one local player.
+//!
+//! Two shapes, and a manifest picks which (`[runner.libretro] controller`):
+//!
+//! * **A pad.** Keyboard and gamepad collapse into one libretro joypad
+//!   bitmask, and the manifest's [`PadLayout`] decides how a modern
+//!   controller's face diamond lands on the console's.
+//! * **A keyboard.** Every key passes straight through as its `RETROK_*` code
+//!   ([`keyboard_passthrough`]). There is nothing to lay out, because a DOS
+//!   game maps its own keys — Doom's controls are configured inside Doom, and a
+//!   manifest that remapped them would be overriding a choice the player has
+//!   already made.
 //!
 //! The libretro joypad layout *is* the SNES pad, so all twelve ids are always
 //! mapped and a NES core simply ignores the four it does not have. The one
@@ -12,6 +23,8 @@
 
 use gilrs::{Axis, Button, Gilrs};
 use minifb::{Key, Window};
+
+use crate::libretro;
 
 use crate::libretro::{
     JOY_A, JOY_B, JOY_DOWN, JOY_L, JOY_LEFT, JOY_R, JOY_RIGHT, JOY_SELECT, JOY_START, JOY_UP,
@@ -116,5 +129,92 @@ pub fn keyboard(window: &Window) -> u32 {
 fn set(bits: &mut u32, id: u32, pressed: bool) {
     if pressed {
         *bits |= 1 << id;
+    }
+}
+
+/// Host key to `RETROK_*`, which is SDL 1.2's keysym set — so the letters are
+/// their lowercase ASCII codes and the rest is a short mechanical table.
+///
+/// The function keys are deliberately absent. F1-F11 are the harness's own
+/// controls (save state, RAM search, probe), and a game that also received them
+/// would be typing into the thing being measured.
+const KEYMAP: &[(Key, u32)] = &[
+    (Key::Up, 273),
+    (Key::Down, 274),
+    (Key::Right, 275),
+    (Key::Left, 276),
+    (Key::LeftCtrl, 306),
+    (Key::RightCtrl, 305),
+    (Key::LeftShift, 304),
+    (Key::RightShift, 303),
+    (Key::LeftAlt, 308),
+    (Key::RightAlt, 307),
+    (Key::Space, 32),
+    (Key::Enter, 13),
+    (Key::Escape, 27),
+    (Key::Tab, 9),
+    (Key::Backspace, 8),
+    (Key::Comma, 44),
+    (Key::Period, 46),
+    (Key::Minus, 45),
+    (Key::Equal, 61),
+    (Key::Semicolon, 59),
+    (Key::Apostrophe, 39),
+    (Key::Slash, 47),
+    (Key::Backslash, 92),
+    (Key::LeftBracket, 91),
+    (Key::RightBracket, 93),
+    (Key::Key0, 48),
+    (Key::Key1, 49),
+    (Key::Key2, 50),
+    (Key::Key3, 51),
+    (Key::Key4, 52),
+    (Key::Key5, 53),
+    (Key::Key6, 54),
+    (Key::Key7, 55),
+    (Key::Key8, 56),
+    (Key::Key9, 57),
+    (Key::A, 97),
+    (Key::B, 98),
+    (Key::C, 99),
+    (Key::D, 100),
+    (Key::E, 101),
+    (Key::F, 102),
+    (Key::G, 103),
+    (Key::H, 104),
+    (Key::I, 105),
+    (Key::J, 106),
+    (Key::K, 107),
+    (Key::L, 108),
+    (Key::M, 109),
+    (Key::N, 110),
+    (Key::O, 111),
+    (Key::P, 112),
+    (Key::Q, 113),
+    (Key::R, 114),
+    (Key::S, 115),
+    (Key::T, 116),
+    (Key::U, 117),
+    (Key::V, 118),
+    (Key::W, 119),
+    (Key::X, 120),
+    (Key::Y, 121),
+    (Key::Z, 122),
+];
+
+/// Push this frame's held keys into the core, as edges.
+///
+/// Edges rather than a bitmask because a core may read its keyboard either
+/// way: through `input_state`, which wants the held set, or through the
+/// callback it registered with `SET_KEYBOARD_CALLBACK`, which wants press and
+/// release. Both are fed from here, so which one a core prefers is its own
+/// business.
+pub fn keyboard_passthrough(window: &Window) {
+    for (key, code) in KEYMAP {
+        if window.is_key_down(*key) {
+            libretro::key_down(*code);
+        } else {
+            libretro::key_up(*code);
+        }
     }
 }

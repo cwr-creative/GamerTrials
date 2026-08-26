@@ -3,8 +3,10 @@
 //! of any word that only makes sense for one of them (invariant 3).
 //!
 //! Nothing here knows what a libretro core, a savestate, a WAD or a RAM address
-//! is. `session-libretro` and `session-external` translate their own worlds into
-//! these types; `challenge-core` reads them and decides what a run was worth.
+//! is. An adapter translates its own world into these types; `challenge-core`
+//! reads them and decides what a run was worth. Today `session-libretro` is the
+//! only adapter, and ADR 0018 is why there is no external-process one — but
+//! nothing in this crate assumes that, which is the point of it.
 //!
 //! Two rules are load-bearing and are encoded in the types rather than written
 //! down:
@@ -81,10 +83,15 @@ impl fmt::Display for AssetKey {
 
 /// How a runner is told where a stage begins.
 ///
-/// An enum rather than a path because the two adapters cannot be made to agree
-/// on one: an emulator restores a captured machine state, and a PC port is told
-/// a level name on its command line and starts it itself (ADR 0002). Neither
-/// spelling is allowed to become the shared one.
+/// An enum rather than a path because the two spellings cannot be collapsed
+/// into one: some machines are put at a stage by restoring a captured state,
+/// and some games can simply be told where to start (ADR 0002).
+///
+/// The original reason was that Doom had no savestates. That premise is gone —
+/// under dosbox-pure it serializes like any other emulated machine (ADR 0018) —
+/// but the enum survives on a better one: `Named` is how a state gets *captured*
+/// in the first place, and a game that can name its own start deserves to say
+/// so. Neither spelling is allowed to become the shared one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum EntryPoint {
     /// A previously captured machine state, restored wholesale. An emulator

@@ -3,7 +3,7 @@
 Multiplayer retro-game challenge platform. Players race through stages drawn from
 multiple classic games simultaneously; live telemetry and spectating.
 
-Solo developer. Windows targets. Vertical slice = SMB3 (NES), DKC (SNES), Doom (PC).
+Solo developer. Windows targets. Vertical slice = SMB3 (NES), DKC (SNES), Doom (DOS).
 
 ## Challenges
 
@@ -63,6 +63,13 @@ These are settled. Do not violate them without writing a superseding ADR.
    for procedural content is code (ADR 0013); its output is still data, and
    `challenge-core` still never learns generators exist.
 6. **Every phase ends in something runnable.** No big-bang integration.
+7. **Every game runs on an emulated machine** (ADR 0018). Not "runs under
+   libretro" — that is the delivery mechanism, and native ports behind a
+   libretro API satisfy it while satisfying nothing else. A core qualifies when
+   it gives deterministic frame stepping, an addressable memory space stable
+   enough to write `[watch]` against, and an entry point. No adapter launches a
+   process or reads a stats file; there is no `session-external`. Doom is a DOS
+   game under dosbox-pure, and "classic PC games" means "DOS games".
 
 ## Structure
 
@@ -70,8 +77,7 @@ These are settled. Do not violate them without writing a superseding ADR.
 |---|---|
 | `challenge-core` | Stage sequencing, scoring, rules. Pure. |
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
-| `session-libretro` | SMB3, DKC, and every later libretro game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). |
-| `session-external` | Doom, and other classic PC games in the future. Process launch + stats-file harvest. |
+| `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles. |
 | `app-client` | Tauri shell, overlay, wiring. |
@@ -112,15 +118,40 @@ Then `schema_version = 2` (ADR 0017): challenges became contributor-authored
 `[[challenge]]` entries with declared completion criteria, rather than a closed
 Rust enum plus an eligibility list on the stage.
 
+Then Doom (ADR 0018/0014): the DOS spike folded into `session-libretro` and
+`manifests/doom.toml` loads and runs. All three slice games are now manifests
+against one adapter. What DOS needed was confined to the runner half of the
+schema — `controller = "keyboard"`, `boot_seconds`,
+`[runner.libretro.options]`, `[runner.libretro.memory.scan]`, and `u32` as a
+watch width — and nothing in `[watch]`, `[[rule]]`, `[[challenge]]` or
+`SessionEvent` changed. The spike crate is deleted.
+
+Three things learned there are worth not rediscovering:
+
+- **A core may publish no system RAM at all.** dosbox-pure answers
+  `retro_get_memory_data` with nothing and publishes `SET_MEMORY_MAPS`
+  descriptors instead. The runner requires *one* route, not that route.
+- **`retro_serialize_size` is not free to call.** On dosbox-pure it opens a
+  handshake that `retro_serialize` closes; calling it before
+  `retro_unserialize` deadlocks. It also is not constant — 365 KB before the
+  guest boots, 3.6 MB after — so it cannot be used to validate a state.
+- **A core options table is part of a game's identity.** `dosbox_pure_cycles`
+  changes how many emulated frames a piece of play takes, so two players on
+  different values have incomparable scores (invariant 4).
+
 Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
 What is *not* done, and the next things to settle:
 
-- **ADR 0014 is still owed** the external-process half: Doom has no addressable
-  core RAM, and `[runner.external]` is where that answer goes.
 - **`challenge-core` does not exist.** `SessionEvent`s are produced, challenges
   declare what completes them, and nothing yet compares the two. It also owes
   the failure bound neither kind has (ADR 0017) and the crate split that moves
-  `[[challenge]]` parsing out of an adapter.
+  `[[challenge]]` parsing out of an adapter. This is the next thing.
+- **Doom is measured, not playtested.** Every rule has been seen firing against
+  a real machine, but `stage_cleared` has not been watched through a human
+  finishing E1M1 from the `state` entry. `docs/games/doom.md` lists what would
+  close that gap.
+- **`asset-store` will need to hash a bundle's members, not the container.** A
+  DOS game is a zip, and its hash depends on how it was zipped (ADR 0018).
 - No generated content (`content-gen`, ADR 0013/0015 — the schema documents
   patch slots and the loader refuses them), no scoring, no head-to-head.

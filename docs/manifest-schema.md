@@ -1,7 +1,8 @@
 # Game manifest schema
 
 **Status: proposed, `schema_version = 2`. Implemented by `session-libretro`;
-two manifests in `manifests/` are the worked examples.**
+three manifests in `manifests/` are the worked examples — two consoles and a
+DOS game.**
 
 A manifest is everything the platform knows about one game: how to reach it, how
 to read it, and every challenge a player can be dealt in it. Adding a libretro
@@ -31,7 +32,7 @@ Used precisely throughout, and worth learning before reading further (ADR 0017):
 |---|---|
 | [`[game]`](#game) | identity, console family, framerate |
 | [`[rom]`](#rom) | which ROM this manifest is written against |
-| [`[runner]`](#runner) | which adapter runs it, and how it reaches memory |
+| [`[runner]`](#runner) | which adapter runs it, how it is controlled, and how it reaches memory |
 | [`[watch.<name>]`](#watchname) | the addresses to read, and where each came from |
 | [`[label.<field>]`](#labelfield) | what a value *means*, for the log |
 | [`[display]`](#display) | which fields to print when one of them moves |
@@ -63,9 +64,15 @@ framerate = 60.0988
 authored in seconds are converted at, so it must be the same on every machine —
 a core reporting something different is a warning, not an override.
 
-`console` is a closed set reviewed once per console family, never per game. It
-is also what ADR 0015's checksum fixup will key off (SNES has an internal header
-checksum; NES has none).
+`console` names the machine family, once per family, never per game. It is what
+ADR 0015's checksum fixup will key off (SNES has an internal header checksum;
+NES has none). `nes`, `snes` and `dos` are what the library uses today.
+
+It is documentation rather than a switch: the loader does not match on it, and
+nothing behaves differently because a manifest says `dos`. What actually makes
+a DOS game a DOS game is `[runner.libretro]` — the memory route, the
+controller, the pinned options — and that is the point. A console is a
+description; the behaviour is declared.
 
 ## `[rom]`
 
@@ -88,24 +95,83 @@ ROM offset and makes an address table look wrong for no visible reason.
 
 ```toml
 [runner]
-kind = "libretro"              # which adapter; "external" is Doom's
+kind = "libretro"              # the only adapter there is (ADR 0018)
 ```
 
 Everything an adapter needs that another adapter would not understand lives
 under `[runner.<kind>]`. That is what keeps adapter vocabulary out of the shared
 part of the schema (invariant 3) while still letting a manifest say `core_dir`.
 
+`libretro` is currently the only `kind`, and ADR 0018 is why: a game qualifies
+by running on an *emulated machine*, so DOS games arrive here under dosbox-pure
+rather than through an external-process adapter. There is no `[runner.external]`
+and there will not be one. The `kind` field stays because the shape is right,
+not because a second value is expected.
+
+**DOS games load.** `manifests/doom.toml` is the worked example, and what it
+needed beyond the two console manifests is four fields, all in this section:
+`controller`, `boot_seconds`, `[runner.libretro.options]` and
+`[runner.libretro.memory.scan]` — plus `u32` as a watch width. Nothing in
+`[watch]`, `[[marker]]`, `[[rule]]`, `[attempt]`, `[[stage]]` or
+`[[challenge]]` changed, which is the result ADR 0018's spike was run to
+establish.
+
 ### `[runner.libretro]`
 
 ```toml
 [runner.libretro]
 core_dir = "cores/snes"        # must hold exactly one *_libretro.dll
-pad_layout = "snes"            # "nes" | "snes"
+controller = "pad"             # optional, default "pad"; "pad" | "keyboard"
+pad_layout = "snes"            # "nes" | "snes"; only with controller = "pad"
+boot_seconds = 16.0            # optional; required by a `named` entry point
 ```
 
-`pad_layout` decides only how a modern controller's face diamond maps onto the
-console's pad. A two-button console takes South *or* East as A so both habits
-work; a four-button one cannot, because every position is already taken.
+`controller` says how port 0 is driven.
+
+* **`pad`** — `RETRO_DEVICE_JOYPAD`. `pad_layout` then decides how a modern
+  controller's face diamond maps onto the console's. A two-button console takes
+  South *or* East as A so both habits work; a four-button one cannot, because
+  every position is already taken.
+* **`keyboard`** — `RETRO_DEVICE_KEYBOARD`, and every host key passes straight
+  through as its `RETROK_*` code. There is deliberately nothing to lay out: a
+  DOS game maps its own keys, Doom's controls are configured inside Doom, and a
+  manifest that remapped them would be overriding a choice the player has
+  already made. Declaring `pad_layout` alongside it is an error rather than
+  ignored.
+
+`boot_seconds` is how long a cold boot takes to reach the game — DOS starting,
+the bundle's `[autoexec]` running. It converts to frames at `game.framerate` at
+load, like every other duration, and it is only consulted by a `named` entry
+point. A console manifest omits it.
+
+### `[runner.libretro.options]`
+
+```toml
+[runner.libretro.options]
+dosbox_pure_cycles = "26800"
+dosbox_pure_force60fps = "true"
+```
+
+Core options this game is pinned to, checked at startup against what the core
+publishes: an unknown key, or a value the core does not list, is a load error
+rather than a silently kept default.
+
+**This table is part of a game's identity, not a preference**, and it is a new
+kind of thing in a manifest — not an address, not a hash, but a machine
+configuration without which two players are not playing the same game.
+`dosbox_pure_cycles` is the case that forced it: its default is `auto`, which is
+*defined* as tracking host performance. Addresses do not move with it, but frame
+counts do — the same demo damage lands on frame 501 at 26800 cycles and frame
+452 on `auto` — so a frame count is only comparable between players on the same
+value (ADR 0018, invariant 4).
+
+Keep the list short and reviewed. It is not a place to park preferences, and
+anything in it that does not change what a frame *means* probably does not
+belong.
+
+Run `harness --game <name> --dump-options` to see what a core actually
+publishes: every key, its legal values, its default, and every environment call
+the core asked the frontend for and did not get.
 
 ### `[runner.libretro.memory]`
 
@@ -136,16 +202,50 @@ whether an address outside system RAM resolves.
 `0x0577` and `0x7E0577` name the same byte, so a manifest can quote a published
 RAM map verbatim whichever convention its author used.
 
+A core may publish **no system-RAM slice at all** — dosbox-pure answers
+`retro_get_memory_data` with nothing for every id, and publishes three
+`SET_MEMORY_MAPS` descriptors instead. That is not a failure: `prefer =
+"memory_map"` is the route the NES manifest already uses, and it works
+unchanged, disjoint regions included. Such a manifest leaves `system_ram_bytes`
+unset and declares a scan window below. A core offering *neither* route is
+refused at startup, because then there is no way to read a byte at all.
+
+### `[runner.libretro.memory.scan]`
+
+```toml
+[runner.libretro.memory.scan]
+at = 0x380000
+size = 0x10000
+```
+
+Optional. Where the harness's RAM discovery tools — the F3-F8 search and the
+F11 probe — look.
+
+Consoles need none of this: the system-RAM slice *is* the window, it is small,
+and every interesting byte is inside it. A DOS machine offers 16 MB, which is
+both too big to snapshot every frame and mostly not worth searching, so a
+manifest points the tools at the part that matters. Startup says how much of a
+declared window no route reaches, because a window aimed at unmapped space
+looks exactly like a search that keeps finding zeros.
+
+Widen it while hunting for something new and narrow it again afterwards. It
+affects no detector and no event — only where a human goes looking.
+
 ## `[watch.<name>]`
 
 ```toml
 [watch.lives]
 at = 0x0575                    # offset or full address; omit if unknown
-width = "u16"                  # optional, defaults to memory.default_width
+width = "u16"                  # "u8" | "u16" | "u32"; default memory.default_width
 note = "RA notes: lives. $0577, which every older map quotes, is the display copy"
 ```
 
 The `name` is what every rule, marker, guard and `--addr` override refers to.
+
+`width` reads that many bytes in the space's declared byte order. `u32` exists
+for DOS rather than for a console: a 16-bit program's globals are C `int`s, so
+every field `manifests/doom.toml` watches is four bytes wide. A value with any
+unreachable byte reads as nothing rather than as a partial number.
 
 **Omitting `at` is a first-class state**, not a missing value. It means nobody
 has found the address yet; every rule over the field then stays quiet rather
@@ -335,9 +435,28 @@ note = "forced-scrolling: everyone finishes in the same number of frames"
 `entry` takes exactly one of:
 
 * `state = "<path>"` — a captured machine state to restore. An emulator
-  savestate is one form of this.
-* `named = "E1M1"` — a location the game itself can be told to start at. Doom's
-  `-warp`, which is why the entry point is a choice and not a path (ADR 0002).
+  savestate is one form of this, and it is what a real session uses: measured
+  at 60 frames for Doom, against ~960 for a cold boot. That difference is what
+  a death in a time trial costs.
+* `named = "<name>"` — a location the game can reach by itself. Nothing is
+  passed to the core: a DOS bundle carries its own `dosbox.conf`, whose
+  `[autoexec]` is the command line that does the warping, so the name
+  identifies the place and the content knows the way. The runner reloads the
+  content and runs `runner.libretro.boot_seconds` worth of frames, which a
+  manifest using this form must declare.
+
+**The two are not alternatives; they are a pipeline.** A `named` entry is how a
+state gets captured in the first place (ADR 0002), which is why both spellings
+survive. `manifests/doom.toml` declares one stage of each kind for the same
+place, and the authoring loop is one command:
+
+```sh
+# boot to where the game starts itself, play 120 frames, capture the state
+harness --game doom --stage e1m1-hangar-boot --frames 120         --capture assets/states/doom_e1m1.state
+```
+
+or interactively: enter at the `named` stage, play to wherever the stage should
+begin, and press F1.
 
 Stage identity always comes from the entry point that put the player there,
 never from RAM. SMB3 has no "current level number" at all — a level is
@@ -529,3 +648,16 @@ completed run was *worth* — no points, no ranking, no comparison between
 players, no verdict on a run that ended without completing. Manifests report
 facts and declare criteria; `challenge-core` compares one against the other
 (ADR 0017).
+
+**Pointer indirection.** A rule names an address; it cannot follow one. This was
+confirmed impossible *and* unnecessary for DOS: a DOS/4GW program's internal
+pointers are linear addresses, not the emulated physical addresses the core's
+descriptors expose, so following one would need indirection plus a base
+translation. Every detector the slice needs lives in static data and is reachable
+at a fixed address. Position-based criteria would not be, and proposing one means
+reopening ADR 0016.
+
+**Input remapping for keyboard games.** `controller = "keyboard"` passes the
+host keyboard through unchanged. A DOS game maps its own keys, and a manifest
+that rebound them would silently override a choice the player made inside the
+game.

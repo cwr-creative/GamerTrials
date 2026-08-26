@@ -1,0 +1,254 @@
+# DOOM (shareware, DOS), under dosbox-pure.
+#
+# The first game in the library whose machine is a PC rather than a console
+# (ADR 0018). What is different about it lives entirely in [runner.libretro]:
+# the memory route, the controller, a pinned options table and a boot time.
+# Everything below that line — [watch], [[rule]], [[stage]], [[challenge]] — is
+# the same schema the two console manifests use, unchanged, which is the whole
+# result the spike was run to establish.
+#
+# Every address here was measured against the exact DOOM.EXE named below, and
+# each `note` says how. Provenance matters more than usual for this game: the
+# addresses are in a DOS/4GW program's static data, so they are properties of
+# the binary rather than of the machine, and a different build of DOOM.EXE
+# would need every one of them found again.
+
+schema_version = 2
+
+[game]
+id = "doom"
+title = "DOOM (shareware)"
+console = "dos"
+region = "usa"
+# Not a property of the machine, the way 60.0988 is on the NES: a PC has no
+# fixed framerate. This number is only true because `dosbox_pure_force60fps`
+# below makes it true, which is why the options table is not cosmetic.
+framerate = 60.0
+
+[rom]
+# A DOS game is a directory of files, not a cartridge. dosbox-pure mounts a zip
+# as C: and runs the [autoexec] in the dosbox.conf inside it, so the bundle is
+# one file with one hash and [rom] keeps working unchanged — one manifest per
+# base bundle, exactly as before.
+name = "DOOM shareware 1.9 (DOOM.EXE + DOOM1.WAD + dosbox.conf)"
+path = "assets/ROMs/dos/doom-shareware-e1m1.zip"
+header = "none"
+# Members, not the container:
+#   DOOM.EXE  sha1 aa0668fae2f743ee5e3e5634ee42d3c8ace7d907
+#   DOOM1.WAD sha1 5b2e249b9c5133ec987b3ea77596381dc0d6bc1d
+# The archive's own sha1 depends on how it was zipped, so `sha1` is left unset
+# until asset-store can hash the members rather than the container (ADR 0018).
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+core_dir = "cores/dos"
+# A DOS game is played on the keys the game itself defines, so the host
+# keyboard passes straight through and there is no layout to declare. Escape
+# reaches the game rather than quitting the harness; F12 quits.
+controller = "keyboard"
+# Cold boot: DOS starts, the [autoexec] runs DOOM.EXE -warp 1 1, and the player
+# is in E1M1. Measured at ~900 frames; 16 s leaves headroom without being long
+# enough to matter, because a `state` entry is what a real session uses and
+# this path exists to capture one.
+boot_seconds = 16.0
+
+# The load-bearing table, and a new kind of thing in a manifest: not an address
+# and not a hash, but a machine configuration without which two players are not
+# playing the same game.
+#
+# `dosbox_pure_cycles` defaults to `auto`, which is *defined* as tracking host
+# performance. Addresses do not move with it — that was measured across 13400,
+# 26800 and 77000 — but frame counts do: the same demo damage lands on frame
+# 501 at 26800 and frame 452 on `auto`. A frame count is therefore only
+# comparable between players on the same value, which makes it part of the
+# game's identity rather than a preference (ADR 0018, invariant 4).
+#
+# Keep this list short and reviewed. It is not a place to park preferences.
+[runner.libretro.options]
+dosbox_pure_cycles = "26800"          # fixed speed; `auto` tracks the host
+dosbox_pure_force60fps = "true"       # so `framerate = 60.0` above is true
+dosbox_pure_menu_time = "0"           # auto-start: no start menu in a race
+dosbox_pure_conf = "inside"           # honour the bundle's own dosbox.conf
+dosbox_pure_savestate = "on"          # `state` entry points need serialize
+dosbox_pure_on_screen_keyboard = "false"
+
+[runner.libretro.memory]
+# The emulated physical address space. dosbox-pure answers
+# retro_get_memory_data with nothing at all — every id, SYSTEM_RAM included,
+# comes back empty — and publishes three SET_MEMORY_MAPS descriptors instead:
+#
+#   [0] 0x00000000 + 0x9e7a0    conventional memory
+#   [1] 0x00100000 + 0x1860     HMA
+#   [2] 0x00200000 + 0xf60000   extended memory  <- where a DOS/4GW program lives
+#
+# So the NES's route is the one that works here and the SNES's is simply
+# absent. `system_ram_bytes` is left unset for the same reason.
+base = 0x0
+size = 0x1000000
+prefer = "memory_map"
+endian = "little"
+# Doom's globals are C ints. This is the only place in the library that needs a
+# width wider than 16 bits.
+default_width = "u32"
+
+# Where the F3-F8 search and the F11 probe look, since there is no system-RAM
+# slice for them to work on. 64 KB around the player struct and the g_game.c
+# globals — every address below is inside it, and it is small enough to
+# snapshot every frame. Widen it when hunting for something new; 0x200000 with
+# size 0x1000000 is the whole of extended memory and is what the spike's
+# 16 MB cheat-diff searched.
+[runner.libretro.memory.scan]
+at = 0x380000
+size = 0x10000
+
+# ---------------------------------------------------------------- what to read
+#
+# Confirmed byte-identical across three cold boots, and unchanged by cycles
+# (13400 / 26800 / 77000), memory size (8 / 16 / 32 MB) and cpu_core (auto /
+# normal). This was the risk that could have sunk the whole idea — a DOS/4GW
+# program's load address moving between runs — and it does not move.
+
+[watch.health]
+at = 0x389E98
+note = """players[0].health. Neighbour of the IDKFA write below; reads 100 at \
+spawn, and 0 on the frame playerstate goes to 1. The struct identification is \
+corroborated by 0x389E88 holding 2686976 = 41<<16, Doom's VIEWHEIGHT constant, \
+at exactly the offset player_t predicts."""
+
+[watch.armorpoints]
+at = 0x389E9C
+note = """players[0].armorpoints. Found by typing IDKFA and diffing 16 MB for a \
+0 -> 200 transition: two addresses matched and this is the one whose \
+neighbours are a player_t. A cheat is a controlled write, which is why this \
+did not need an interactive RAM search."""
+
+[watch.armortype]
+at = 0x389EA0
+note = "players[0].armortype. 2 (blue) after IDKFA, 0 at spawn."
+
+[watch.playerstate]
+at = 0x389E7C
+note = """players[0].playerstate: 0 PST_LIVE, 1 PST_DEAD, 2 PST_REBORN. Struct \
+offset from health, then confirmed live — it entered 1 on the exact frame \
+health reached 0, and held 2 for ~30 frames before each demo spawn."""
+
+[watch.gamemap]
+at = 0x38A3E8
+note = """The g_game.c global. Found by typing IDCLEV12 and diffing: the only \
+address in 16 MB that went 1 -> 2. Observed as 5 and 3 during attract demos."""
+
+[watch.gameepisode]
+at = 0x38A3F8
+note = "12 bytes past gamemap in the same global cluster; 1 throughout episode 1."
+
+[watch.gamestate]
+at = 0x38A3F4
+note = """gamestate_t, and every value this project relies on is measured \
+rather than inferred. 0 = GS_LEVEL and 3 = GS_DEMOSCREEN were seen \
+transitioning both ways across the title/demo loop. 1 = GS_INTERMISSION was \
+confirmed by finishing E1M1 with the watcher attached: the screenshot taken on \
+the transition frame shows the player at the exit switch — the state is set in \
+G_DoCompleted, one frame before the tally screen draws — and the value then \
+held for 1183 frames with health and armour frozen and playerstate still 0. \
+Reproduced across two independent play sessions. 2 = GS_FINALE is still \
+unseen; it only happens at the end of an episode and nothing depends on it."""
+
+# --------------------------------------------------------------------- labels
+
+[label.playerstate]
+0 = "alive"
+1 = "dead"
+2 = "reborn"
+
+[label.gamestate]
+0 = "in a level"
+1 = "intermission"
+2 = "finale"
+3 = "title/demo"
+
+[display]
+fields = ["gamestate", "gamemap", "health", "armorpoints"]
+
+# ---------------------------------------------------------------------- rules
+
+[[rule]]
+name = "death"
+field = "playerstate"
+edge = "enters"
+value = 1
+emit = "died"
+log = "player died"
+
+# Health decreasing is damage, except on the frame it reaches zero — that frame
+# is the death, and `unless` is what stops it being reported as both. Death is
+# corroborated by two independent fields on the same frame, which is the
+# standard the address notes in docs/games/ ask for.
+[[rule]]
+field = "health"
+edge = "decreases"
+unless = ["death"]
+emit = "damaged"
+
+[[rule]]
+field = "gamemap"
+edge = "changes"
+emit = "note"
+log = "map changed"
+
+# The rule everything else waits on. Doom announces a finished level by moving
+# gamestate to GS_INTERMISSION, one frame after the exit switch is thrown —
+# and that is the frame a time trial's clock should stop on (ADR 0005), not the
+# frame the tally screen finishes animating.
+#
+# `enters` rather than a level test, because gamestate holds at 1 for as long as
+# the player leaves the tally up: everything in this schema is an edge, never a
+# level.
+[[rule]]
+field = "gamestate"
+edge = "enters"
+value = 1
+emit = "stage_cleared"
+
+# -------------------------------------------------------------------- stages
+
+[[stage]]
+id = "e1m1-hangar-boot"
+name = "E1M1: Hangar (cold boot)"
+# The bundle's dosbox.conf runs `DOOM.EXE -warp 1 1` from [autoexec], so the
+# name identifies the place and the content knows how to reach it (ADR 0002).
+# This is the authoring entry point: boot here, play to where a stage should
+# begin, and press F1 to capture the state the entry below uses.
+entry = { named = "E1M1" }
+note = "~900 frames of emulated time from cold; use it to capture a state, not to race"
+
+[[stage]]
+id = "e1m1-hangar"
+name = "E1M1: Hangar"
+# What a real session uses. Measured: a 3.6 MB retro_serialize state restores
+# into a *fresh process* in 60 frames, at the same spot with the same health —
+# so a DOS stage starts mid-level like a console one, and far faster than
+# booting DOS.
+entry = { state = "assets/states/doom_e1m1.state" }
+
+# ----------------------------------------------------------------- challenges
+#
+# Ordinary [[challenge]] entries, unchanged in every respect from the console
+# manifests. That is the point of the whole exercise: a DOS game needed four
+# additions to the *runner* half of the schema and nothing at all here.
+
+[[challenge]]
+id = "e1m1-time-trial"
+name = "E1M1: Hangar"
+stage = "e1m1-hangar"
+kind = "time_trial"
+complete_when = { cleared = true }
+note = "a human reached the exit in ~1100 frames without hurrying; par is around 30 s"
+
+[[challenge]]
+id = "e1m1-survival"
+name = "E1M1: Hangar"
+stage = "e1m1-hangar"
+kind = "survival"
+complete_when = { cleared = true }

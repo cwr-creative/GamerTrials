@@ -77,17 +77,18 @@ impl Search {
         }
     }
 
-    /// Reads one candidate in the search's width. `None` past the end of RAM,
-    /// which only a `U16` read at the very last byte can hit.
+    /// Reads one candidate in the search's width. `None` past the end of the
+    /// window, which only a multi-byte read near the last byte can hit.
+    ///
+    /// Little-endian, unconditionally: this is a search over raw bytes rather
+    /// than over a manifest's declared fields, and a candidate's byte order is
+    /// not known until it turns out to be the address you were looking for.
     fn value(&self, ram: &[u8], off: usize) -> Option<u32> {
-        match self.width {
-            Width::U8 => ram.get(off).map(|b| u32::from(*b)),
-            Width::U16 => {
-                let lo = *ram.get(off)?;
-                let hi = *ram.get(off + 1)?;
-                Some(u32::from(lo) | (u32::from(hi) << 8))
-            }
+        let mut v = 0u32;
+        for i in 0..self.width.bytes() {
+            v |= u32::from(*ram.get(off + i)?) << (8 * i);
         }
+        Some(v)
     }
 
     /// Start over: every address is a candidate again, and this frame's RAM
@@ -95,12 +96,9 @@ impl Search {
     pub fn snapshot(&mut self, ram: &[u8]) {
         self.base.clear();
         self.base.extend_from_slice(ram);
-        // A U16 candidate needs its high byte to exist, so the last offset is
-        // excluded rather than silently reading past the end.
-        let last = match self.width {
-            Width::U8 => ram.len(),
-            Width::U16 => ram.len().saturating_sub(1),
-        };
+        // A multi-byte candidate needs its high bytes to exist, so the last
+        // few offsets are excluded rather than silently reading past the end.
+        let last = ram.len().saturating_sub(self.width.bytes() - 1);
         self.candidates = (0..last as u32).collect();
         self.started = true;
         self.steps = 0;

@@ -1,18 +1,38 @@
 //! Raw libretro FFI plus a `Core` that loads a core DLL directly (ADR 0001).
 //!
-//! This is the merge of the two harnesses' copies. They turned out to differ
-//! by four joypad button ids, three environment calls SNES cores make, and a
-//! richer record of what `SET_MEMORY_MAPS` published — all of it additive, so
-//! the union is what both consoles now run. Nothing in here is per-game or
-//! per-core: what differs between games is which regions they read, and that
-//! lives in `memory.rs` and the manifest.
+//! This is the merge of three frontends' copies. The two console harnesses
+//! turned out to differ by four joypad button ids, three environment calls SNES
+//! cores make, and a richer record of what `SET_MEMORY_MAPS` published. The DOS
+//! spike (ADR 0018) then added the rest, and it is worth naming what it needed,
+//! because none of it is per-game:
+//!
+//! * **Core options.** The console cores keep their defaults, so `GET_VARIABLE`
+//!   used to answer null unconditionally. dosbox-pure's cycles setting decides
+//!   whether the emulated CPU speed tracks the host's, which is the whole
+//!   determinism question (invariant 4), so options have to be both readable
+//!   and settable — and they are pinned by the manifest, not by a preference.
+//! * **A keyboard.** There is no way to play a DOS game with a four-button
+//!   diamond, and no way to type at a DOS prompt with one either.
+//! * **`need_fullpath`.** Passing a path *and* a buffer is harmless for a
+//!   cartridge; a core that mounts a filesystem out of the content wants
+//!   exactly one, and picking for it invites it to choose differently between
+//!   runs.
+//! * **A great many `GET_*` answers.** A console core asks for a handful. A DOS
+//!   core asks for two dozen, and a refused one is not an error — it is a core
+//!   quietly doing something else, which is the failure mode that wastes a day.
+//!   Hence [`unhandled_env`]: anything asked for and not answered is counted,
+//!   so a new core's gaps can be read off rather than guessed at.
+//!
+//! Nothing in here is per-game or per-core: what differs between games is which
+//! regions they read and which options they pin, and that lives in `memory.rs`
+//! and the manifest.
 //!
 //! libretro callbacks are bare `extern "C"` function pointers with no user data,
 //! so frontend state has to be global. It lives in the statics below. Everything
 //! except the audio drain runs on the emulator thread.
 
-use std::collections::VecDeque;
-use std::ffi::{c_char, c_void, CString};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::{c_char, c_uint, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -22,6 +42,10 @@ use libloading::{Library, Symbol};
 // ---------------------------------------------------------------- constants
 
 pub const RETRO_DEVICE_JOYPAD: u32 = 1;
+/// Keyboard, as a controller device. A DOS game is driven through this rather
+/// than through the pad (ADR 0018), and a core reads it out of `input_state`
+/// exactly the way it reads a button.
+pub const RETRO_DEVICE_KEYBOARD: u32 = 3;
 
 pub const RETRO_MEMORY_SAVE_RAM: u32 = 0;
 pub const RETRO_MEMORY_RTC: u32 = 1;
@@ -70,17 +94,35 @@ const PIXEL_FORMAT_0RGB1555: u32 = 0;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
 const PIXEL_FORMAT_RGB565: u32 = 2;
 
-// Environment commands we answer. Anything not listed gets `false`, which is
-// the libretro way of saying "frontend does not support this" and is safe.
+// Environment commands we answer. Anything not listed is counted by
+// `unhandled_env` and gets `false`, which is the libretro way of saying
+// "frontend does not support this" and is safe.
+const EXPERIMENTAL: u32 = 0x10000;
+
+const ENV_SET_ROTATION: u32 = 1;
+const ENV_GET_OVERSCAN: u32 = 2;
 const ENV_GET_CAN_DUPE: u32 = 3;
+const ENV_SET_MESSAGE: u32 = 6;
+const ENV_SHUTDOWN: u32 = 7;
 const ENV_SET_PERFORMANCE_LEVEL: u32 = 8;
 const ENV_GET_SYSTEM_DIRECTORY: u32 = 9;
 const ENV_SET_PIXEL_FORMAT: u32 = 10;
 const ENV_SET_INPUT_DESCRIPTORS: u32 = 11;
+const ENV_SET_KEYBOARD_CALLBACK: u32 = 12;
+const ENV_SET_DISK_CONTROL_INTERFACE: u32 = 13;
+const ENV_SET_HW_RENDER: u32 = 14;
 const ENV_GET_VARIABLE: u32 = 15;
 const ENV_SET_VARIABLES: u32 = 16;
 const ENV_GET_VARIABLE_UPDATE: u32 = 17;
 const ENV_SET_SUPPORT_NO_GAME: u32 = 18;
+const ENV_GET_LIBRETRO_PATH: u32 = 19;
+const ENV_SET_FRAME_TIME_CALLBACK: u32 = 21;
+const ENV_SET_AUDIO_CALLBACK: u32 = 22;
+const ENV_GET_RUMBLE_INTERFACE: u32 = 23;
+const ENV_GET_INPUT_DEVICE_CAPABILITIES: u32 = 24;
+const ENV_GET_LOG_INTERFACE: u32 = 27;
+const ENV_GET_PERF_INTERFACE: u32 = 28;
+const ENV_GET_CORE_ASSETS_DIRECTORY: u32 = 30;
 const ENV_GET_SAVE_DIRECTORY: u32 = 31;
 const ENV_SET_SUBSYSTEM_INFO: u32 = 34;
 const ENV_SET_CONTROLLER_INFO: u32 = 35;
@@ -98,9 +140,38 @@ const ENV_SET_GEOMETRY: u32 = 37;
 /// framerate or sample rate mid-run the pacing in `main` would keep using the
 /// values from startup. No SNES core does, and refusing outright is worse.
 const ENV_SET_SYSTEM_AV_INFO: u32 = 32;
+const ENV_GET_USERNAME: u32 = 38;
+const ENV_GET_LANGUAGE: u32 = 39;
 const ENV_SET_SUPPORT_ACHIEVEMENTS: u32 = 42;
+const ENV_GET_VFS_INTERFACE: u32 = 45 | EXPERIMENTAL;
+const ENV_GET_LED_INTERFACE: u32 = 46;
+const ENV_GET_AUDIO_VIDEO_ENABLE: u32 = 47;
+const ENV_GET_FASTFORWARDING: u32 = 49;
+const ENV_GET_INPUT_BITMASKS: u32 = 51 | EXPERIMENTAL;
+const ENV_GET_CORE_OPTIONS_VERSION: u32 = 52;
+const ENV_SET_CORE_OPTIONS: u32 = 53;
+const ENV_SET_CORE_OPTIONS_INTL: u32 = 54;
+const ENV_SET_CORE_OPTIONS_DISPLAY: u32 = 55;
+const ENV_GET_DISK_CONTROL_INTERFACE_VERSION: u32 = 57;
+const ENV_SET_DISK_CONTROL_EXT_INTERFACE: u32 = 58;
+const ENV_GET_MESSAGE_INTERFACE_VERSION: u32 = 59;
+const ENV_SET_MESSAGE_EXT: u32 = 60;
+const ENV_GET_INPUT_MAX_USERS: u32 = 61;
+const ENV_SET_AUDIO_BUFFER_STATUS_CALLBACK: u32 = 62;
+const ENV_SET_MINIMUM_AUDIO_LATENCY: u32 = 63;
+const ENV_SET_FASTFORWARDING_OVERRIDE: u32 = 64;
+const ENV_SET_CONTENT_INFO_OVERRIDE: u32 = 65;
+const ENV_GET_GAME_INFO_EXT: u32 = 66;
 const ENV_SET_CORE_OPTIONS_V2: u32 = 67;
 const ENV_SET_CORE_OPTIONS_V2_INTL: u32 = 68;
+const ENV_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK: u32 = 69;
+const ENV_SET_VARIABLE: u32 = 70;
+const ENV_GET_THROTTLE_STATE: u32 = 71 | EXPERIMENTAL;
+const ENV_GET_SAVESTATE_CONTEXT: u32 = 72 | EXPERIMENTAL;
+
+/// libretro.h caps a v2 option at this many values, and the array is inline in
+/// the struct rather than a pointer, so the stride depends on it.
+const NUM_CORE_OPTION_VALUES_MAX: usize = 128;
 
 // -------------------------------------------------------------- FFI structs
 
@@ -110,6 +181,20 @@ pub struct GameInfo {
     pub data: *const c_void,
     pub size: usize,
     pub meta: *const c_char,
+}
+
+/// What a core says about itself, in owned form. `retro_get_system_info` may
+/// be called before `retro_init`, and its strings are core-owned, so they are
+/// copied out rather than borrowed.
+#[derive(Clone, Debug)]
+pub struct CoreInfo {
+    pub name: String,
+    pub version: String,
+    pub valid_extensions: String,
+    /// The core wants a path it can open itself, not a buffer. True for
+    /// anything that mounts a filesystem out of the content.
+    pub need_fullpath: bool,
+    pub block_extract: bool,
 }
 
 #[repr(C)]
@@ -149,6 +234,65 @@ pub struct SystemAvInfo {
 struct Variable {
     key: *const c_char,
     value: *const c_char,
+}
+
+#[repr(C)]
+struct CoreOptionValue {
+    value: *const c_char,
+    label: *const c_char,
+}
+
+/// The `SET_CORE_OPTIONS_V2` (67) definition. The `values` array is inline
+/// rather than a pointer, so the struct's stride depends on
+/// `NUM_CORE_OPTION_VALUES_MAX` and getting it wrong walks the array at the
+/// wrong pitch.
+#[repr(C)]
+struct CoreOptionV2Definition {
+    key: *const c_char,
+    desc: *const c_char,
+    desc_categorized: *const c_char,
+    info: *const c_char,
+    info_categorized: *const c_char,
+    category_key: *const c_char,
+    values: [CoreOptionValue; NUM_CORE_OPTION_VALUES_MAX],
+    default_value: *const c_char,
+}
+
+#[repr(C)]
+struct CoreOptionsV2 {
+    categories: *mut c_void,
+    definitions: *const CoreOptionV2Definition,
+}
+
+#[repr(C)]
+struct CoreOptionsV2Intl {
+    us: *const CoreOptionsV2,
+    local: *const CoreOptionsV2,
+}
+
+/// The v1 (`SET_CORE_OPTIONS`, 53) definition: the same shape minus the
+/// categorised fields.
+#[repr(C)]
+struct CoreOptionDefinition {
+    key: *const c_char,
+    desc: *const c_char,
+    info: *const c_char,
+    values: [CoreOptionValue; NUM_CORE_OPTION_VALUES_MAX],
+    default_value: *const c_char,
+}
+
+#[repr(C)]
+struct CoreOptionsIntl {
+    us: *const CoreOptionDefinition,
+    local: *const CoreOptionDefinition,
+}
+
+/// What a core hands over when it wants to be told about key presses. Only the
+/// pointer is used; the callback is invoked on every edge so a core that reads
+/// its keyboard through events rather than through `input_state` still works.
+#[repr(C)]
+struct KeyboardCallback {
+    callback: Option<unsafe extern "C" fn(bool, c_uint, u32, u16)>,
 }
 
 /// One region of the emulated CPU address space, as described by the core via
@@ -220,8 +364,49 @@ pub static AUDIO_ENABLED: AtomicU32 = AtomicU32::new(0);
 /// Current joypad state as a bitmask indexed by the `JOY_*` ids.
 pub static JOYPAD: AtomicU32 = AtomicU32::new(0);
 
+/// Keycodes currently held, as `RETROK_*` values. A keyboard-driven core reads
+/// these out of `input_state`; see [`key_down`].
+static KEYS_DOWN: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// What the core published about its own options: key, legal values, default.
+/// Printed by `harness --dump-options`, and the reason a manifest's
+/// `[runner.libretro.options]` can be checked rather than trusted.
+static OPTION_DEFS: Mutex<Vec<OptionDef>> = Mutex::new(Vec::new());
+
+/// What we are telling the core its options are set to. Anything not in here
+/// gets the core's own default.
+static OPTION_VALUES: Mutex<BTreeMap<String, CString>> = Mutex::new(BTreeMap::new());
+
+/// Environment commands the core asked for that we answered `false` to.
+/// Counted rather than logged per call, because cores ask every frame — and
+/// kept because "the core silently did something else" is the failure mode
+/// that costs a day (ADR 0018's spike found three this way).
+static UNHANDLED_ENV: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
+
 static PIXEL_FORMAT: AtomicU32 = AtomicU32::new(PIXEL_FORMAT_0RGB1555);
 static SYSTEM_DIR: OnceLock<CString> = OnceLock::new();
+static SAVE_DIR: OnceLock<CString> = OnceLock::new();
+static CORE_PATH: OnceLock<CString> = OnceLock::new();
+/// Set when an option changes, cleared when the core asks. Starts set so the
+/// core reads the manifest's values on its first look.
+static VARIABLES_DIRTY: AtomicU32 = AtomicU32::new(1);
+/// The core's keyboard-event callback, if it registered one.
+static KEYBOARD_CB: Mutex<Option<unsafe extern "C" fn(bool, c_uint, u32, u16)>> = Mutex::new(None);
+/// Set when the core asks to shut down. `retro_run` after that is undefined,
+/// and a DOS core reaches it the moment the guest program exits — quitting Doom
+/// from its own menu is enough.
+static SHUTDOWN: AtomicU32 = AtomicU32::new(0);
+
+/// One core option, as the core itself described it.
+#[derive(Clone, Debug)]
+pub struct OptionDef {
+    pub key: String,
+    pub desc: String,
+    /// Every legal value, in the order the core listed them. Empty when the
+    /// core described the option without enumerating them.
+    pub values: Vec<String>,
+    pub default_value: String,
+}
 
 /// Regions the core published via `SET_MEMORY_MAPS`, copied out of the
 /// core-owned descriptor array at the moment it is offered.
@@ -323,6 +508,114 @@ pub fn read_addr(addr: usize) -> Option<u8> {
     None
 }
 
+/// Pin one core option. Must be called before `retro_init`, because that is
+/// when a core reads its options for the first time and sizes the machine it
+/// builds from them.
+///
+/// Nothing is validated here: the core has not published its definitions yet.
+/// [`check_options`] is what compares the two, once it has.
+pub fn set_option(key: &str, value: &str) {
+    if let Ok(v) = CString::new(value) {
+        lock(&OPTION_VALUES).insert(key.to_string(), v);
+        VARIABLES_DIRTY.store(1, Ordering::Relaxed);
+    }
+}
+
+/// Every option the core published, for a dump.
+pub fn option_defs() -> Vec<OptionDef> {
+    lock(&OPTION_DEFS).clone()
+}
+
+/// Checks the options a manifest pinned against what the core says exist.
+///
+/// A misspelled key is not a no-op that quietly keeps a default — it is a
+/// player running a differently configured machine from everyone else, which
+/// for `dosbox_pure_cycles` means an unscoreable frame count (ADR 0018). So it
+/// is an error, in the same spirit as the manifest loader's `deny_unknown_fields`.
+///
+/// Returns `Ok(())` when the core published no definitions at all: that is a
+/// core we know nothing about rather than a manifest that is wrong.
+pub fn check_options() -> Result<(), String> {
+    let defs = lock(&OPTION_DEFS);
+    if defs.is_empty() {
+        return Ok(());
+    }
+    let mut problems = Vec::new();
+    for (key, value) in lock(&OPTION_VALUES).iter() {
+        let value = value.to_string_lossy();
+        match defs.iter().find(|d| &d.key == key) {
+            None => problems.push(format!(
+                "`{key}` is not an option this core has (it publishes {})",
+                defs.len()
+            )),
+            // A core may describe an option without enumerating its values —
+            // a free-text path, say — and then anything is legal.
+            Some(d) if !d.values.is_empty() && !d.values.iter().any(|v| v == &value) => {
+                problems.push(format!(
+                    "`{key} = \"{value}\"` is not one of this core's values: {}",
+                    d.values.join(", ")
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "runner.libretro.options does not match the core:
+  {}",
+            problems.join("
+  ")
+        ))
+    }
+}
+
+/// Environment commands the core asked for and did not get, with how often.
+/// Empty is the good answer; anything in it is a capability this frontend does
+/// not have and the core has silently worked around.
+pub fn unhandled_env() -> BTreeMap<u32, u64> {
+    lock(&UNHANDLED_ENV).clone()
+}
+
+/// Press a key, as a `RETROK_*` code. Both channels are fed: the held-key set
+/// `input_state` answers from, and the core's own callback if it registered one.
+pub fn key_down(code: u32) {
+    if !lock(&KEYS_DOWN).insert(code) {
+        return;
+    }
+    let cb = *lock(&KEYBOARD_CB);
+    if let Some(cb) = cb {
+        unsafe { cb(true, code, 0, 0) };
+    }
+}
+
+pub fn key_up(code: u32) {
+    if !lock(&KEYS_DOWN).remove(&code) {
+        return;
+    }
+    let cb = *lock(&KEYBOARD_CB);
+    if let Some(cb) = cb {
+        unsafe { cb(false, code, 0, 0) };
+    }
+}
+
+/// Release everything. Used when focus is lost, and before a state is
+/// restored — a key the core thinks is held across an entry is a stage that
+/// starts with the player walking into a wall.
+pub fn keys_clear() {
+    let held: Vec<u32> = lock(&KEYS_DOWN).iter().copied().collect();
+    for k in held {
+        key_up(k);
+    }
+}
+
+/// Whether the core has asked to be shut down. Running frames past this drives
+/// a core that has already torn itself down.
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Ordering::Relaxed) != 0
+}
+
 fn audio_enabled() -> bool {
     AUDIO_ENABLED.load(Ordering::Relaxed) != 0
 }
@@ -336,6 +629,105 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 // ----------------------------------------------------------------- callbacks
+
+/// Walks a null-key-terminated v2 definition array. Shared by
+/// `SET_CORE_OPTIONS_V2` and the `us` half of its INTL form.
+unsafe fn read_v2_defs(defs: *const CoreOptionV2Definition) -> Vec<OptionDef> {
+    let mut out = Vec::new();
+    if defs.is_null() {
+        return out;
+    }
+    // Bounded rather than trusting the terminator: a struct-layout mistake
+    // walks this array at the wrong stride, and a runaway loop is a much worse
+    // way to find that out than a short list.
+    for i in 0..MAX_OPTIONS {
+        let d = &*defs.add(i);
+        if d.key.is_null() {
+            break;
+        }
+        out.push(OptionDef {
+            key: cstr(d.key),
+            desc: cstr(d.desc),
+            values: read_values(&d.values),
+            default_value: cstr(d.default_value),
+        });
+    }
+    out
+}
+
+unsafe fn read_v1_defs(defs: *const CoreOptionDefinition) -> Vec<OptionDef> {
+    let mut out = Vec::new();
+    if defs.is_null() {
+        return out;
+    }
+    for i in 0..MAX_OPTIONS {
+        let d = &*defs.add(i);
+        if d.key.is_null() {
+            break;
+        }
+        out.push(OptionDef {
+            key: cstr(d.key),
+            desc: cstr(d.desc),
+            values: read_values(&d.values),
+            default_value: cstr(d.default_value),
+        });
+    }
+    out
+}
+
+unsafe fn read_values(values: &[CoreOptionValue; NUM_CORE_OPTION_VALUES_MAX]) -> Vec<String> {
+    let mut out = Vec::new();
+    for v in values.iter() {
+        if v.value.is_null() {
+            break;
+        }
+        out.push(cstr(v.value));
+    }
+    out
+}
+
+/// The legacy `SET_VARIABLES` form: `{key, "description; a|b|c"}`, the first
+/// value being the default.
+unsafe fn read_legacy_vars(vars: *const Variable) -> Vec<OptionDef> {
+    let mut out = Vec::new();
+    if vars.is_null() {
+        return out;
+    }
+    for i in 0..MAX_OPTIONS {
+        let v = &*vars.add(i);
+        if v.key.is_null() {
+            break;
+        }
+        let blob = cstr(v.value);
+        let (desc, rest) = match blob.split_once(';') {
+            Some((d, r)) => (d.to_string(), r.trim().to_string()),
+            None => (blob.clone(), String::new()),
+        };
+        let values: Vec<String> = if rest.is_empty() {
+            Vec::new()
+        } else {
+            rest.split('|').map(|s| s.trim().to_string()).collect()
+        };
+        out.push(OptionDef {
+            key: cstr(v.key),
+            desc,
+            default_value: values.first().cloned().unwrap_or_default(),
+            values,
+        });
+    }
+    out
+}
+
+/// A core describes its options once, in whichever of the four forms it
+/// prefers. An empty list is not a description, so it never replaces one.
+fn record_defs(defs: Vec<OptionDef>) {
+    if defs.is_empty() {
+        return;
+    }
+    *lock(&OPTION_DEFS) = defs;
+}
+
+const MAX_OPTIONS: usize = 4096;
 
 unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
     match cmd {
@@ -359,7 +751,7 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                 _ => false,
             }
         }
-        ENV_GET_SYSTEM_DIRECTORY | ENV_GET_SAVE_DIRECTORY => {
+        ENV_GET_SYSTEM_DIRECTORY | ENV_GET_CORE_ASSETS_DIRECTORY => {
             if data.is_null() {
                 return false;
             }
@@ -371,18 +763,232 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                 None => false,
             }
         }
-        ENV_GET_VARIABLE => {
-            // No core options are overridden; every core keeps its defaults.
+        // Separate from the system directory, and it matters for DOS: this is
+        // where dosbox-pure persists the guest's writes. A stale one is a boot
+        // that is not cold, which is a boot that is not reproducible.
+        ENV_GET_SAVE_DIRECTORY => {
+            if data.is_null() {
+                return false;
+            }
+            match SAVE_DIR.get().or_else(|| SYSTEM_DIR.get()) {
+                Some(dir) => {
+                    *(data as *mut *const c_char) = dir.as_ptr();
+                    true
+                }
+                None => false,
+            }
+        }
+        ENV_GET_LIBRETRO_PATH => {
+            if data.is_null() {
+                return false;
+            }
+            match CORE_PATH.get() {
+                Some(p) => {
+                    *(data as *mut *const c_char) = p.as_ptr();
+                    true
+                }
+                None => false,
+            }
+        }
+        ENV_GET_OVERSCAN => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut bool) = false;
+            true
+        }
+        ENV_GET_LANGUAGE => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 0; // RETRO_LANGUAGE_ENGLISH
+            true
+        }
+        ENV_GET_INPUT_MAX_USERS => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 1; // port 0 only; one local player
+            true
+        }
+        ENV_GET_INPUT_DEVICE_CAPABILITIES => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut u64) = (1 << RETRO_DEVICE_JOYPAD) | (1 << RETRO_DEVICE_KEYBOARD);
+            true
+        }
+        ENV_GET_AUDIO_VIDEO_ENABLE => {
+            if data.is_null() {
+                return false;
+            }
+            // Bit 0 video, bit 1 audio. A headless run still wants video: the
+            // framebuffer is what a spectator gets (ADR 0003) and what a
+            // screenshot is taken from.
+            *(data as *mut c_uint) = 0b11;
+            true
+        }
+        ENV_GET_FASTFORWARDING | ENV_GET_THROTTLE_STATE => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut bool) = false;
+            true
+        }
+        ENV_GET_INPUT_BITMASKS => true,
+        ENV_GET_CORE_OPTIONS_VERSION => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 2;
+            true
+        }
+        ENV_GET_MESSAGE_INTERFACE_VERSION => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 1;
+            true
+        }
+        ENV_GET_DISK_CONTROL_INTERFACE_VERSION => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 1;
+            true
+        }
+        ENV_GET_SAVESTATE_CONTEXT => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut c_uint) = 0; // RETRO_SAVESTATE_CONTEXT_NORMAL
+            true
+        }
+        ENV_GET_USERNAME => {
             if !data.is_null() {
-                (*(data as *mut Variable)).value = std::ptr::null();
+                *(data as *mut *const c_char) = std::ptr::null();
             }
             false
+        }
+        // The four forms a core may describe its options in. Recorded rather
+        // than ignored, because that record is what `check_options` compares a
+        // manifest's pinned values against.
+        ENV_SET_CORE_OPTIONS_V2 => {
+            if data.is_null() {
+                return false;
+            }
+            record_defs(read_v2_defs((*(data as *const CoreOptionsV2)).definitions));
+            true
+        }
+        ENV_SET_CORE_OPTIONS_V2_INTL => {
+            if data.is_null() {
+                return false;
+            }
+            let intl = &*(data as *const CoreOptionsV2Intl);
+            if !intl.us.is_null() {
+                record_defs(read_v2_defs((*intl.us).definitions));
+            }
+            true
+        }
+        ENV_SET_CORE_OPTIONS => {
+            if data.is_null() {
+                return false;
+            }
+            record_defs(read_v1_defs(data as *const CoreOptionDefinition));
+            true
+        }
+        ENV_SET_CORE_OPTIONS_INTL => {
+            if data.is_null() {
+                return false;
+            }
+            record_defs(read_v1_defs((*(data as *const CoreOptionsIntl)).us));
+            true
+        }
+        ENV_SET_VARIABLES => {
+            if data.is_null() {
+                return false;
+            }
+            record_defs(read_legacy_vars(data as *const Variable));
+            true
+        }
+        ENV_GET_VARIABLE => {
+            if data.is_null() {
+                return false;
+            }
+            let v = &mut *(data as *mut Variable);
+            let key = cstr(v.key);
+            match lock(&OPTION_VALUES).get(&key) {
+                Some(val) => {
+                    v.value = val.as_ptr();
+                    true
+                }
+                None => {
+                    // Not pinned by the manifest: the core keeps its default.
+                    v.value = std::ptr::null();
+                    false
+                }
+            }
         }
         ENV_GET_VARIABLE_UPDATE => {
             if data.is_null() {
                 return false;
             }
-            *(data as *mut bool) = false;
+            *(data as *mut bool) = VARIABLES_DIRTY.swap(0, Ordering::Relaxed) != 0;
+            true
+        }
+        ENV_SET_VARIABLE => {
+            // The core asking the frontend to change a value - what a core does
+            // after validating one of its own. Honoured so it is not fighting
+            // us every frame.
+            if data.is_null() {
+                return false;
+            }
+            let v = &*(data as *const Variable);
+            if v.key.is_null() || v.value.is_null() {
+                return false;
+            }
+            if let Ok(val) = CString::new(cstr(v.value)) {
+                lock(&OPTION_VALUES).insert(cstr(v.key), val);
+            }
+            true
+        }
+        ENV_SET_KEYBOARD_CALLBACK => {
+            if data.is_null() {
+                return false;
+            }
+            *lock(&KEYBOARD_CB) = (*(data as *const KeyboardCallback)).callback;
+            true
+        }
+        // A core-supplied status line. Worth surfacing: it is where dosbox-pure
+        // reports that it could not mount the content, which otherwise looks
+        // like a game that boots to nothing.
+        ENV_SET_MESSAGE => {
+            if !data.is_null() {
+                #[repr(C)]
+                struct Message {
+                    msg: *const c_char,
+                    frames: c_uint,
+                }
+                let text = cstr((*(data as *const Message)).msg);
+                if !text.is_empty() {
+                    eprintln!("[core] {text}");
+                }
+            }
+            true
+        }
+        ENV_SET_MESSAGE_EXT => {
+            if !data.is_null() {
+                // Only the leading `msg` pointer is read; the rest is
+                // priorities and display targets this frontend has no use for.
+                let text = cstr(*(data as *const *const c_char));
+                if !text.is_empty() {
+                    eprintln!("[core] {text}");
+                }
+            }
+            true
+        }
+        ENV_SHUTDOWN => {
+            SHUTDOWN.store(1, Ordering::Relaxed);
             true
         }
         ENV_SET_MEMORY_MAPS => {
@@ -418,20 +1024,48 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             true
         }
         // Accepted and ignored. Refusing these makes some cores noisy.
-        ENV_SET_PERFORMANCE_LEVEL
+        ENV_SET_ROTATION
+        | ENV_SET_PERFORMANCE_LEVEL
         | ENV_SET_INPUT_DESCRIPTORS
-        | ENV_SET_VARIABLES
         | ENV_SET_SUPPORT_NO_GAME
         | ENV_SET_SUBSYSTEM_INFO
         | ENV_SET_CONTROLLER_INFO
         | ENV_SET_GEOMETRY
         | ENV_SET_SYSTEM_AV_INFO
         | ENV_SET_SUPPORT_ACHIEVEMENTS
-        | ENV_SET_CORE_OPTIONS_V2
-        | ENV_SET_CORE_OPTIONS_V2_INTL => true,
-        // GET_LOG_INTERFACE (27) deliberately falls through to false: its
-        // callback is C-variadic, and stable Rust cannot define one.
-        _ => false,
+        | ENV_SET_CORE_OPTIONS_DISPLAY
+        | ENV_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK
+        | ENV_SET_AUDIO_BUFFER_STATUS_CALLBACK
+        | ENV_SET_MINIMUM_AUDIO_LATENCY
+        | ENV_SET_FASTFORWARDING_OVERRIDE
+        | ENV_SET_DISK_CONTROL_INTERFACE
+        | ENV_SET_DISK_CONTROL_EXT_INTERFACE => true,
+
+        // Deliberately refused, and listed so they are not counted as gaps.
+        //
+        // LOG_INTERFACE hands back a C-variadic function pointer, which stable
+        // Rust cannot define. HW_RENDER would ask for a GL context this
+        // frontend does not have - refusing is what keeps dosbox-pure on its
+        // software renderer, which is what ADR 0018 wants anyway. The rest are
+        // capabilities we genuinely lack.
+        ENV_GET_LOG_INTERFACE
+        | ENV_SET_HW_RENDER
+        | ENV_GET_VFS_INTERFACE
+        | ENV_GET_RUMBLE_INTERFACE
+        | ENV_GET_LED_INTERFACE
+        | ENV_GET_PERF_INTERFACE
+        | ENV_SET_FRAME_TIME_CALLBACK
+        | ENV_SET_AUDIO_CALLBACK
+        | ENV_SET_CONTENT_INFO_OVERRIDE
+        | ENV_GET_GAME_INFO_EXT => false,
+
+        // Everything else: refused, and counted. `harness --dump-options`
+        // prints the tally, which is how the next core's gaps get found
+        // without reading its source.
+        other => {
+            *lock(&UNHANDLED_ENV).entry(other).or_insert(0) += 1;
+            false
+        }
     }
 }
 
@@ -530,17 +1164,25 @@ unsafe extern "C" fn cb_input_poll() {
 }
 
 unsafe extern "C" fn cb_input_state(port: u32, device: u32, _index: u32, id: u32) -> i16 {
-    if port != 0 || device != RETRO_DEVICE_JOYPAD {
+    if port != 0 {
         return 0;
     }
-    let bits = JOYPAD.load(Ordering::Relaxed);
-    if id == JOY_MASK {
-        return bits as i16;
-    }
-    if id < 16 && bits & (1 << id) != 0 {
-        1
-    } else {
-        0
+    match device {
+        RETRO_DEVICE_JOYPAD => {
+            let bits = JOYPAD.load(Ordering::Relaxed);
+            if id == JOY_MASK {
+                return bits as i16;
+            }
+            if id < 16 && bits & (1 << id) != 0 {
+                1
+            } else {
+                0
+            }
+        }
+        // `id` is a RETROK_* code here, not a button index. A core polls this
+        // for every key it cares about, every frame.
+        RETRO_DEVICE_KEYBOARD => i16::from(lock(&KEYS_DOWN).contains(&id)),
+        _ => 0,
     }
 }
 
@@ -584,13 +1226,24 @@ macro_rules! sym {
 }
 
 impl Core {
-    /// Loads the core DLL and performs the libretro handshake up to `retro_init`.
-    pub fn load(path: &Path) -> Result<Self, String> {
+    /// Loads the core DLL and performs the libretro handshake up to
+    /// `retro_set_environment`.
+    ///
+    /// `save_dir` is where a core persists what the guest writes. It is
+    /// separate from the system directory because for DOS it is load-bearing:
+    /// dosbox-pure keeps the guest's writes there, so a stale one turns a cold
+    /// boot into a warm one and takes reproducibility with it. Callers that do
+    /// not care may pass the core's own directory.
+    ///
+    /// Both paths are made absolute: a core resolves them against its own
+    /// working directory, which is not necessarily ours.
+    pub fn load(path: &Path, save_dir: Option<&Path>) -> Result<Self, String> {
         // Several cores look for firmware in whatever we report as the system
         // directory. Point it at the folder the core itself lives in.
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let _ = SYSTEM_DIR
-            .set(CString::new(dir.to_string_lossy().as_ref()).map_err(|e| e.to_string())?);
+        let _ = SYSTEM_DIR.set(cpath(dir)?);
+        let _ = SAVE_DIR.set(cpath(save_dir.unwrap_or(dir))?);
+        let _ = CORE_PATH.set(cpath(path)?);
 
         let lib = unsafe { Library::new(path) }
             .map_err(|e| format!("cannot load core {}: {e}", path.display()))?;
@@ -704,7 +1357,7 @@ impl Core {
         }
     }
 
-    pub fn system_info(&self) -> (String, String) {
+    pub fn system_info(&self) -> CoreInfo {
         let mut info = SystemInfo {
             library_name: std::ptr::null(),
             library_version: std::ptr::null(),
@@ -713,25 +1366,60 @@ impl Core {
             block_extract: false,
         };
         unsafe { (self.fn_get_system_info)(&mut info) };
-        unsafe { (cstr(info.library_name), cstr(info.library_version)) }
+        unsafe {
+            CoreInfo {
+                name: cstr(info.library_name),
+                version: cstr(info.library_version),
+                valid_extensions: cstr(info.valid_extensions),
+                need_fullpath: info.need_fullpath,
+                block_extract: info.block_extract,
+            }
+        }
     }
 
-    /// The ROM is passed as both a path and a buffer, so cores that set
-    /// `need_fullpath` and cores that want the bytes are both satisfied.
-    pub fn load_game(&mut self, rom_path: &Path, rom: &[u8]) -> Result<(), String> {
+    /// Hands the content over, honouring `need_fullpath` rather than passing
+    /// both a path and a buffer.
+    ///
+    /// Passing both is harmless for a cartridge and wrong for a core that
+    /// mounts a filesystem out of the content: it leaves the core to pick, and
+    /// a core that picks differently between runs is a core that boots
+    /// differently between runs. `device` is which libretro device port 0 is
+    /// driven through — a pad for a console, a keyboard for DOS.
+    pub fn load_game(&mut self, rom_path: &Path, rom: &[u8], device: u32) -> Result<(), String> {
         let path = CString::new(rom_path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+        let need_fullpath = self.system_info().need_fullpath;
         let info = GameInfo {
             path: path.as_ptr(),
-            data: rom.as_ptr() as *const c_void,
-            size: rom.len(),
+            data: if need_fullpath {
+                std::ptr::null()
+            } else {
+                rom.as_ptr() as *const c_void
+            },
+            size: if need_fullpath { 0 } else { rom.len() },
             meta: std::ptr::null(),
         };
         if !unsafe { (self.fn_load_game)(&info) } {
-            return Err("core refused the ROM (retro_load_game returned false)".into());
+            return Err("core refused the content (retro_load_game returned false)".into());
         }
         self.game_loaded = true;
-        unsafe { (self.fn_set_controller_port_device)(0, RETRO_DEVICE_JOYPAD) };
+        unsafe { (self.fn_set_controller_port_device)(0, device) };
         Ok(())
+    }
+
+    /// Unload and reload the same content, giving a core the closest thing to a
+    /// fresh process it can offer in-place.
+    ///
+    /// `retro_reset` is the usual way to start over, and for a console it is
+    /// enough. A DOS core boots a machine out of the content when the content
+    /// is loaded, so re-loading is what actually reproduces a cold boot.
+    pub fn reload_game(&mut self, rom_path: &Path, rom: &[u8], device: u32) -> Result<(), String> {
+        if self.game_loaded {
+            unsafe { (self.fn_unload_game)() };
+            self.game_loaded = false;
+        }
+        keys_clear();
+        JOYPAD.store(0, Ordering::Relaxed);
+        self.load_game(rom_path, rom, device)
     }
 
     pub fn av_info(&self) -> SystemAvInfo {
@@ -770,8 +1458,12 @@ impl Core {
         Some(unsafe { std::slice::from_raw_parts(ptr, size) })
     }
 
+    pub fn serialize_size(&self) -> usize {
+        unsafe { (self.fn_serialize_size)() }
+    }
+
     pub fn save_state(&self) -> Result<Vec<u8>, String> {
-        let size = unsafe { (self.fn_serialize_size)() };
+        let size = self.serialize_size();
         if size == 0 {
             return Err("core does not support savestates".into());
         }
@@ -782,19 +1474,36 @@ impl Core {
         Ok(buf)
     }
 
+    /// Restore a captured state. The core arbitrates whether it can take it.
+    ///
+    /// This used to pre-check `data.len()` against `retro_serialize_size` — a
+    /// savestate is not portable across cores or core versions, and a size
+    /// mismatch looked like the only warning before a core ate garbage. Two
+    /// things about dosbox-pure retired that check, and both are worth
+    /// recording because the reasoning generalises to the next core:
+    ///
+    /// * **The size is not a constant.** dosbox-pure reports 365 KB before the
+    ///   guest has booted and 3.6 MB after, because what it serialises is a
+    ///   machine that does not fully exist yet. An equality test against a
+    ///   moving number refuses states that are perfectly good.
+    /// * **Asking is not free.** `retro_serialize_size` opens a handshake with
+    ///   the core's emulation thread that `retro_serialize` closes. Calling it
+    ///   and then restoring instead leaves that handshake dangling, and the
+    ///   core deadlocks — silently, on a call that has no timeout.
+    ///
+    /// libretro's contract already covers the case the check was guarding:
+    /// `retro_unserialize` returns false for data it cannot take. So the core
+    /// is asked directly, which is what it is for.
     pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let size = unsafe { (self.fn_serialize_size)() };
-        if data.len() != size {
-            // Savestates are not portable across cores or core versions, and a
-            // size mismatch is the only warning we get before the core eats
-            // garbage. Refuse rather than hand it over.
-            return Err(format!(
-                "savestate is {} bytes but this core wants {size}: it was made by a different core or version",
-                data.len()
-            ));
+        if data.is_empty() {
+            return Err("savestate is empty".into());
         }
         if !unsafe { (self.fn_unserialize)(data.as_ptr() as *const c_void, data.len()) } {
-            return Err("retro_unserialize failed".into());
+            return Err(format!(
+                "retro_unserialize refused {} bytes: the state was probably made by a \
+                 different core or a different version of this one",
+                data.len()
+            ));
         }
         Ok(())
     }
@@ -818,4 +1527,16 @@ unsafe fn cstr(p: *const c_char) -> String {
         return String::new();
     }
     std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+}
+
+/// An absolute path as a C string, for handing to a core. Absolute because a
+/// core resolves a relative one against its own working directory rather than
+/// against ours.
+fn cpath(p: &Path) -> Result<CString, String> {
+    let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // `canonicalize` returns a \\?\ prefixed path on Windows, which several
+    // cores mishandle when they concatenate it with their own separators.
+    let text = abs.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    CString::new(text).map_err(|e| e.to_string())
 }

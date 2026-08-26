@@ -20,8 +20,8 @@ use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 
 use session_api::{Presentable, SessionEvent, StageRunner};
 use session_libretro::libretro::{self, RETRO_MEMORY_IDS};
-use session_libretro::manifest::Manifest;
-use session_libretro::memory::Width;
+use session_libretro::manifest::{Controller, Manifest};
+use session_libretro::memory::{AddressSpace, Width};
 use session_libretro::ramsearch::{Filter, Probe, Search};
 use session_libretro::runner::LibretroRunner;
 use session_libretro::{audio, input};
@@ -61,15 +61,21 @@ OPTIONS:
                      e.g. --watch 0x0570-0x05a0
     --addr <N=A[:W]> Retarget a watched quantity without rebuilding, e.g.
                      --addr lives=0x7E08A6 --addr in_stage=0x0527:u8
-                     W is u8 or u16. --addr <name>=off turns that detector off
+                     W is u8, u16 or u32. --addr <name>=off turns it off
     --dump-memory-map
                      Print every memory region this core publishes - the four
                      retro_get_memory_data ids and every SET_MEMORY_MAPS
                      descriptor - and exit. Run it once per core: what a core
                      offers beyond system RAM is the difference between a
                      detector being possible and not
-    --search-width <u8|u16>
-                     Width the F3-F8 RAM search compares at. Default: u16
+    --dump-options   Print every core option this core publishes, its legal
+                     values and its default, plus any environment call the core
+                     asked for and did not get - and exit. Run it once per core:
+                     an option left at its default is a machine configured
+                     differently from everyone else\'s
+    --search-width <u8|u16|u32>
+                     Width the F3-F8 RAM search compares at. Default: u16.
+                     A DOS game wants u32: its globals are C ints
     --probe-recent <N>
                      F11 reports bytes that changed within N frames. Default: 20
     --probe-stable <N>
@@ -78,17 +84,30 @@ OPTIONS:
     --frames <N>     Run N frames headless - no window, no sound, no pacing -
                      and print what fired. The frame numbers are the same as
                      they would be on screen
+    --capture <PATH> Write a savestate after the --frames run and exit. With a
+                     stage whose entry is `named`, this is the whole authoring
+                     loop in one command: boot the game to where it starts
+                     itself, then capture the state a `state` entry restores
     --no-audio       Run without sound, paced off the wall clock instead
     -h, --help       This text
 
-KEYS:
+KEYS (pad games - SMB3, DKC):
     Arrows  d-pad
     Z  B      X  A      A  Y      S  X      Q  L      W  R
     Enter  Start        RShift  Select
-    F1  save state      F2  load state      F5  dump watched RAM
-    F9  reset core      Esc  quit
+    Esc  quit
 
-RAM SEARCH (find a value that persists - lives, bananas, a counter):
+KEYS (keyboard games - DOOM):
+    Every key goes straight to the game, Esc included, because the game maps
+    its own. Close the window to quit; F1-F11 below still belong to the harness.
+
+KEYS (both):
+    F1  save state      F2  re-enter stage  F5  dump watched RAM
+    F9  reset core      F12 quit
+
+RAM SEARCH (find a value that persists - lives, bananas, a counter).
+Works over the system-RAM slice, or over [runner.libretro.memory.scan] for a
+core that publishes no slice at all:
     F3  snapshot / restart      F4  keep unchanged   F6  keep changed
     F7  keep increased          F8  keep decreased   F10 list candidates
 
@@ -110,12 +129,14 @@ struct Args {
     list_stages: bool,
     list_challenges: bool,
     dump_memory_map: bool,
+    dump_options: bool,
     search_width: Width,
     probe_recent: u64,
     probe_stable: u64,
     probe: bool,
     audio: bool,
     frames: Option<u64>,
+    capture: Option<PathBuf>,
 }
 
 fn main() {
@@ -202,13 +223,29 @@ fn run() -> Result<(), String> {
 
     print_addrs(&manifest);
     let space = manifest.libretro.space;
-    let pad_layout = manifest.libretro.pad_layout;
+    let controller = manifest.libretro.controller;
     let mut runner =
         LibretroRunner::start(manifest, args.core.clone(), args.rom.clone(), args.watch.clone())?;
 
     if args.dump_memory_map {
         print_memory_map(&runner);
         return Ok(());
+    }
+    if args.dump_options {
+        print_options();
+        return Ok(());
+    }
+
+    // How much of a declared scan window no route reaches. Said once, because a
+    // window aimed at unmapped space looks exactly like a search that keeps
+    // finding zeros.
+    if let Some((missing, size)) = runner.scan_window_gap() {
+        if missing > 0 {
+            eprintln!(
+                "[scan] {missing} of {size} bytes in the scan window are unmapped and \
+                 read as zero"
+            );
+        }
     }
 
     let av = runner.av_info();
@@ -223,6 +260,10 @@ fn run() -> Result<(), String> {
     if let Some(n) = args.frames {
         runner.enter(&spec).map_err(|e| e.to_string())?;
         for _ in 0..n {
+            if runner.shutdown_requested() {
+                println!("[core] the game asked to shut down at frame {}", runner.frame());
+                break;
+            }
             for event in runner.advance().map_err(|e| e.to_string())? {
                 if let SessionEvent::StageCleared { .. } | SessionEvent::StageExited { .. } = event
                 {
@@ -231,7 +272,15 @@ fn run() -> Result<(), String> {
             }
         }
         println!("[done] {} frames", runner.frame());
+        if let Some(path) = &args.capture {
+            write_state(&runner, path)?;
+        }
         return Ok(());
+    }
+    if args.capture.is_some() {
+        return Err("--capture writes the state a --frames run ends at; pass --frames too, \
+                    or run in the window and press F1"
+            .into());
     }
 
     // Audio doubles as the frame clock, so set it up before the loop.
@@ -267,7 +316,12 @@ fn run() -> Result<(), String> {
     )
     .map_err(|e| format!("cannot open window: {e}"))?;
 
-    let mut pads = input::Pads::new(pad_layout);
+    let mut pads = match controller {
+        Controller::Pad(layout) => Some(input::Pads::new(layout)),
+        // A DOS game has no pad to map. Skipping gilrs here is not only tidy:
+        // it is what stops a connected controller quietly pressing keys.
+        Controller::Keyboard => None,
+    };
     let mut search = Search::new(args.search_width);
     let mut probe = args.probe.then(Probe::new);
 
@@ -283,27 +337,24 @@ fn run() -> Result<(), String> {
     let mut next_deadline = Instant::now();
     let mut last_seq = 0u64;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    // Escape quits a pad game and belongs to the game in a keyboard one, where
+    // it is how Doom opens its menu. F12 quits either.
+    let quits_on_escape = matches!(controller, Controller::Pad(_));
+    while window.is_open()
+        && !window.is_key_down(Key::F12)
+        && !(quits_on_escape && window.is_key_down(Key::Escape))
+    {
+        if runner.shutdown_requested() {
+            println!("[core] the game asked to shut down; stopping");
+            break;
+        }
         for key in window.get_keys_pressed(KeyRepeat::No) {
             match key {
-                Key::F1 => match runner.capture_state() {
-                    Ok(data) => {
-                        if let Some(dir) = state_path.parent() {
-                            let _ = fs::create_dir_all(dir);
-                        }
-                        match fs::write(&state_path, &data) {
-                            Ok(()) => println!(
-                                "[state] saved {} bytes to {}",
-                                data.len(),
-                                state_path.display()
-                            ),
-                            Err(e) => {
-                                eprintln!("[state] cannot write {}: {e}", state_path.display())
-                            }
-                        }
+                Key::F1 => {
+                    if let Err(e) = write_state(&runner, &state_path) {
+                        eprintln!("[state] {e}");
                     }
-                    Err(e) => eprintln!("[state] {e}"),
-                },
+                }
                 Key::F2 => {
                     if let Err(e) = runner.enter(&spec) {
                         eprintln!("[state] {e}");
@@ -324,7 +375,7 @@ fn run() -> Result<(), String> {
                     println!("[core] reset; frame counter restarted");
                 }
                 Key::F3 => {
-                    if let Some(ram) = runner.system_ram() {
+                    if let Some((_, ram)) = runner.scan_window() {
                         search.snapshot(ram);
                     }
                 }
@@ -335,36 +386,43 @@ fn run() -> Result<(), String> {
                         Key::F7 => Filter::Increased,
                         _ => Filter::Decreased,
                     };
-                    if let Some(ram) = runner.system_ram() {
+                    if let Some((_, ram)) = runner.scan_window() {
                         search.filter(ram, f);
                     }
                 }
                 Key::F10 => {
-                    if let Some(ram) = runner.system_ram() {
-                        search.list(&space, ram, LIST_LIMIT);
+                    if let Some((base, ram)) = runner.scan_window() {
+                        search.list(&window_space(&space, base, ram.len()), ram, LIST_LIMIT);
                     }
                 }
                 Key::F11 => {
                     let frame = runner.frame();
-                    match (probe.as_ref(), runner.system_ram()) {
-                        (Some(p), Some(ram)) => p.report(
-                            &space,
-                            ram,
-                            frame,
-                            args.probe_recent,
-                            args.probe_stable,
-                            LIST_LIMIT,
-                        ),
-                        (None, _) => println!("[probe] disabled by --no-probe"),
-                        (_, None) => {}
+                    if probe.is_none() {
+                        println!("[probe] disabled by --no-probe");
+                    } else if let Some((base, ram)) = runner.scan_window() {
+                        if let Some(p) = probe.as_ref() {
+                            p.report(
+                                &window_space(&space, base, ram.len()),
+                                ram,
+                                frame,
+                                args.probe_recent,
+                                args.probe_stable,
+                                LIST_LIMIT,
+                            );
+                        }
                     }
                 }
                 _ => {}
             }
         }
 
-        pads.pump();
-        libretro::JOYPAD.store(input::keyboard(&window) | pads.state(), Ordering::Relaxed);
+        match pads.as_mut() {
+            Some(p) => {
+                p.pump();
+                libretro::JOYPAD.store(input::keyboard(&window) | p.state(), Ordering::Relaxed);
+            }
+            None => input::keyboard_passthrough(&window),
+        }
 
         // Pace on the audio queue when we have one: it follows the sound card
         // clock, which is what playback actually drains at. Wall-clock pacing
@@ -392,10 +450,15 @@ fn run() -> Result<(), String> {
             }
         }
 
-        if let Some(p) = probe.as_mut() {
+        if probe.is_some() {
             let frame = runner.frame() + 1;
-            if let Some(ram) = runner.system_ram() {
-                p.tick(ram, frame);
+            if let Some((_, ram)) = runner.scan_window() {
+                // `scan_window` borrows the runner mutably to fill its buffer,
+                // so the probe is reached through a raw split rather than held
+                // across the call.
+                if let Some(p) = probe.as_mut() {
+                    p.tick(ram, frame);
+                }
             }
         }
 
@@ -448,7 +511,7 @@ fn manifest_path(game: &str) -> PathBuf {
 /// from. Printed at startup because a tool whose whole job is checking
 /// unverified addresses should say which ones it is checking.
 fn print_addrs(m: &Manifest) {
-    println!("[addr] watched quantities (override with --addr name=ADDR[:u8|u16]):");
+    println!("[addr] watched quantities (override with --addr name=ADDR[:u8|u16|u32]):");
     for w in &m.watches {
         let shown = match w.at {
             Some(a) => format!("{} {}", m.libretro.space.show(a), w.width),
@@ -547,6 +610,78 @@ fn shape_suffix(len: usize) -> String {
 /// and damage a sprite-table read rather than a hunt for a counter that may not
 /// exist, and one that publishes APU RAM makes "which music is playing" a plain
 /// RAM watch.
+/// Capture the machine's whole state and put it on disk.
+///
+/// The other half of a `named` entry point: a manifest names a place the game
+/// can reach by itself, the harness boots there, and this is what turns that
+/// into the `state` entry a session actually uses (ADR 0002).
+fn write_state(runner: &LibretroRunner, path: &Path) -> Result<(), String> {
+    let data = runner.capture_state()?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    fs::write(path, &data).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!("[state] saved {} bytes to {}", data.len(), path.display());
+    Ok(())
+}
+
+/// The address space the discovery tools print through.
+///
+/// They work in offsets into whatever slice they were handed, and print each
+/// one as `space.show(off + space.base)`. For a console that slice is system
+/// RAM and the manifest's own space already describes it. For a scan window it
+/// is a slice of somewhere else entirely, so the base and size are the window's
+/// — otherwise a hit at window offset `0x9E98` would print as `$009E98` and
+/// paste back into `--addr` as an address that means nothing.
+fn window_space(space: &AddressSpace, base: usize, len: usize) -> AddressSpace {
+    AddressSpace { base, size: len, ..*space }
+}
+
+/// Every option this core publishes, and every environment call it asked for
+/// and did not get.
+///
+/// Both halves are for the same job: finding out what a core actually wants
+/// before writing a manifest against it. An option left at its default is a
+/// machine configured differently from the next player's, and an unanswered
+/// environment call is the core silently doing something else — which is the
+/// failure that costs a day rather than a minute.
+fn print_options() {
+    let defs = libretro::option_defs();
+    println!();
+    if defs.is_empty() {
+        println!("core options: none published.");
+    } else {
+        println!("core options ({}):", defs.len());
+        for d in &defs {
+            println!("  {}", d.key);
+            if !d.desc.is_empty() {
+                println!("      {}", d.desc);
+            }
+            println!("      default: {}", d.default_value);
+            if !d.values.is_empty() {
+                println!("      values:  {}", d.values.join(" | "));
+            }
+        }
+    }
+
+    let unhandled = libretro::unhandled_env();
+    println!();
+    if unhandled.is_empty() {
+        println!("unanswered environment calls: none.");
+    } else {
+        println!("unanswered environment calls ({}):", unhandled.len());
+        println!("    cmd  asked  (RETRO_ENVIRONMENT_* number; EXPERIMENTAL is | 0x10000)");
+        for (cmd, count) in &unhandled {
+            println!("  {cmd:>5}  {count:>5}");
+        }
+        println!();
+        println!("Each of these is a capability this frontend does not offer. That is");
+        println!("often fine — but a core that asked and was refused has worked around");
+        println!("it somehow, and it is worth knowing how before trusting its frames.");
+    }
+}
+
 fn print_memory_map(runner: &LibretroRunner) {
     println!();
     println!("retro_get_memory_data ids:");
@@ -642,7 +777,7 @@ fn parse_addr(s: &str) -> Result<usize, String> {
     usize::from_str_radix(hex, 16).map_err(|_| format!("wanted a hex address, got `{s}`"))
 }
 
-/// `name=ADDR[:u8|u16]`, or `name=off` to turn a detector off.
+/// `name=ADDR[:u8|u16|u32]`, or `name=off` to turn a detector off.
 fn apply_addr_override(spec: &str, m: &mut Manifest) -> Result<(), String> {
     let (name, rest) = spec
         .split_once('=')
@@ -673,6 +808,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         list_stages: false,
         list_challenges: false,
         dump_memory_map: false,
+        dump_options: false,
         search_width: Width::U16,
         // ~a third of a second either side of the keypress: long enough to
         // cover a human's reaction time, short enough that the frame the game
@@ -684,6 +820,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         probe: true,
         audio: true,
         frames: None,
+        capture: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -703,11 +840,13 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.frames =
                     Some(v.parse().map_err(|_| format!("--frames wants a count, got {v}"))?);
             }
+            "--capture" => args.capture = Some(PathBuf::from(value("--capture")?)),
             "--no-probe" => args.probe = false,
             "--list-addrs" => args.list_addrs = true,
             "--list-stages" => args.list_stages = true,
             "--list-challenges" => args.list_challenges = true,
             "--dump-memory-map" => args.dump_memory_map = true,
+            "--dump-options" => args.dump_options = true,
             "--addr" => args.addrs.push(value("--addr")?),
             "--search-width" => args.search_width = Width::parse(value("--search-width")?.trim())?,
             "--probe-recent" => {
@@ -787,7 +926,14 @@ mod tests {
             Manifest::load(Path::new("../../manifests/dkc.toml")).expect("the shipped manifest");
         assert!(apply_addr_override("lives", &mut m).is_err());
         assert!(apply_addr_override("lives=zzz", &mut m).is_err());
-        assert!(apply_addr_override("lives=0x0577:u32", &mut m).is_err());
+        assert!(apply_addr_override("lives=0x0577:u64", &mut m).is_err());
         assert!(apply_addr_override("nonsense=0x0577", &mut m).is_err());
+        // Past the end of the machine the manifest declared. The bound is the
+        // declared space, not a constant: `u32` used to be refused here as a
+        // bad width and is now a real one (ADR 0018), so what is left to catch
+        // is an address this console cannot reach.
+        assert!(apply_addr_override("lives=0x900000", &mut m).is_err());
+        // ...and one it can, spelled either way, still works.
+        assert!(apply_addr_override("lives=0x7F0000", &mut m).is_ok());
     }
 }

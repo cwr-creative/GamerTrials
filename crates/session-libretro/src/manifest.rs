@@ -96,7 +96,16 @@ struct RunnerDoc {
 struct LibretroDoc {
     core_dir: String,
     #[serde(default)]
+    controller: Option<String>,
+    #[serde(default)]
     pad_layout: Option<String>,
+    /// Authored in seconds, converted at load like every other duration.
+    #[serde(default)]
+    boot_seconds: Option<f64>,
+    /// Core options this game is pinned to. Checked against what the core
+    /// publishes once it has published it; an unknown key is an error.
+    #[serde(default)]
+    options: BTreeMap<String, String>,
     memory: MemoryDoc,
 }
 
@@ -112,6 +121,15 @@ struct MemoryDoc {
     default_width: Option<String>,
     #[serde(default)]
     system_ram_bytes: Option<i64>,
+    #[serde(default)]
+    scan: Option<ScanDoc>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct ScanDoc {
+    at: i64,
+    size: i64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -421,17 +439,59 @@ pub struct Challenge {
     pub note: Option<String>,
 }
 
-/// What the libretro adapter needs that a Doom adapter would not have.
+/// Everything the libretro adapter needs about a game that is not an address
+/// or a rule.
 #[derive(Clone, Debug)]
 pub struct LibretroConfig {
     pub core_dir: PathBuf,
-    pub pad_layout: PadLayout,
+    pub controller: Controller,
     pub space: AddressSpace,
     pub default_width: Width,
     /// What `RETRO_MEMORY_SYSTEM_RAM` is expected to be. A core handing back
     /// something else is not wrong, but every address in the manifest was
     /// written against the expected one, so startup says so.
     pub system_ram_bytes: Option<usize>,
+    /// Where the RAM discovery tools look, when the core publishes no
+    /// system-RAM slice for them to work on. See [`ScanWindow`].
+    pub scan: Option<ScanWindow>,
+    /// Core options pinned by the manifest. Part of the game's identity rather
+    /// than a preference: `dosbox_pure_cycles` decides how many emulated frames
+    /// a piece of play takes, and two players on different values have
+    /// incomparable scores (ADR 0018, invariant 4).
+    pub options: BTreeMap<String, String>,
+    /// How long a cold boot takes before the game is at its named entry point.
+    /// Zero for a console, where `Named` is not used at all; ~900 frames for a
+    /// DOS bundle that has to start DOS first.
+    pub boot_frames: u64,
+}
+
+/// A contiguous window of the address space the RAM discovery tools work over.
+///
+/// The console case needs none of this: `RETRO_MEMORY_SYSTEM_RAM` *is* the
+/// window, it is small, and every interesting byte is in it. A DOS core
+/// publishes no such slice and 16 MB of address space instead, which is both
+/// too big to snapshot every frame and mostly not worth searching. So a DOS
+/// manifest says where to look, and that is a data change like every other
+/// (invariant 5).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScanWindow {
+    pub at: usize,
+    pub size: usize,
+}
+
+/// How port 0 is driven, and how a host controller maps onto it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Controller {
+    /// `RETRO_DEVICE_JOYPAD`. The libretro button ids are the same whichever
+    /// console it is; the layout only decides how a modern pad's diamond lands
+    /// on them.
+    Pad(PadLayout),
+    /// `RETRO_DEVICE_KEYBOARD`. A DOS game is bound to keys, and to *its own*
+    /// keys — Doom's controls are configured inside Doom. So there is nothing
+    /// to lay out: the host keyboard passes straight through, and a manifest
+    /// that tried to remap it would be overriding a choice the player already
+    /// made in the game.
+    Keyboard,
 }
 
 /// Which physical pad the console had. It decides nothing about the core — the
@@ -542,9 +602,17 @@ impl Manifest {
             None => None,
             Some(a) => {
                 // An address outside every route to a byte is refused rather
-                // than silently pointing a detector at nothing.
-                if a > 0xFF_FFFF {
-                    return Err(format!("{} is not an address this console has", space.show(a)));
+                // than silently pointing a detector at nothing. The bound is
+                // the space the manifest declared, not a constant: a DOS
+                // machine's is 16 MB and a console's is a few KB, and a
+                // hard-coded 24-bit ceiling would be wrong for both.
+                let reach = space.base.saturating_add(space.size);
+                if a >= reach {
+                    return Err(format!(
+                        "{} is past the end of this machine's address space ({})",
+                        space.show(a),
+                        space.show(reach.saturating_sub(1))
+                    ));
                 }
                 // Folded to the offset form the manifest itself uses, so
                 // `$7E08A6` and `$08A6` are stored identically however they
@@ -755,6 +823,40 @@ impl Doc {
                 return Err(format!("runner.libretro.pad_layout is `{other}`; try nes or snes"))
             }
         };
+        let controller = match lr.controller.as_deref() {
+            None | Some("pad") => Controller::Pad(pad_layout),
+            Some("keyboard") => {
+                // Refused rather than ignored: a pad layout on a keyboard game
+                // is a contributor who believes something about the input that
+                // is not true, and a silently discarded key is how a manifest
+                // ends up describing a game nobody is playing.
+                if lr.pad_layout.is_some() {
+                    return Err("runner.libretro.pad_layout means nothing when \
+                                controller = \"keyboard\": the host keyboard passes \
+                                straight through, and the game maps its own keys"
+                        .into());
+                }
+                Controller::Keyboard
+            }
+            Some(other) => {
+                return Err(format!(
+                    "runner.libretro.controller is `{other}`; try pad or keyboard"
+                ))
+            }
+        };
+        let scan = match &lr.memory.scan {
+            None => None,
+            Some(sc) => {
+                let at = as_usize(sc.at, "runner.libretro.memory.scan.at")?;
+                let size = as_usize(sc.size, "runner.libretro.memory.scan.size")?;
+                if size == 0 {
+                    return Err("runner.libretro.memory.scan.size is 0, so there is \
+                                nothing to search"
+                        .into());
+                }
+                Some(ScanWindow { at, size })
+            }
+        };
 
         let mut watches = Vec::new();
         for (name, w) in &self.watch {
@@ -919,6 +1021,16 @@ impl Doc {
                 self.game.framerate
             ));
         }
+        let boot_frames = match lr.boot_seconds {
+            None => 0,
+            Some(secs) if secs.is_finite() && secs >= 0.0 => framerate.frames(secs),
+            Some(secs) => {
+                return Err(format!(
+                    "runner.libretro.boot_seconds must be a non-negative number of \
+                     seconds, got {secs}"
+                ))
+            }
+        };
 
         let mut stages = Vec::new();
         for s in &self.stage {
@@ -1123,13 +1235,16 @@ impl Doc {
             },
             libretro: LibretroConfig {
                 core_dir: PathBuf::from(lr.core_dir),
-                pad_layout,
+                controller,
                 space,
                 default_width,
                 system_ram_bytes: match lr.memory.system_ram_bytes {
                     Some(v) => Some(as_usize(v, "runner.libretro.memory.system_ram_bytes")?),
                     None => None,
                 },
+                scan,
+                options: lr.options,
+                boot_frames,
             },
             watches,
             labels,
@@ -1218,6 +1333,95 @@ entry = { state = "a.state" }
     fn an_unknown_key_is_an_error_not_a_silently_ignored_line() {
         let text = format!("{MINIMAL}\n[watch.bananas]\nadr = 0x057B\n");
         assert!(parse(&text).is_err());
+    }
+
+    // ------------------------------------------------ the DOS-shaped fields
+
+    /// Refused rather than ignored. A pad layout on a keyboard game is a
+    /// contributor who believes something about the input that is not true,
+    /// and a silently discarded key is how a manifest ends up describing a
+    /// game nobody is playing.
+    #[test]
+    fn a_pad_layout_on_a_keyboard_game_is_refused() {
+        let text = MINIMAL.replace(
+            "core_dir = \"cores\"",
+            "core_dir = \"cores\"\ncontroller = \"keyboard\"\npad_layout = \"nes\"",
+        );
+        assert!(parse(&text).unwrap_err().contains("pad_layout"));
+    }
+
+    #[test]
+    fn a_keyboard_game_needs_no_layout_at_all() {
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\ncontroller = \"keyboard\"");
+        assert_eq!(parse(&text).unwrap().libretro.controller, Controller::Keyboard);
+    }
+
+    #[test]
+    fn an_unknown_controller_is_refused() {
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\ncontroller = \"mouse\"");
+        assert!(parse(&text).unwrap_err().contains("controller"));
+    }
+
+    /// A console manifest says none of this and gets the console behaviour,
+    /// which is what stops the DOS work leaking into the other two games.
+    #[test]
+    fn omitting_the_dos_fields_leaves_a_console_manifest_alone() {
+        let m = parse(MINIMAL).unwrap();
+        assert_eq!(m.libretro.controller, Controller::Pad(PadLayout::Snes));
+        assert_eq!(m.libretro.scan, None);
+        assert_eq!(m.libretro.boot_frames, 0);
+        assert!(m.libretro.options.is_empty());
+    }
+
+    /// Authored in seconds, stored in frames — like every other duration in
+    /// the schema, so that seconds never reach a `SessionEvent` (ADR 0005).
+    #[test]
+    fn boot_seconds_become_frames_at_the_game_rate() {
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\nboot_seconds = 16.0");
+        assert_eq!(parse(&text).unwrap().libretro.boot_frames, 960);
+    }
+
+    #[test]
+    fn a_negative_boot_time_is_refused() {
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\nboot_seconds = -1.0");
+        assert!(parse(&text).unwrap_err().contains("boot_seconds"));
+    }
+
+    /// A window of nothing would send the discovery tools searching an empty
+    /// slice and report no candidates, which looks exactly like a game that
+    /// writes nothing.
+    #[test]
+    fn an_empty_scan_window_is_refused() {
+        let text = format!("{MINIMAL}\n[runner.libretro.memory.scan]\nat = 0x380000\nsize = 0\n");
+        assert!(parse(&text).unwrap_err().contains("scan.size"));
+    }
+
+    #[test]
+    fn a_scan_window_is_read_as_an_address_and_a_length() {
+        let text =
+            format!("{MINIMAL}\n[runner.libretro.memory.scan]\nat = 0x380000\nsize = 0x10000\n");
+        let scan = parse(&text).unwrap().libretro.scan.expect("declared");
+        assert_eq!((scan.at, scan.size), (0x38_0000, 0x1_0000));
+    }
+
+    /// Pinned options are carried through verbatim. What they are *worth* is
+    /// checked against the core at startup, because only the core knows which
+    /// keys exist — see `libretro::check_options`.
+    #[test]
+    fn pinned_options_survive_the_load() {
+        let text = format!(
+            "{MINIMAL}\n[runner.libretro.options]\ndosbox_pure_cycles = \"26800\"\n"
+        );
+        let m = parse(&text).unwrap();
+        assert_eq!(m.libretro.options.get("dosbox_pure_cycles").map(String::as_str), Some("26800"));
+    }
+
+    /// `u32` is what a DOS game's C `int`s need, and it is the only width
+    /// wider than 16 bits the library uses.
+    #[test]
+    fn a_watch_may_be_four_bytes_wide() {
+        let text = MINIMAL.replace("at = 0x0736", "at = 0x0736\nwidth = \"u32\"");
+        assert_eq!(parse(&text).unwrap().watch("lives").unwrap().width, Width::U32);
     }
 
     #[test]

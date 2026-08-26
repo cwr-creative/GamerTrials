@@ -36,15 +36,28 @@ thing on the list: it needs synchronised netcode rather than one-way telemetry.
 ## Status
 
 Vertical slice, in progress: a fully playable version with a three-game library —
-Super Mario Bros. 3 (NES), Donkey Kong Country (SNES), and Doom (PC). Players
-supply their own ROMs; the client verifies them by hash.
+Super Mario Bros. 3 (NES), Donkey Kong Country (SNES), and Doom (DOS). Players
+supply their own game files; the client verifies them by hash.
+
+Every game runs on an **emulated machine** — that is the line, not "runs under
+libretro" (ADR 0018). DOS games go through the same adapter as the consoles,
+under dosbox-pure, so there is one telemetry mechanism and one spectating
+mechanism rather than two. Modern source ports and Windows-era PC games are out
+of scope.
 
 Phase 2 is done: the two single-game harnesses became one libretro adapter plus
-two game manifests, and adding a libretro game is now a TOML file rather than a
-crate. See `docs/manifest-schema.md` for what that file contains, `CLAUDE.md`
-for the crate layout and the invariants, and `docs/adr/` for why the
-architecture is the way it is — start with `docs/adr/README.md`.
+game manifests, and adding a game is now a TOML file rather than a crate. All
+three slice games load — including Doom, which needed four fields in the
+runner half of the schema and nothing at all in the telemetry half. See
+`docs/manifest-schema.md` for what a manifest contains, `CLAUDE.md` for the
+crate layout and the invariants, and `docs/adr/` for why the architecture is
+the way it is — start with `docs/adr/README.md`.
+
+What is not done: nothing yet *compares* the facts a manifest reports against
+the criteria it declares. That is `challenge-core`, and it does not exist.
+There is no scoring, no generated content and no head-to-head.
 
 ```sh
-cargo run --release -p session-libretro --bin harness -- --game dkc --stage jungle-hijinx
+cargo run --release -p session-libretro --bin harness -- --game dkc  --stage jungle-hijinx
+cargo run --release -p session-libretro --bin harness -- --game doom --stage e1m1-hangar
 ```

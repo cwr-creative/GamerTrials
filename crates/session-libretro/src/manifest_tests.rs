@@ -1,8 +1,8 @@
 //! What the extraction has to not have broken.
 //!
-//! Every behavioural test the two harnesses had, re-run against the two
-//! manifests this crate actually ships — not against a fixture written to suit
-//! the new code. If `manifests/dkc.toml` stops expressing "a bonus room is not
+//! Every behavioural test the two harnesses had, re-run against the manifests
+//! this crate actually ships — not against a fixture written to suit the new
+//! code. If `manifests/dkc.toml` stops expressing "a bonus room is not
 //! a clear", these fail, which is the only way a manifest-driven watcher can be
 //! held to the same standard as the hand-written one it replaced.
 //!
@@ -14,14 +14,15 @@
 
 use std::path::Path;
 
-use session_api::{ChallengeKind, ExitReason, SessionEvent, StageId};
+use session_api::{ChallengeKind, EntryPoint, ExitReason, SessionEvent, StageId};
 
-use crate::manifest::Manifest;
-use crate::memory::{Endian, Width};
+use crate::manifest::{Controller, Manifest};
+use crate::memory::{Endian, Prefer, Width};
 use crate::watch::Watcher;
 
 const SMB3: &str = include_str!("../../../manifests/smb3.toml");
 const DKC: &str = include_str!("../../../manifests/dkc.toml");
+const DOOM: &str = include_str!("../../../manifests/doom.toml");
 
 fn smb3() -> Manifest {
     Manifest::parse(SMB3, Path::new("manifests/smb3.toml")).expect("the shipped SMB3 manifest")
@@ -29,6 +30,10 @@ fn smb3() -> Manifest {
 
 fn dkc() -> Manifest {
     Manifest::parse(DKC, Path::new("manifests/dkc.toml")).expect("the shipped DKC manifest")
+}
+
+fn doom() -> Manifest {
+    Manifest::parse(DOOM, Path::new("manifests/doom.toml")).expect("the shipped DOOM manifest")
 }
 
 /// A game plus a RAM buffer to write into, driven a frame at a time.
@@ -49,17 +54,15 @@ impl Sim {
         let w = self.manifest.watch(field).unwrap_or_else(|| panic!("no [watch.{field}]"));
         let at = w.at.expect("test wrote to a field with no address");
         let off = self.manifest.libretro.space.offset(at).expect("inside the slice");
-        let (lo, hi) = ((value & 0xFF) as u8, (value >> 8) as u8);
-        match (w.width, self.manifest.libretro.space.endian) {
-            (Width::U8, _) => self.ram[off] = lo,
-            (Width::U16, Endian::Little) => {
-                self.ram[off] = lo;
-                self.ram[off + 1] = hi;
-            }
-            (Width::U16, Endian::Big) => {
-                self.ram[off] = hi;
-                self.ram[off + 1] = lo;
-            }
+        // The inverse of `AddressSpace::read`, so a test writes a field the
+        // same way the watcher will read it back at any width.
+        let n = w.width.bytes();
+        for i in 0..n {
+            let shift = match self.manifest.libretro.space.endian {
+                Endian::Little => i,
+                Endian::Big => n - 1 - i,
+            };
+            self.ram[off + i] = ((value >> (8 * shift)) & 0xFF) as u8;
         }
     }
 
@@ -101,16 +104,91 @@ fn items(events: &[SessionEvent]) -> Vec<(String, u32)> {
         .collect()
 }
 
-// ============================================================ both manifests
+// ============================================================ every manifest
 
 #[test]
-fn both_shipped_manifests_load() {
+fn every_shipped_manifest_loads() {
     let s = smb3();
     assert_eq!(s.id.0, "smb3");
     assert_eq!(s.stages.len(), 4);
     let d = dkc();
     assert_eq!(d.id.0, "dkc");
     assert_eq!(d.stages.len(), 6);
+    let m = doom();
+    assert_eq!(m.id.0, "doom");
+    assert_eq!(m.stages.len(), 2);
+}
+
+/// What a DOS game actually needed, pinned so a later refactor cannot quietly
+/// undo it. The point of ADR 0018 was that this list is short and lives
+/// entirely in the runner half of the schema.
+#[test]
+fn the_dos_game_differs_from_the_consoles_only_in_its_runner_block() {
+    let m = doom();
+    assert_eq!(m.console, "dos");
+    // No pad. A DOS game is played on the keys the game itself defines.
+    assert_eq!(m.libretro.controller, Controller::Keyboard);
+    // No system-RAM slice to route through, so the map is the only way.
+    assert_eq!(m.libretro.space.prefer, Prefer::MemoryMap);
+    assert_eq!(m.libretro.system_ram_bytes, None);
+    // C ints.
+    assert_eq!(m.libretro.default_width, Width::U32);
+    assert!(m.watches.iter().all(|w| w.width == Width::U32));
+    // A window for the discovery tools, since there is no slice to hand them.
+    let scan = m.libretro.scan.expect("doom declares a scan window");
+    assert!(
+        m.watches.iter().flat_map(|w| w.at).all(|a| a >= scan.at && a < scan.at + scan.size),
+        "every watched address should be inside the scan window a contributor is pointed at"
+    );
+}
+
+/// The cycles setting decides how many emulated frames a piece of play takes,
+/// so two players on different values have incomparable scores (invariant 4).
+/// It is part of the game's identity, and a manifest that stopped pinning it
+/// would still load and still be wrong — hence a test rather than a comment.
+#[test]
+fn the_dos_game_pins_the_options_that_decide_what_a_frame_means() {
+    let m = doom();
+    assert_eq!(m.libretro.options.get("dosbox_pure_cycles").map(String::as_str), Some("26800"));
+    assert_eq!(m.libretro.options.get("dosbox_pure_force60fps").map(String::as_str), Some("true"));
+    // ...and the declared framerate is only true because of the second of those.
+    assert_eq!(m.framerate.0, 60.0);
+}
+
+/// A `named` entry is how a state gets captured in the first place (ADR 0002),
+/// so the two spellings are a pipeline rather than alternatives. Doom declares
+/// one stage of each kind for the same place.
+#[test]
+fn the_dos_game_declares_both_an_authoring_entry_and_a_racing_one() {
+    let m = doom();
+    let named = m.stages.iter().filter(|s| matches!(s.entry, EntryPoint::Named(_))).count();
+    let state = m.stages.iter().filter(|s| matches!(s.entry, EntryPoint::State(_))).count();
+    assert_eq!((named, state), (1, 1));
+    // A named entry cannot be reached without knowing when the boot has
+    // finished, and the loader has no way to guess it.
+    assert!(m.libretro.boot_frames > 0);
+    // Every challenge races on the state, because a cold boot is ~960 frames
+    // and a restore is ~60 — which is what a death in a time trial costs.
+    for c in &m.challenges {
+        let stage = m.stage(&c.stage.0).expect("validation proved the stage exists");
+        assert!(
+            matches!(stage.entry, EntryPoint::State(_)),
+            "challenge {} races on a cold boot",
+            c.id.0
+        );
+    }
+}
+
+/// A console manifest declares none of the DOS machinery, and picks up no
+/// surprising defaults from it.
+#[test]
+fn the_console_manifests_are_unaffected_by_the_dos_fields() {
+    for m in [smb3(), dkc()] {
+        assert!(matches!(m.libretro.controller, Controller::Pad(_)));
+        assert_eq!(m.libretro.scan, None);
+        assert_eq!(m.libretro.boot_frames, 0);
+        assert!(m.libretro.options.is_empty());
+    }
 }
 
 /// A forced-scrolling level cannot be a time trial: everyone finishes it in the
