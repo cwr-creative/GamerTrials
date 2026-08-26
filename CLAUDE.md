@@ -71,12 +71,12 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `challenge-core` | Stage sequencing, scoring, rules. Pure. |
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
 | `session-libretro` | SMB3, DKC, and every later libretro game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). |
-| `session-external` | Doom. Process launch + stats-file harvest. |
+| `session-external` | Doom, and other classic PC games in the future. Process launch + stats-file harvest. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles. |
 | `app-client` | Tauri shell, overlay, wiring. |
 | `server` | Lobby, clock sync, telemetry aggregation. Never runs a game. |
-| `content-gen` | Per-game procedural stage generators. Phase 3; does not exist yet. |
+| `content-gen` | Per-game procedural stage generators. |
 
 ## Conventions
 
@@ -116,9 +116,6 @@ Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
 What is *not* done, and the next things to settle:
 
-- **No playtest of DKC's addresses.** Almost all have two independent sources
-  and none have been confirmed against the running game. `--frames` and
-  `--addr` are the tools; `docs/games/dkc.md` lists what is unverified.
 - **ADR 0014 is still owed** the external-process half: Doom has no addressable
   core RAM, and `[runner.external]` is where that answer goes.
 - **`challenge-core` does not exist.** `SessionEvent`s are produced, challenges

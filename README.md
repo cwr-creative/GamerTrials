@@ -21,10 +21,10 @@ The two kinds differ in what a death costs:
 Whoever finishes first spectates the other until they finish too.
 
 Challenges are **defined by whoever contributes the game**, in its TOML
-manifest, alongside the RAM addresses that make them detectable. Adding a game
+manifest, alongside how to detect them. Adding a game
 or a challenge is a data change, not a code change. Either kind can run on
-**vanilla** content — a stage as it originally shipped — or on **generated**
-content, where a ROM is patched fresh for each attempt from a seed. Everyone in
+**vanilla** content — a stage as it originally appeared in the published game — or on **generated**
+content, where that content is patched fresh for each attempt from a seed. Everyone in
 a session gets the same seed.
 
 **Spectating is a core requirement.** A player who finishes a stage can watch
