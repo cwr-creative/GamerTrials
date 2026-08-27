@@ -18,6 +18,7 @@ use crate::libretro::{
     RETRO_MEMORY_SYSTEM_RAM, VIDEO,
 };
 use crate::manifest::{Controller, Manifest, RomHeader};
+use crate::statebind;
 use crate::watch::Watcher;
 
 pub struct LibretroRunner {
@@ -48,6 +49,12 @@ pub struct LibretroRunner {
     /// for two of them every time the harness starts is fifteen wasted seconds
     /// on the exact workflow this entry point exists for.
     fresh: bool,
+    /// Whether a `State` entry may be rebound to the ROM in hand before it is
+    /// restored (ADR 0019). Off by default: a state that names a different ROM
+    /// is usually a mistake, and the core refusing it is the mistake being
+    /// caught. It is turned on for generated content, where the ROM is derived
+    /// per seed and the state is the shipped asset.
+    rebind_state: bool,
 }
 
 impl LibretroRunner {
@@ -190,6 +197,7 @@ impl LibretroRunner {
             device,
             scan_buf: Vec::new(),
             fresh: true,
+            rebind_state: false,
         };
 
         // Some cores are not ready to unserialize until they have produced a
@@ -280,8 +288,17 @@ impl LibretroRunner {
     }
 
     /// Capture the machine's whole state, for authoring a new entry point.
+    ///
+    /// Capture on the *base* ROM. A state taken while a generated ROM is loaded
+    /// describes that ROM's board, and rebinding cannot undo that (ADR 0019).
     pub fn capture_state(&self) -> Result<Vec<u8>, String> {
         self.core.save_state()
+    }
+
+    /// Allow a `State` entry to be rebound to the loaded ROM before it is
+    /// restored (ADR 0019). The state file itself is never written to.
+    pub fn set_state_rebinding(&mut self, on: bool) {
+        self.rebind_state = on;
     }
 
     /// Start over from the machine's power-on state, and restart the clock.
@@ -318,9 +335,29 @@ impl StageRunner for LibretroRunner {
         match &spec.entry {
             EntryPoint::State(key) => {
                 let path = PathBuf::from(&key.0);
-                let data = fs::read(&path).map_err(|e| {
+                let mut data = fs::read(&path).map_err(|e| {
                     RunnerError(format!("cannot read entry state {}: {e}", path.display()))
                 })?;
+                // A generated ROM is a different ROM to the one this state was
+                // captured on, and the core says so rather than guessing. Give
+                // it the answer it wants (ADR 0019) — in memory, so the file
+                // stays bound to the base ROM and stays the shipped asset.
+                if self.rebind_state {
+                    match statebind::rebind(&data, &self.rom) {
+                        Ok(Some(rebound)) => {
+                            println!(
+                                "[state] rebound from ROM {}… to {}… ({}); \
+                                 the file on disk is untouched",
+                                &rebound.from[..8],
+                                &rebound.to[..8],
+                                self.rom_path.display()
+                            );
+                            data = rebound.state;
+                        }
+                        Ok(None) => {}
+                        Err(e) => return Err(RunnerError(format!("cannot rebind this state: {e}"))),
+                    }
+                }
                 // No boot first, deliberately. A DOS state carries the whole
                 // machine, so it restores into one that has barely started —
                 // measured at 60 frames, against ~960 for a cold boot. That is

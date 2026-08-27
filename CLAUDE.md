@@ -154,4 +154,9 @@ What is *not* done, and the next things to settle:
 - **`asset-store` will need to hash a bundle's members, not the container.** A
   DOS game is a zip, and its hash depends on how it was zipped (ADR 0018).
 - No generated content (`content-gen`, ADR 0013/0015 — the schema documents
-  patch slots and the loader refuses them), no scoring, no head-to-head.
+  patch slots and the loader refuses them), no scoring, no head-to-head. The
+  entry-point problem that blocked it is settled: Mesen binds a savestate to the
+  ROM's SHA-1, and stage prep rebinds the state to the generated ROM rather than
+  regenerating it (ADR 0019, `--rebind-state`). Two SMB3 slot tables and a golden
+  hash are in `docs/games/smb3.md`, waiting for the engine. What is still open is
+  whether a *rolled quantity* may reach `complete_when`; today it cannot.

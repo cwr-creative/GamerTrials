@@ -43,6 +43,7 @@ pub mod manifest;
 pub mod memory;
 pub mod ramsearch;
 pub mod runner;
+pub mod statebind;
 pub mod watch;
 
 pub use manifest::Manifest;

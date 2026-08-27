@@ -191,3 +191,209 @@ list back with `--list-challenges` rather than trusting this table.
 five `enemy_defeated` events and the clock stops, wherever the player is. It is
 **not playtested** — `$05F4` counts stomps only, so a fireball, shell or star
 kill does not advance it, and five stomps means five stomps.
+
+## Generated content
+
+`content-gen` is not written. Two custom challenges were authored ahead of it,
+so the engine answers to real slot tables rather than a guess, and everything
+below was derived and verified against the ROM. ADR 0015 scopes a patch to
+declarative value substitution; ADR 0019 depends on that scope holding.
+
+### The disassembly reassembles byte-for-byte
+
+`vendor/smb3-disassembly/`, NESASM 3.01:
+
+```sh
+cd vendor/smb3-disassembly/smb3-master && ./nesasm.exe smb3.asm
+```
+
+Output is identical to `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes`,
+`sha1 6bd518e85eb46a4252af07910f61036e84b020d1`. That is stronger provenance
+than a database lookup, and `[rom].sha1` in the manifest is still empty — a
+loose end.
+
+Working from the disassembly was chosen over hacking a ROM and diffing it, for a
+reason worth keeping: **the deliverable is a slot table, not a patch.** A diff
+yields an offset, a width and exactly one sample value; the *pool* — the
+substance of a reroll — is not recoverable from it. The disassembly supplies the
+pool directly, as the `OBJ_*` constants. SMB3 level editors re-serialise and
+repack object lists, producing structural diffs that ADR 0015 puts permanently
+out of scope.
+
+Every offset below was derived by changing one symbol in the disassembly,
+reassembling, and diffing: each probe produced exactly one differing byte, and
+the original value at each offset matched the source constant. The whole patch
+was then built two independent ways — assembled from edited source, and
+byte-patched into the base ROM — and the two were identical. Offsets are into the
+base ROM **after the 16-byte iNES header**, per the schema.
+
+### Sun Storm — World 2 Sand Trap, survival, 30 seconds
+
+One to three extra Angry Suns, rolled into spawn slots that already exist.
+`complete_when = { survive_seconds = 30.0 }`, which is count-independent — so a
+rolled count causes no criterion trouble here. Source: `PRG/objects/SandTrap.asm`.
+
+| Offset | Byte | Was | Roll |
+|---|---|---|---|
+| `0xC856` | slot A id | `$5D` `OBJ_TORNADO` | `pool = [0xAF]` — always a sun |
+| `0xC857` | slot A column | `$51` | `pool = [0x5B]` |
+| `0xC859` | slot B id | `$6E` `OBJ_PARATROOPAGREENHOP` | `pool = [0xAF, 0x6E]` |
+| `0xC85A` | slot B column | `$7E` | `pool = [0x5C]` |
+| `0xC85C` | slot C id | `$6E` `OBJ_PARATROOPAGREENHOP` | `pool = [0xAF, 0x6E]` |
+| `0xC85D` | slot C column | `$9E` | `pool = [0x5D]` |
+
+Row bytes (`0xC858`, `0xC85B`, `0xC85E`) are deliberately **not** slots — a sun
+repositions itself, so patching them adds risk for nothing.
+
+Slot A's single-value pool is what makes the roll 1–3 rather than 0–3. If B or C
+rolls back to its original paratroopa, that paratroopa still moves to screen 5,
+because the column slot is fixed; harmless for a 30-second survival run, but a
+behaviour change and not a no-op.
+
+### Bro Roulette — World 8 Hammer Bro hand trap, time trial *and* survival
+
+`PRG/objects/W8HTrap1.asm` already holds five bro slots containing all four
+variants, so the pool is playtested by Nintendo rather than by us. Four slots are
+permuted over `pool = [0x81, 0x82, 0x86, 0x87]` with `mode = "permutation"`; the
+fifth is parked off the level. `complete_when = { enemies_defeated = 4 }`.
+
+| Offset | Byte | Was | Roll |
+|---|---|---|---|
+| `0xD0B1` | bro 1 id | `$87` `OBJ_FIREBRO` | `group = "bro-shuffle"` |
+| `0xD0B4` | bro 2 id | `$81` `OBJ_HAMMERBRO` | `group = "bro-shuffle"` |
+| `0xD0B7` | bro 3 id | `$81` `OBJ_HAMMERBRO` | `group = "bro-shuffle"` |
+| `0xD0BA` | bro 4 id | `$82` `OBJ_BOOMERANGBRO` | `group = "bro-shuffle"` |
+| `0xD0BE` | bro 5 column | `$37` | `pool = [0x7F]` — parks it off-level |
+
+The level is four screens wide (`LEVEL1_SIZE_04`), so column `$7F` never spawns.
+The per-screen index table is built for 16 screens regardless of level width, so
+this is safe.
+
+Two decisions here were taken deliberately and should not be silently revisited:
+
+- **The count is fixed at four, not rolled.** `complete_when` is static TOML and
+  `enemies_defeated = N` means *at least* N. A rolled count cannot be expressed —
+  set it to the minimum and a short roll wins early, set it to the maximum and a
+  short roll is unwinnable. There is no arithmetic and nothing that can reference
+  the seed, by design. **A rolled quantity cannot reach `complete_when`.** That is
+  the first real boundary a generator hits, and it is unsettled.
+- **"Kill all four" means "stomp all four."** `enemy_defeated` comes from `$05F4`,
+  which counts stomps only. Accepted for now; better SMB3 detectors are owed
+  anyway (ADR 0014).
+
+### Golden hashes
+
+Base ROM patched with sand trap `AF/5B, AF/5C, AF/5D` and bros `86, 87, 82, 81`
+plus the park — exactly 11 bytes differ:
+
+    sha1 b60ba24bca183b8c707d01b3f7b835ec7e38614d
+
+That is `content-gen`'s first golden test, and it depends on none of the
+unresolved questions. A second roll (`AF/5B, 6E/5C, AF/5D`, bros `81, 82, 86,
+87`, same park) gives `bf8e21ff2e4e5958f7f7391f40187534c54bb671`; it exists only
+to prove that a rebind works for more than one seed.
+
+Neither slot table is in `manifests/smb3.toml`, on purpose: the loader **refuses**
+a challenge carrying `patch_slot` keys (ADR 0015 rejected an inert opt-in path),
+so adding them now would fail the whole manifest and take all seven working
+challenges with it.
+
+`patch_slot` tables hang off `[[challenge]]`, so a stage played as both a time
+trial and a survival run duplicates the entire table and the copies can drift.
+Unresolved.
+
+## Five mechanism findings
+
+All confirmed in the disassembly, none of them guessable from a RAM map. They
+are what makes the two challenges above work, and they generalise to any SMB3
+generator.
+
+1. **The Angry Sun activates only at screen 5 exactly.** `Sun_WaitFarEnough`
+   (`PRG/prg005.asm:2718`) gates on `CMP #$05 / BNE` — equality, not "at least" —
+   plus `X >= 176`. A sun that spawns past screen 5 never activates at all. This
+   is why the extra suns sit at columns `$5B`–`$5D`: they spawn already inside the
+   gate and activate on the frame they spawn.
+2. **Objects spawn from a look-ahead of +272 pixels** (`LOSBS_LookAhead`,
+   `prg005.asm:4918`), and **only one ordinary object spawns per frame** — the
+   normal path falls through to `RTS` (`prg005.asm:5155`). Three suns on one
+   column would need the scroll to dwell in a single 16-pixel window for three
+   frames; on consecutive columns each gets its own boundary. The sand trap entry
+   needs ~32 pixels of scroll to spawn all three, which a full P-meter coast
+   supplies regardless of input — that is what stops a player defeating a survival
+   challenge by standing still.
+3. **The object list must stay sorted ascending by column.** The spawn scan stops
+   at the first entry on a different screen, and `Level_ObjIdxStartByScreen` is
+   built at load by walking the list in order. Any column pool must be bounded by
+   its neighbours' values or everything after it silently stops spawning.
+4. **There are five object slots** for ordinary enemies (`LDX #$04`,
+   `prg005.asm:5110`); the end-level card forces slot 6. If no slot is free the
+   object is simply lost — the column alignment has passed and it is not retried.
+   Sun Storm uses four of the five.
+5. **`Level_ObjectID` at `$0671`–`$0678` is the live actor ID table**, and
+   `Objects_State` at `$0661`–`$0668`. This is a far better foundation for "kill
+   all enemies" than the stomp counter, at least in a scroll-locked arena. Not
+   proposed yet: a slot emptying conflates a kill with an off-screen delete.
+
+## Capturing an entry state for a generated challenge
+
+Entry states are captured on the **base** ROM and rebound to the generated one at
+entry (ADR 0019). A patch is only ever visible for objects that have not yet
+spawned when the state was taken, so capturing on the base ROM is what makes a
+state usable for every seed rather than for one.
+
+`tools/smb3-roll.py` applies one roll from the tables above, so there is
+something to check a state against before `content-gen` exists. It is
+scaffolding and the crate replaces it.
+
+```sh
+# either of the two rolls with a recorded hash, or any seed
+python tools/smb3-roll.py --roll golden --out build/smb3-golden.nes
+python tools/smb3-roll.py --seed 7 --out build/smb3-seed7.nes
+```
+
+```sh
+# play to the place the challenge starts, from whatever state is nearest.
+# F1 saves to --state's path, so name the file you are authoring and press F1
+# at intermediate landmarks too - it is a long way to World 8
+harness --game smb3 --stage 1-1 --state assets/states/smb3_w2-sand-trap.state \
+        --watch 0x0012,0x00FD,0x0671-0x0675
+
+# check the state against a generated ROM, without touching the file
+harness --game smb3 --state assets/states/smb3_w2-sand-trap.state \
+        --rom <patched.nes> --rebind-state --frames 600
+```
+
+For Sun Storm, capture with `Horz_Scroll_Hi` (`$0012`) `= $04` and `Horz_Scroll`
+(`$00FD`) just under `$A0`, running right with a full P-meter — finding 2 above
+is why. Watch `$0671`–`$0675` to see the suns take slots as they spawn.
+
+`--rebind-state` never writes to the state file. A state captured *on* a
+generated ROM carries that ROM's board and is 52224 bytes rather than 35840; it
+is not portable back to the base ROM, so do not ship one.
+
+### What the first capture session actually tests
+
+A state carries RAM, and RAM holds derived copies of ROM data.
+`Level_ObjIdxStartByScreen` is built when the level loads (finding 3), so a state
+captured *inside* the sand trap carries an index built from the **base** object
+list, and the rolled list is then read against it.
+
+It should still work: the table records where each screen starts, the scan runs
+forward from there until the screen changes, and the rolled columns `$5B`–`$5D`
+all sit on screen 5, which slot A already indexed. That is reasoning, not a
+measurement. The measurement is:
+
+```sh
+harness --game smb3 --state assets/states/smb3_w2-sand-trap.state \
+        --rom build/smb3-golden.nes --rebind-state \
+        --frames 600 --watch 0x0671-0x0675
+```
+
+Three suns taking actor slots means the stale index is harmless and a mid-level
+entry state is fine. One sun means it is not, and the entry state has to be
+captured on the world map before the level loads — costing the frames a map
+entry takes, which is the price of the patch being read fresh.
+
+Either way, **a generator must never move an object to a screen its slot was not
+already indexed under.** That is a constraint on `content-gen`, and it is why
+both column pools above are single-valued.

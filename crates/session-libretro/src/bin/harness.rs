@@ -55,6 +55,13 @@ OPTIONS:
                      the manifest's core_dir
     --rom <PATH>     ROM to run. Default: the manifest's rom.path
     --state <PATH>   Override the entry state, and the target for F1/F2
+    --rebind-state   Let the entry state restore onto a ROM it was not captured
+                     on, by rewriting the ROM hash in a copy of it (ADR 0019).
+                     This is how a generated ROM is entered: the state ships
+                     bound to the base ROM and is rebound per seed. The file on
+                     disk is never written to. Without it, the core refuses a
+                     state that names a different ROM - which is what you want
+                     everywhere except generated content
     --scale <1-4>    Window scale. Default: 3
     --watch <ADDRS>  Comma-separated addresses to report on change, e.g.
                      --watch 0x7E0577,0x057B. An entry may be a range lo-hi,
@@ -84,10 +91,14 @@ OPTIONS:
     --frames <N>     Run N frames headless - no window, no sound, no pacing -
                      and print what fired. The frame numbers are the same as
                      they would be on screen
-    --capture <PATH> Write a savestate after the --frames run and exit. With a
-                     stage whose entry is `named`, this is the whole authoring
-                     loop in one command: boot the game to where it starts
-                     itself, then capture the state a `state` entry restores
+    --capture <PATH> Where a captured state goes. With --frames, write one when
+                     the run ends and exit - with a stage whose entry is
+                     `named`, that is the whole authoring loop in one command:
+                     boot the game to where it starts itself, then capture the
+                     state a `state` entry restores. In the window, F1 writes
+                     here instead of back over the state the stage was entered
+                     from. Pass it whenever you are authoring a new entry point
+                     rather than re-taking the one you started at
     --no-audio       Run without sound, paced off the wall clock instead
     -h, --help       This text
 
@@ -122,6 +133,7 @@ struct Args {
     core: Option<PathBuf>,
     rom: Option<PathBuf>,
     state: Option<PathBuf>,
+    rebind_state: bool,
     scale: usize,
     watch: Vec<usize>,
     addrs: Vec<String>,
@@ -226,6 +238,7 @@ fn run() -> Result<(), String> {
     let controller = manifest.libretro.controller;
     let mut runner =
         LibretroRunner::start(manifest, args.core.clone(), args.rom.clone(), args.watch.clone())?;
+    runner.set_state_rebinding(args.rebind_state);
 
     if args.dump_memory_map {
         print_memory_map(&runner);
@@ -277,11 +290,19 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
-    if args.capture.is_some() {
-        return Err("--capture writes the state a --frames run ends at; pass --frames too, \
-                    or run in the window and press F1"
-            .into());
-    }
+    // Windowed, `--capture` retargets F1. Without it F1 writes back over the
+    // state the stage was entered from, which is fine while authoring that
+    // state and destroys a shipped asset the moment you are authoring a
+    // different one from it. Authoring a *new* entry point is the whole reason
+    // to be here, so it gets somewhere of its own to go (ADR 0019 and
+    // `docs/games/smb3.md`: capture on the base ROM).
+    let state_path = match &args.capture {
+        Some(p) => {
+            println!("[state] F1 writes to {} - the entry state is read-only", p.display());
+            p.clone()
+        }
+        None => state_path,
+    };
 
     // Audio doubles as the frame clock, so set it up before the loop.
     let audio = if args.audio {
@@ -801,6 +822,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         core: None,
         rom: None,
         state: None,
+        rebind_state: false,
         scale: 3,
         watch: Vec::new(),
         addrs: Vec::new(),
@@ -834,6 +856,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--core" => args.core = Some(PathBuf::from(value("--core")?)),
             "--rom" => args.rom = Some(PathBuf::from(value("--rom")?)),
             "--state" => args.state = Some(PathBuf::from(value("--state")?)),
+            "--rebind-state" => args.rebind_state = true,
             "--no-audio" => args.audio = false,
             "--frames" => {
                 let v = value("--frames")?;

@@ -57,8 +57,10 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0016 | Describe game telemetry as declarative RAM rules in the manifest | Accepted |
 | 0017 | Challenges are contributor-authored manifest entries, not core-defined kinds | Accepted |
 | 0018 | Support PC games only through emulation, and retire the external-process adapter | Accepted |
+| 0019 | Rebind an entry state to a generated ROM rather than regenerating it | Accepted |
+| 0020 | Manifest includes one slot for an alternative ROM and stage defines which ROM | Proposed |
 
-0003, 0013, 0014, 0015, 0016, 0017 and 0018 are written up; 0003 is the
+0003, 0013, 0014, 0015, 0016, 0017, 0018 and 0019 are written up; 0003 is the
 exemplar. Fill in the rest as you implement each area; an unwritten ADR is fine,
 a wrong one is not.
 
@@ -115,8 +117,10 @@ both would have to be rebuilt.
 **0012** — Records *when* to abstract, not *what*. Included because the reasoning
 generalises: build the second implementation before extracting the interface.
 
-**0014** — *Written.* It ended up much smaller than it started: 0016 settles
-how RAM watching is *expressed*, `docs/manifest-schema.md` is the schema, and
-0018 answered the part 0016 did not touch by removing it. What was left was the
-decision itself, and the alternatives — video, audio, ROM instrumentation,
-rcheevos as a runtime — which are the part worth keeping.
+**0020** — Contributors would likely want to create their own ROM-hacks when
+authoring custom challenges, as our patching method limits creative design.
+In practical use, `content-gen` will likely be used only to randomize certain
+elements (enemy types, position, etc) in an already-designed custom challenge.
+
+Therefore, manifests should be designed to accomodate a second ROM for a game.
+And the manifest schema should require stages to define which ROM and which entry point.
