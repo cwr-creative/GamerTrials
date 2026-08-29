@@ -12,6 +12,11 @@ publish = false
 
 [dependencies]
 session-api = { path = "../session-api" }
+# Stage prep applies a contributor's BPS patch and rolls a generated
+# challenge's patch slots before a runner ever sees the bytes (ADR 0015,
+# ADR 0020). The dependency goes this way and never the other: `content-gen`
+# has no idea an emulator exists.
+content-gen = { path = "../content-gen" }
 
 libloading = "0.8"   # load the libretro core ourselves (ADR 0001)
 minifb = "0.27"      # window + framebuffer blit + keyboard

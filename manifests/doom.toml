@@ -13,7 +13,7 @@
 # the binary rather than of the machine, and a different build of DOOM.EXE
 # would need every one of them found again.
 
-schema_version = 2
+schema_version = 3
 
 [game]
 id = "doom"
@@ -25,7 +25,8 @@ region = "usa"
 # below makes it true, which is why the options table is not cosmetic.
 framerate = 60.0
 
-[rom]
+[[rom]]
+id = "base"
 # A DOS game is a directory of files, not a cartridge. dosbox-pure mounts a zip
 # as C: and runs the [autoexec] in the dosbox.conf inside it, so the bundle is
 # one file with one hash and [rom] keeps working unchanged — one manifest per
@@ -220,6 +221,7 @@ name = "E1M1: Hangar (cold boot)"
 # name identifies the place and the content knows how to reach it (ADR 0002).
 # This is the authoring entry point: boot here, play to where a stage should
 # begin, and press F1 to capture the state the entry below uses.
+rom = "base"
 entry = { named = "E1M1" }
 note = "~900 frames of emulated time from cold; use it to capture a state, not to race"
 
@@ -230,6 +232,7 @@ name = "E1M1: Hangar"
 # into a *fresh process* in 60 frames, at the same spot with the same health —
 # so a DOS stage starts mid-level like a console one, and far faster than
 # booting DOS.
+rom = "base"
 entry = { state = "assets/states/doom_e1m1.state" }
 
 # ----------------------------------------------------------------- challenges

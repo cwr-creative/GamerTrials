@@ -6,7 +6,7 @@
 # — which of these are playtested and which are only documented — is in
 # docs/games/smb3.md.
 
-schema_version = 2
+schema_version = 3
 
 [game]
 id = "smb3"
@@ -17,7 +17,8 @@ region = "usa"
 # rate, once, at load.
 framerate = 60.0988
 
-[rom]
+[[rom]]
+id = "base"
 name = "Super Mario Bros. 3 (USA) (Rev 1)"
 path = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
 header = "ines"
@@ -188,21 +189,25 @@ value = 0
 [[stage]]
 id = "1-1"
 name = "World 1-1"
+rom = "base"
 entry = { state = "assets/states/smb3_1-1.state" }
 
 [[stage]]
 id = "1-2"
 name = "World 1-2"
+rom = "base"
 entry = { state = "assets/states/smb3_1-2.state" }
 
 [[stage]]
 id = "1-3"
 name = "World 1-3"
+rom = "base"
 entry = { state = "assets/states/smb3_1-3.state" }
 
 [[stage]]
 id = "1-4"
 name = "World 1-4"
+rom = "base"
 entry = { state = "assets/states/smb3_1-4.state" }
 note = "forced-scrolling: everyone finishes in the same number of frames, so there is no time trial on it"
 
@@ -274,3 +279,164 @@ stage = "1-1"
 kind = "time_trial"
 complete_when = { enemies_defeated = 5 }
 note = "the clock stops on the fifth stomp; reaching the end of the level is not required"
+
+# --------------------------------------------------------- generated content
+#
+# A hand-authored hack and the two custom challenges that live on it. Both are
+# transcribed from docs/games/smb3.md, which is where the offsets came from and
+# where the reasoning for every pool is written down.
+#
+# The hack is carried as a BPS patch against the base ROM and never as a ROM
+# (ADR 0020): a patch encodes differences, and the platform does not distribute
+# a derivative of a dump the player supplied for themselves. It shares this
+# manifest because it reads the same addresses, which is the only condition
+# under which a second ROM may — a hack that moved one would be a second
+# manifest.
+
+[[rom]]
+id = "hack1"
+name = "SMB3: Gamer Trials"
+from = "base"
+patch = "assets/patches/smb3-rom-hack1.bps"
+sha1 = "11f4851c7b4e8413432eed30b0a3760e5dcac638"
+
+[[stage]]
+id = "sun-storm"
+name = "Sun Storm"
+rom = "hack1"
+entry = { state = "assets/states/smb3_sun-storm.state" }
+note = "captured on the World 1 map, on the tile that enters W2_32 — not inside the level, so the object index is built from the rolled list"
+
+[[stage]]
+id = "bro-roulette"
+name = "Bro Roulette"
+rom = "hack1"
+entry = { state = "assets/states/smb3_bro-roulette.state" }
+note = "captured on the World 1 map, on the tile that enters W1_03"
+
+# --- Sun Storm --------------------------------------------------------------
+#
+# One to three Angry Suns, from the object list at $C6BC. $BB is
+# OBJ_CANCELEVENT: it becomes a level event, never an actor, and is how an empty
+# slot is spelled under pure value substitution (docs/games/smb3.md, finding 6).
+# Slot C is fixed and is the highest column deliberately — a sun activates on
+# accumulated scroll, so the rightmost one goes first and every roll delivers
+# its first sun at the same point in the level.
+#
+# The two kinds repeat the table rather than sharing it. patch_slot hangs off
+# [[challenge]], so nothing stops the copies drifting; that is a known wart and
+# the strongest argument for hanging it off [[stage]] instead.
+
+[[challenge]]
+id = "sun-storm-survival"
+name = "Sun Storm"
+stage = "sun-storm"
+kind = "survival"
+complete_when = { cleared = true }
+generator_version = 1
+
+[[challenge.patch_slot]]
+offset = 0xC6BD                        # slot A, column $01
+width = "u8"
+values = { pool = [0xAF, 0xBB] }       # a sun, or nothing at all
+
+[[challenge.patch_slot]]
+offset = 0xC6C0                        # slot B, column $03
+width = "u8"
+values = { pool = [0xAF, 0xBB] }
+
+[[challenge.patch_slot]]
+offset = 0xC6C3                        # slot C, column $05 — always a sun
+width = "u8"
+values = { pool = [0xAF] }
+
+[[challenge]]
+id = "sun-storm-time-trial"
+name = "Sun Storm"
+stage = "sun-storm"
+kind = "time_trial"
+complete_when = { cleared = true }
+generator_version = 1
+
+[[challenge.patch_slot]]
+offset = 0xC6BD
+width = "u8"
+values = { pool = [0xAF, 0xBB] }
+
+[[challenge.patch_slot]]
+offset = 0xC6C0
+width = "u8"
+values = { pool = [0xAF, 0xBB] }
+
+[[challenge.patch_slot]]
+offset = 0xC6C3
+width = "u8"
+values = { pool = [0xAF] }
+
+# --- Bro Roulette -----------------------------------------------------------
+#
+# Four goombas from the object list at $C6CA, each independently either a goomba
+# or one of four bros. The repeated 0x72 entries are the weighting and are not a
+# mistake: the pool is a multiset, so a coin flip decides whether a goomba is
+# replaced and the four variants share the other half evenly. An engine that
+# deduplicated this pool would make it a 20% roll without saying so.
+#
+# Not a permutation group. A group forces each member to appear exactly once,
+# and two hammer bros is a legal outcome here — so is four goombas, at 6.25%.
+
+[[challenge]]
+id = "bro-roulette-time-trial"
+name = "Bro Roulette"
+stage = "bro-roulette"
+kind = "time_trial"
+complete_when = { enemies_defeated = 4 }
+generator_version = 1
+note = "the clock stops on the fourth stomp; reaching the card is not required"
+
+[[challenge.patch_slot]]
+offset = 0xC6CB                        # goomba 1, column $02
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6CE                        # goomba 2, column $0A
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6D1                        # goomba 3, column $0D
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6D4                        # goomba 4, column $0D
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge]]
+id = "bro-roulette-survival"
+name = "Bro Roulette"
+stage = "bro-roulette"
+kind = "survival"
+complete_when = { enemies_defeated = 4 }
+generator_version = 1
+
+[[challenge.patch_slot]]
+offset = 0xC6CB
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6CE
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6D1
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6D4
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }

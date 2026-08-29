@@ -132,73 +132,19 @@ pub fn rebind(state: &[u8], rom: &[u8]) -> Result<Option<Rebound>, String> {
     Ok(Some(Rebound { state: out, from, to }))
 }
 
-/// SHA-1, lowercase hex.
+/// SHA-1, lowercase hex — `content-gen`'s, not a second one.
 ///
-/// Written out rather than pulled in, for the usual reason a 60-line algorithm
-/// with published test vectors is: it is one dependency this crate does not have
-/// to track, and `asset-store` will want its own hashing anyway. The vectors
-/// below are the published ones plus the block-boundary cases, which are where a
-/// hand-written padding gets it wrong.
-pub fn sha1_hex(data: &[u8]) -> String {
-    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
-
-    let mut blocks = data.chunks_exact(64);
-    for block in &mut blocks {
-        compress(&mut h, block.try_into().expect("chunks_exact(64)"));
-    }
-
-    // The tail: the remainder, a 0x80 byte, zeroes, and the bit length. That is
-    // either one block or two, depending on whether the length still fits.
-    let rest = blocks.remainder();
-    let mut tail = [0u8; 128];
-    tail[..rest.len()].copy_from_slice(rest);
-    tail[rest.len()] = 0x80;
-    let tail_len = if rest.len() < 56 { 64 } else { 128 };
-    let bits = (data.len() as u64).wrapping_mul(8);
-    tail[tail_len - 8..tail_len].copy_from_slice(&bits.to_be_bytes());
-    for block in tail[..tail_len].chunks_exact(64) {
-        compress(&mut h, block.try_into().expect("chunks_exact(64)"));
-    }
-
-    h.iter().map(|w| format!("{w:08x}")).collect()
-}
-
-fn compress(h: &mut [u32; 5], block: &[u8; 64]) {
-    let mut w = [0u32; 80];
-    for (i, word) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes(word.try_into().expect("chunks_exact(4)"));
-    }
-    for i in 16..80 {
-        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-    }
-
-    let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-    for (i, wi) in w.iter().enumerate() {
-        let (f, k) = match i {
-            0..=19 => ((b & c) | (!b & d), 0x5A82_7999u32),
-            20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
-            40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-            _ => (b ^ c ^ d, 0xCA62_C1D6),
-        };
-        let t = a
-            .rotate_left(5)
-            .wrapping_add(f)
-            .wrapping_add(e)
-            .wrapping_add(k)
-            .wrapping_add(*wi);
-        e = d;
-        d = c;
-        c = b.rotate_left(30);
-        b = a;
-        a = t;
-    }
-
-    h[0] = h[0].wrapping_add(a);
-    h[1] = h[1].wrapping_add(b);
-    h[2] = h[2].wrapping_add(c);
-    h[3] = h[3].wrapping_add(d);
-    h[4] = h[4].wrapping_add(e);
-}
+/// This module and that crate both answer the question "what does this ROM hash
+/// to", and they have to answer it identically: `content-gen` derives an
+/// artifact and reports the hash a session compares across players (ADR 0013),
+/// and this module writes that same hash into a copy of the entry state so the
+/// core will accept the pairing (ADR 0019). Two implementations of one number is
+/// two chances to disagree about which ROM is in hand.
+///
+/// Re-exported rather than imported at each use site, because the tests below
+/// were written against this name and it is what this module means by "the hash
+/// of a ROM".
+pub use content_gen::sha1_hex;
 
 #[cfg(test)]
 mod tests {

@@ -11,14 +11,6 @@ implementations rather than guessed at from one. ADR 0016 is what came of that
 comparison: both harnesses' game knowledge is now data, and the code that runs
 it is `session-libretro`, which has no idea which game it is running.
 
-**Barely any of this has been playtested.** What is good about the sourcing is
-that almost every address has a second, independent origin in the
-RetroAchievements code notes for DKC, transcribed in
-[dkc-ra-code-notes.md](dkc-ra-code-notes.md). Notes written by achievement
-authors against running code are much better evidence than the wikis the first
-pass relied on, several of which could not be reached at all. They are still not
-a playtest — see "Verifying the addresses" below.
-
 ## Prerequisites
 
 1. **Rust toolchain.** `rustup` from <https://rustup.rs>, plus the MSVC linker —

@@ -21,11 +21,17 @@ The two kinds differ in what a death costs:
 Whoever finishes first spectates the other until they finish too.
 
 Challenges are **defined by whoever contributes the game**, in its TOML
-manifest, alongside how to detect them. Adding a game
-or a challenge is a data change, not a code change. Either kind can run on
-**vanilla** content — a stage as it originally appeared in the published game — or on **generated**
-content, where that content is patched fresh for each attempt from a seed. Everyone in
-a session gets the same seed.
+manifest, alongside how to detect them. Adding a game or a challenge is a data
+change, not a code change. Either kind can run on **vanilla** content — a stage
+as it originally appeared in the published game — on a **hack**, a level someone
+built in an editor and shipped as a patch against the original, or on
+**generated** content, where the content is patched fresh for each attempt from
+a seed. Everyone in a session gets the same seed, and the last two compose: a
+human designs the level, and the generator rerolls the enemies inside it.
+
+The platform never distributes game files. A player supplies their own; a hack
+travels as the difference from it, and a generated stage is built on the machine
+that plays it.
 
 **Spectating is a core requirement.** A player who finishes a stage can watch
 anyone still playing it, whatever game they are in.
@@ -48,14 +54,22 @@ of scope.
 Phase 2 is done: the two single-game harnesses became one libretro adapter plus
 game manifests, and adding a game is now a TOML file rather than a crate. All
 three slice games load — including Doom, which needed four fields in the
-runner half of the schema and nothing at all in the telemetry half. See
+runner half of the schema and nothing at all in the telemetry half.
+
+Custom content followed, and it is data too. A manifest declares the ROMs its
+stages run on: one base, plus any number of hacks carried as BPS patches against
+it. A challenge may declare a table of *patch slots* — an offset, a width and the
+values that are legal there — and `content-gen` rolls one artifact per attempt
+from the session's seed. It has no per-game code and no emulator dependency, so
+its tests are golden hashes rather than a running game. See
 `docs/manifest-schema.md` for what a manifest contains, `CLAUDE.md` for the
 crate layout and the invariants, and `docs/adr/` for why the architecture is
 the way it is — start with `docs/adr/README.md`.
 
 What is not done: nothing yet *compares* the facts a manifest reports against
-the criteria it declares. That is `challenge-core`, and it does not exist.
-There is no scoring, no generated content and no head-to-head.
+the criteria it declares. That is `challenge-core`, and it does not exist. There
+is no scoring and no head-to-head, and the seed a generated challenge runs on
+still comes from a developer flag rather than from a session.
 
 ```sh
 cargo run --release -p session-libretro --bin harness -- --game dkc  --stage jungle-hijinx

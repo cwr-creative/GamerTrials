@@ -10,14 +10,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use session_api::{
-    EntryPoint, Presentable, RunnerError, SessionEvent, StageRunner, StageSpec, VideoFrame,
+    AssetKey, EntryPoint, Presentable, RunnerError, SessionEvent, StageRunner, StageSpec,
+    VideoFrame,
 };
 
 use crate::libretro::{
     self, Core, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_KEYBOARD, RETRO_MEMORY_SAVE_RAM,
     RETRO_MEMORY_SYSTEM_RAM, VIDEO,
 };
-use crate::manifest::{Controller, Manifest, RomHeader};
+use crate::manifest::{Controller, Manifest};
+use crate::prep::Content;
 use crate::statebind;
 use crate::watch::Watcher;
 
@@ -49,11 +51,19 @@ pub struct LibretroRunner {
     /// for two of them every time the harness starts is fifteen wasted seconds
     /// on the exact workflow this entry point exists for.
     fresh: bool,
-    /// Whether a `State` entry may be rebound to the ROM in hand before it is
-    /// restored (ADR 0019). Off by default: a state that names a different ROM
-    /// is usually a mistake, and the core refusing it is the mistake being
-    /// caught. It is turned on for generated content, where the ROM is derived
-    /// per seed and the state is the shipped asset.
+    /// What this runner's content hashes to. A stage says which content it
+    /// runs on, and a runner holding different bytes refuses to enter it rather
+    /// than running the wrong machine.
+    content_key: AssetKey,
+    /// Whether a `State` entry may be rebound to the content in hand before it
+    /// is restored (ADR 0019).
+    ///
+    /// Off unless stage prep says otherwise, and it is a fact rather than a
+    /// preference: it is true exactly when the seeded value-substitution engine
+    /// produced this content from the ROM the stage names, which is the only
+    /// pairing the transplant is sound for. A state that names a different ROM
+    /// is otherwise a mistake, and the core refusing it is the mistake being
+    /// caught.
     rebind_state: bool,
 }
 
@@ -68,25 +78,15 @@ impl LibretroRunner {
     pub fn start(
         manifest: Manifest,
         core_override: Option<PathBuf>,
-        rom_override: Option<PathBuf>,
+        content: Content,
         watched: Vec<usize>,
     ) -> Result<LibretroRunner, String> {
         let core_path = match core_override {
             Some(p) => p,
             None => find_core(&manifest.libretro.core_dir)?,
         };
-        let rom_path = match rom_override {
-            Some(p) => p,
-            None => manifest
-                .rom
-                .path
-                .clone()
-                .ok_or("the manifest names no rom.path; pass --rom")?,
-        };
-
-        let rom = fs::read(&rom_path)
-            .map_err(|e| format!("cannot read content {}: {e}", rom_path.display()))?;
-        check_rom(&manifest, &rom, &rom_path)?;
+        let Content { key: content_key, path: rom_path, bytes: rom, rebindable, title } = content;
+        println!("[rom]  {title}  {content_key}");
 
         // Where the core persists what the guest writes. Beside the content
         // rather than beside the core, because it belongs to the game: for a
@@ -197,7 +197,8 @@ impl LibretroRunner {
             device,
             scan_buf: Vec::new(),
             fresh: true,
-            rebind_state: false,
+            content_key,
+            rebind_state: rebindable,
         };
 
         // Some cores are not ready to unserialize until they have produced a
@@ -326,6 +327,17 @@ impl LibretroRunner {
 
 impl StageRunner for LibretroRunner {
     fn enter(&mut self, spec: &StageSpec) -> Result<(), RunnerError> {
+        // A runner is per (game, content). Entering a stage that runs on
+        // something else is not a thing to fix up in place: content changes at a
+        // challenge boundary, where a new runner is started, and a mismatch here
+        // means a stage was routed to the wrong machine (ADR 0020).
+        if spec.content != self.content_key {
+            return Err(RunnerError(format!(
+                "{} runs on content {} and this runner holds {}; content changes at a                  challenge boundary, not inside one",
+                spec.stage, spec.content, self.content_key
+            )));
+        }
+
         // A key the core still thinks is held would survive into the stage, and
         // a stage that starts with the player walking into a wall is not the
         // same stage for the next person.
@@ -457,40 +469,6 @@ impl Presentable for LibretroRunner {
         }
         video.seq
     }
-}
-
-/// What can be checked about a ROM without a hash of a known-good dump.
-///
-/// Not much, and deliberately per console family rather than per game: the NES
-/// has a magic number, the SNES has none at all — its header is in-band, at a
-/// position that depends on the mapper — so all the SNES gets is a size floor
-/// and a note about the copier header, which shifts every ROM offset by 512
-/// bytes and makes an address table look wrong for no visible reason.
-fn check_rom(manifest: &Manifest, rom: &[u8], path: &Path) -> Result<(), String> {
-    if rom.len() < manifest.rom.min_bytes {
-        return Err(format!(
-            "{} is {} bytes, too small to be a {} ROM",
-            path.display(),
-            rom.len(),
-            manifest.console
-        ));
-    }
-    let mut note = String::new();
-    match manifest.rom.header {
-        RomHeader::None => {}
-        RomHeader::INes => {
-            if rom.len() < 16 || &rom[0..4] != b"NES\x1a" {
-                return Err(format!("{} is not an iNES ROM (bad 16-byte header)", path.display()));
-            }
-        }
-        RomHeader::CopierOptional => {
-            if rom.len() % 1024 == 512 {
-                note = ", has a 512-byte copier header".to_string();
-            }
-        }
-    }
-    println!("[rom]  {} ({} bytes{note})", path.display(), rom.len());
-    Ok(())
 }
 
 /// Where a core is told to persist what the guest writes.

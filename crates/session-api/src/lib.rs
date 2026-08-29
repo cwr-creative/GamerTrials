@@ -102,10 +102,28 @@ pub enum EntryPoint {
 }
 
 /// What a runner needs in order to put a player at the start of a stage.
+///
+/// Two fields for two things, which ADR 0020 separated deliberately: `content`
+/// is *what machine this is* — the game as it shipped, a contributor's hack, or
+/// an artifact derived per seed — and `entry` is *where in it the player
+/// starts*. Collapsing them was tried on paper and fails, because an entry state
+/// is bound to one piece of content's bytes and the two are chosen by different
+/// people at different times.
+///
+/// `content` being an [`AssetKey`] is not adapter vocabulary crossing the
+/// boundary (invariant 3): the type was built to name "an entry state, a ROM, a
+/// generated artifact", and this is the second of those. Nothing here says how
+/// the content was produced, and a runner is not told either — whoever prepares
+/// a stage applies the patches and hands over bytes (ADR 0013, ADR 0015).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StageSpec {
     pub game: GameId,
     pub stage: StageId,
+    /// The content this stage runs on. A runner holds one piece of content for
+    /// its lifetime, so this is what it checks a stage against rather than
+    /// something it reloads from: content only changes at a challenge boundary,
+    /// never between the attempts of one time trial.
+    pub content: AssetKey,
     pub entry: EntryPoint,
 }
 

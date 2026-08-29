@@ -1,19 +1,32 @@
 # Game manifest schema
 
-**Status: proposed, `schema_version = 2`. Implemented by `session-libretro`;
+**Status: proposed, `schema_version = 3`. Implemented by `session-libretro`;
 three manifests in `manifests/` are the worked examples — two consoles and a
-DOS game.**
+DOS game, one of which also carries a hand-authored hack and two generated
+challenges.**
 
-A manifest is everything the platform knows about one game: how to reach it, how
-to read it, and every challenge a player can be dealt in it. Adding a libretro
-game is adding one of these files and nothing else — no Rust, no rebuild
-(invariant 5). The loader (`crates/session-libretro/src/manifest.rs`) is the
-authority on what parses; this document is the authority on what the fields
-*mean*.
+A manifest is everything the platform knows about one game: the content it runs
+on, how to read it, and every challenge a player can be dealt in it. Adding a
+libretro game is adding one of these files and nothing else — no Rust, no
+rebuild (invariant 5), and that now covers a ROM hack and a generated challenge
+as well. The loader (`crates/session-libretro/src/manifest.rs`) is the authority
+on what parses; this document is the authority on what the fields *mean*.
 
-One manifest per **base ROM**. A game with two revisions whose addresses differ
-is two manifests. Generated artifacts get no manifest of their own — they are
-identified by a derivation key (ADR 0013).
+One manifest per **base ROM**, and a manifest may carry ROMs *derived* from that
+base — hand-authored hacks, each declared as a BPS patch against it — with every
+`[[stage]]` saying which one it runs on (ADR 0020). The condition is that the
+telemetry holds unchanged across all of them: a hack that moves an address is
+still two manifests. A game with two revisions whose addresses differ is two
+manifests for the same reason.
+
+Generated artifacts get no `[[rom]]` entry of their own. They are identified by
+a derivation key (ADR 0013) and derived per attempt from a seed, out of whatever
+ROM their challenge's stage names.
+
+Two of the fields below reach `content-gen` rather than the adapter —
+[patch slots](#patch-slots) and a derived `[[rom]]`'s `patch`. That crate is the
+authority on what a slot may say, and `crates/content-gen/src/slots.rs` is where
+the shapes are defined.
 
 ## Three words
 
@@ -31,7 +44,7 @@ Used precisely throughout, and worth learning before reading further (ADR 0017):
 | Table | What it settles |
 |---|---|
 | [`[game]`](#game) | identity, console family, framerate |
-| [`[rom]`](#rom) | which ROM this manifest is written against |
+| [`[[rom]]`](#rom) | the content this game runs on: one base, and any hacks of it |
 | [`[runner]`](#runner) | which adapter runs it, how it is controlled, and how it reaches memory |
 | [`[watch.<name>]`](#watchname) | the addresses to read, and where each came from |
 | [`[label.<field>]`](#labelfield) | what a value *means*, for the log |
@@ -41,7 +54,8 @@ Used precisely throughout, and worth learning before reading further (ADR 0017):
 | [`[attempt]`](#attempt) | what re-opens scoring after an ending |
 | [`[[stage]]`](#stage) | where a run starts |
 | [`[[challenge]]`](#challenge) | every challenge this game offers, and what completes each |
-| [patch slots](#patch-slots--not-implemented) | generated-content ROM patches — documented, **not implemented** |
+| [patch slots](#patch-slots) | how a generated challenge's ROM is rolled from a seed |
+| [alternative ROMs](#alternative-roms) | hand-authored hacks, as patches against the base |
 
 Every table rejects unknown keys. That is deliberate: a permissive loader turns
 a mistyped key into a detector that silently never fires, which is
@@ -65,22 +79,32 @@ authored in seconds are converted at, so it must be the same on every machine �
 a core reporting something different is a warning, not an override.
 
 `console` names the machine family, once per family, never per game. It is what
-ADR 0015's checksum fixup will key off (SNES has an internal header checksum;
-NES has none). `nes`, `snes` and `dos` are what the library uses today.
+`content-gen` keys its two per-console rules off: how many bytes of header a
+patch-slot offset is counted past, and what checksum a substitution has to repair
+(SNES has an internal header checksum; NES has none; a DOS bundle is refused
+outright — ADR 0015, ADR 0020). `nes`, `snes` and `dos` are what the library uses
+today.
 
-It is documentation rather than a switch: the loader does not match on it, and
-nothing behaves differently because a manifest says `dos`. What actually makes
-a DOS game a DOS game is `[runner.libretro]` — the memory route, the
-controller, the pinned options — and that is the point. A console is a
-description; the behaviour is declared.
+Outside those two rules it is documentation rather than a switch: nothing else in
+the loader matches on it, and nothing behaves differently because a manifest says
+`dos`. What actually makes a DOS game a DOS game is `[runner.libretro]` — the
+memory route, the controller, the pinned options — and that is the point. A
+console is a description; the behaviour is declared. A game that derives no
+content never has its `console` read at all, so an unrecognised one is only an
+error where it would decide something.
 
-## `[rom]`
+## `[[rom]]`
+
+The content this game runs on. **Exactly one entry omits `from`, and that one is
+the base** — the dump a player supplies for themselves. Every other entry is a
+derivation from it (ADR 0020).
 
 ```toml
-[rom]
+[[rom]]
+id = "base"                    # what a [[stage]] names
 name = "Donkey Kong Country (U) (V1.0) [!]"
 path = "assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc"
-sha1 = "..."                   # optional today; `asset-store` will require it
+sha1 = "..."                   # optional on the base today; `asset-store` will require it
 header = "copier-optional"     # "none" | "ines" | "copier-optional"
 min_bytes = 32768              # optional size floor
 ```
@@ -90,6 +114,10 @@ hash: the NES has a magic number, the SNES has none at all — its header is
 in-band, at a position that depends on the mapper — so the SNES gets a size floor
 and a note when the size implies a 512-byte copier header, which shifts every
 ROM offset and makes an address table look wrong for no visible reason.
+
+A second `[[rom]]` is a hand-authored hack; see
+[alternative ROMs](#alternative-roms) for the derived form and the six rules that
+make an array of them mean one thing.
 
 ## `[runner]`
 
@@ -428,9 +456,18 @@ completion condition of its own.
 [[stage]]
 id = "mine-cart-carnage"
 name = "Mine Cart Carnage"
+rom = "base"                   # a [[rom]] id; required on every stage
 entry = { state = "assets/states/dkc_mine-cart-carnage.state" }
 note = "forced-scrolling: everyone finishes in the same number of frames"
 ```
+
+`rom` is **required in every manifest, including one that declares a single
+ROM**. Nothing about a stage is inferred, for the same reason nothing about a
+challenge is (ADR 0017), and the field is not decoration: an entry state is bound
+to one ROM's bytes, which ADR 0019 measured rather than assumed. ROM and entry
+point live in the same table because they are chosen together — and because
+several challenges share a stage and must not be able to disagree about which
+machine they are on.
 
 `entry` takes exactly one of:
 
@@ -492,6 +529,10 @@ exist.
 
 Several challenges may share one stage. That is the normal case, not an edge
 case: one stage plus three sets of criteria is three challenges.
+
+A challenge may additionally carry `generator_version` and a `patch_slot` table,
+which makes it a *generated* challenge: same stage, same kind, same criteria, on
+a ROM rolled per attempt from a seed. See [patch slots](#patch-slots).
 
 ### The two kinds
 
@@ -567,42 +608,39 @@ a field that parses but does nothing is exactly what ADR 0015 refused. It is
 
 ---
 
-## Patch slots — *not implemented*
+## Patch slots
 
-ADR 0015 settled the shape of a generated custom challenge: declarative
-value-substitution, and nothing else. A generated challenge *is* a challenge —
-same `[[challenge]]` table, same `kind`, same `complete_when` — that
-additionally says how its ROM is derived. The keys below are what it will carry.
-**No crate reads them today** — `content-gen` will — and the loader *refuses* a
-challenge containing them rather than accepting keys that do nothing. ADR 0015
-explicitly rejected shipping an unbuilt opt-in path, and an accepted-but-inert
-table is one.
+**What makes a challenge *generated*.** Everything else on a `[[challenge]]` is
+unchanged: same `kind`, same `complete_when`, same stage. A generated challenge
+additionally says how the ROM it runs on is derived, per attempt, from a seed the
+session issues (ADR 0013). The engine is `content-gen`, and it is generic — a
+contributor writes offsets and legal values, never Rust (ADR 0015).
 
 ```toml
 [[challenge]]
-id = "enemy-reroll"
-name = "Reptile Roulette"
-stage = "reptile-rumble"
+id = "bro-roulette-time-trial"
+name = "Bro Roulette"
+stage = "bro-roulette"
 kind = "time_trial"
-complete_when = { cleared = true }
+complete_when = { enemies_defeated = 4 }
 generator_version = 1          # bumped, never edited in place (ADR 0013)
 
 # Roll one value from an explicit pool of legal ones.
 [[challenge.patch_slot]]
-offset = 0x1A2B3               # into the base ROM, after any header
+offset = 0xC6CB                # into the ROM the stage names, after any header
 width = "u8"
-values = { pool = [0x01, 0x02, 0x05] }
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
 
-# Or from a numeric range.
+# Or from an inclusive numeric range.
 [[challenge.patch_slot]]
 offset = 0x1A2B7
 width = "u16"
-endian = "little"
+endian = "little"              # only on a u16 or u32; on a u8 it is an error
 values = { range = { min = 1, max = 8 } }
 
-# Or as one member of a group consumed by permutation: which enemy occupies
-# which of an existing set of spawn slots, rather than each slot rolled
-# independently.
+# Or as one member of a group, whose pool is consumed by permutation: which
+# enemy occupies which of an existing set of spawn slots, rather than each slot
+# rolled independently.
 [[challenge.patch_slot]]
 offset = 0x1A2BB
 width = "u8"
@@ -610,19 +648,198 @@ values = { group = "enemy-shuffle" }
 
 [challenge.group.enemy-shuffle]
 pool = [0x01, 0x02, 0x03, 0x04]
-mode = "permutation"
+mode = "permutation"           # the only mode there is
 ```
 
-The engine writes one declared-legal value per slot into an otherwise-untouched
-copy of the base ROM, deterministically from the seed, then applies the
-console-family checksum fixup. It creates no slots and relocates nothing:
-structural or geometric generation is out of scope permanently, not pending
-(ADR 0015).
+`manifests/smb3.toml` carries two worked examples, and `docs/games/smb3.md` has
+the disassembly they were read out of.
+
+### The four keys
+
+| Key | |
+|---|---|
+| `offset` | into the ROM **the stage names**, counted **after any header** — 16 bytes for iNES, 512 for a SNES copier header, and the engine sniffs which from the content rather than trusting the manifest |
+| `width` | `u8`, `u16` or `u32` |
+| `endian` | `little` (default) or `big`. Declaring it on a `u8` is an error rather than ignored, because it decides nothing there |
+| `values` | exactly one of `pool`, `range` or `group` |
+
+`generator_version` sits on the challenge, and the three keys go together: a
+table with no version cannot be corrected without silently invalidating every
+artifact ever derived from it, and a version with no table describes a generator
+that does nothing. Both are load errors.
+
+### Duplicates in a pool are weights
+
+This is the single most consequential line in the schema, and an engine that
+"cleaned it up" would change what challenges mean without saying so.
+
+```toml
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+```
+
+Four goombas against one each of four bro variants: a coin flip on whether this
+goomba is replaced, then an even choice among the four. Deduplicating that pool
+turns a 50% roll into a 20% one. **Duplication is the only way this schema can
+express a non-uniform roll at all** — there are no weights, and a pool is a
+multiset, not a set.
+
+### A group is a permutation, not a correlation
+
+A group's pool is drawn **without replacement**, so each slot in the group gets a
+different member. That is how "shuffle which enemy stands in which existing spawn
+slot" is spelled. The pool may be longer than the group, in which case the roll
+is a random subset in random order; it may not be shorter, and that is a load
+error.
+
+It is the wrong tool for "these three slots should agree", and there is
+deliberately no tool for that. SMB3's Sun Storm wants a uniform one-to-three
+suns, which would need the three slots to share one roll; the schema cannot say
+it, so the challenge takes the 25/50/25 that independent pools give and
+`docs/games/smb3.md` records why.
+
+### The derivation key
+
+Everything an artifact's identity depends on (ADR 0013):
+
+```
+(hash of the ROM the stage names, challenge id, generator_version, seed)
+```
+
+The `generator_id` is the **challenge's id**, because under ADR 0015 the
+generator is not a piece of code — the engine is shared — it is this table. Two
+challenges with different slots are different generators even though they run the
+same Rust, and two challenges with *identical* slots still derive different
+artifacts from one seed, which is what stops playing one from revealing the other.
+
+The first element is a hash, not "the base ROM": a generated challenge on a hack
+names the hack's hash, and nothing else about the mechanism changes.
+
+Every player derives the artifact locally, from the seed the server issued, and
+reports what it hashed to. A mismatch aborts the challenge rather than letting two
+people race on different content. So the generator's output is a wire contract in
+everything but name — the RNG is written out by hand in `content-gen` rather than
+taken from a crate, and any change to it is a `generator_version` bump for every
+challenge in the library.
+
+### What the engine will not do
+
+It writes one declared-legal value per slot into an otherwise-untouched copy of
+the ROM, then applies the console-family checksum fixup. It creates no slots,
+relocates nothing, and never changes the file's length: **structural or geometric
+generation is out of scope permanently, not pending** (ADR 0015). A challenge that
+needs a new object or new geometry wants a [hack](#alternative-roms), authored by
+a human in a level editor — and the two compose, which is the expected shape
+rather than an exotic one.
+
+That restriction is also load-bearing rather than tidy. ADR 0019 enters a
+generated ROM by rewriting the ROM hash in a copy of the entry state, and the
+transplant is only sound because the derived ROM has the same length, mapper and
+geometry as the one the state was captured on. A structural patch would break a
+rebound state *silently*.
 
 Whether a declared value is *safe* — does not crash the level, does not make it
 uncompletable — is the manifest author's responsibility, established by
 playtesting. That is the same trust boundary the `[watch]` addresses already sit
-on.
+on. The engine guarantees only that what it wrote is one of the values the
+manifest declared.
+
+---
+
+## Alternative ROMs
+
+**A hand-authored custom challenge.** A contributor builds a ROM hack in a level
+editor — new geometry, new objects, a room that plays well because they
+playtested it — and the manifest carries it as a **BPS patch against the base
+ROM**, never as a second ROM file (ADR 0020).
+
+```toml
+[[rom]]
+id = "base"                    # what a [[stage]] names
+name = "Super Mario Bros. 3 (USA) (Rev 1)"
+path = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
+sha1 = "..."
+header = "ines"                # base only
+min_bytes = 40960              # base only
+
+[[rom]]
+id = "hack1"
+name = "SMB3: Gamer Trials"    # what a player is shown, over [game].title
+from = "base"                  # its presence is what makes this ROM derived
+patch = "assets/patches/smb3-rom-hack1.bps"
+sha1 = "..."                   # of the artifact, *after* applying
+
+[[stage]]
+id = "sun-storm"
+rom = "hack1"                  # required on every stage, in every manifest
+entry = { state = "assets/states/smb3_sun-storm.state" }
+```
+
+Six rules make that shape mean one thing, and each is a load error with its own
+message:
+
+- **Exactly one `[[rom]]` omits `from`, and it is the base.** `from` must name
+  the base: a patch against a patch is refused, so a derivation stays two deep.
+- **The patch format is BPS.** It records the source size, the target size, and
+  CRC32s of source, target and the patch itself, so a patch applied to the wrong
+  revision fails at apply time rather than producing a plausible wrong ROM. It
+  also delta-encodes, so a hack is a small file.
+- **`sha1` on a derived ROM is the artifact's, and it is required.** BPS's CRC32s
+  catch an accident cheaply; a CRC32 is not what ADR 0013's cross-player
+  comparison should rest on. Both, for different jobs.
+- **`path` on a derived ROM is refused.** A field holding a path to a hacked ROM
+  is the platform distributing a derivative of a copyrighted dump, which is the
+  thing ADR 0013 generates client-side to avoid. A hack *is* its patch.
+- **`header` and `min_bytes` belong to the base only.** They exist to recognise a
+  good dump. A hack may legitimately be a different size, and its `sha1` is a
+  stricter check than either; declaring one on a derived ROM is an error rather
+  than something ignored.
+- **A derived ROM is a base ROM in every other respect.** Its entry states are
+  captured on it, its `[[challenge]].patch_slot` offsets are into it, and it may
+  carry generated challenges of its own — a hack is exactly where value
+  substitution becomes useful, rerolling enemies inside a level someone designed.
+
+### What is *not* per-ROM
+
+Everything else. There are no per-ROM `[watch]` addresses, no per-ROM rules, and
+no per-ROM labels.
+
+That is the price of admission, and it is the same fact as the reason for
+co-locating in the first place: the telemetry block is the expensive half of a
+manifest to author and the half that gets corrected months later, so two copies
+drift. A second ROM may share a manifest **only if `[runner]`, `[watch]`,
+`[[marker]]`, `[[rule]]` and `[attempt]` hold against it unchanged.** A hack that
+moves an address, changes the memory route, or needs a different completion rule
+is a different game and gets its own manifest.
+
+Nothing checks this. It is established by playtesting, on the same trust boundary
+`[watch]` addresses and patch-slot safety already sit on. The visible cost is
+`[label.*]`: a hack that renames DKC's levels logs the base game's names. Labels
+change no detector, no event and no verdict, so that is cosmetic — and a per-ROM
+label table is the first thing a future ADR should add if it starts to hurt.
+`[[rom]].name` is *not* in that category: it is what a player is shown for a
+stage, over `[game].title`.
+
+### Cartridge ROMs only
+
+`patch` is refused on a manifest whose `console` is `dos`, and so is a
+`patch_slot`. A BPS patch against a DOS bundle is meaningless — the bundle is a
+zip and its hash depends on how it was zipped, which `docs/games/doom.md` already
+records. A DOS alternative is a member-level overlay instead: a PWAD added, a
+`dosbox.conf` replaced. That shape is blocked on the member hashing `asset-store`
+owes (ADR 0018), and it is deferred rather than rejected.
+
+### Rebinding does not cross ROMs
+
+ADR 0019 rebinds an entry state onto a generated ROM by rewriting the ROM hash in
+the state's header, and it is only safe because ADR 0015 keeps a generated ROM the
+same length, mapper and geometry as its base. A hand-authored hack breaks all
+three. So a state is rebound only onto an artifact the seeded patch engine derived
+from **the ROM its own stage names** — never from the base onto a hack. The core
+refusing that pairing is the check working, not a problem to route around.
+
+That is a property of how content was produced rather than a preference, so it is
+not a flag: stage prep turns rebinding on for exactly that case and for nothing
+else. A hack's entry states are captured on the hack.
 
 ---
 

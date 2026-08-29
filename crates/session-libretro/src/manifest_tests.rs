@@ -110,13 +110,76 @@ fn items(events: &[SessionEvent]) -> Vec<(String, u32)> {
 fn every_shipped_manifest_loads() {
     let s = smb3();
     assert_eq!(s.id.0, "smb3");
-    assert_eq!(s.stages.len(), 4);
+    // Four vanilla stages, plus the two that run on the hand-authored hack
+    // (ADR 0020).
+    assert_eq!(s.stages.len(), 6);
+    assert_eq!(s.roms.len(), 2);
+    assert_eq!(s.base_rom().id, "base");
+    assert!(s.stages.iter().filter(|st| st.rom == "hack1").count() == 2);
     let d = dkc();
     assert_eq!(d.id.0, "dkc");
     assert_eq!(d.stages.len(), 6);
     let m = doom();
     assert_eq!(m.id.0, "doom");
     assert_eq!(m.stages.len(), 2);
+}
+
+/// The two SMB3 custom challenges, pinned against `docs/games/smb3.md`.
+///
+/// Every number here was read out of a disassembly and argued for in that
+/// document, and none of it can be re-derived from the manifest — so this test
+/// is the link between the two. The duplicated `0x72`s are the one to watch: they
+/// are the weighting, and a pool that quietly became a set would change what the
+/// challenge is without changing a line of Rust.
+#[test]
+fn the_smb3_custom_challenges_carry_the_tables_the_docs_record() {
+    let m = smb3();
+    let hack = m.rom("hack1").expect("the hack is declared");
+    assert_eq!(hack.from.as_deref(), Some("base"));
+    assert_eq!(
+        hack.sha1.as_deref(),
+        Some("55c34fe15e7753ee6781f7f5de477f5610fc3428")
+    );
+    // A hack is a patch, never a file (ADR 0020).
+    assert!(hack.path.is_none());
+    assert!(hack.patch.is_some());
+
+    // Sun Storm: three slots, the last of them fixed so the roll is one to three
+    // suns rather than zero to three.
+    for id in ["sun-storm-survival", "sun-storm-time-trial"] {
+        let t = m.challenge(id).unwrap().patch_table.as_ref().expect("generated");
+        let offsets: Vec<usize> = t.slots.iter().map(|s| s.offset).collect();
+        assert_eq!(offsets, vec![0xC6BD, 0xC6C0, 0xC6C3], "{id}");
+        assert_eq!(
+            t.slots[2].values,
+            content_gen::ValueSource::Pool(vec![0xAF]),
+            "{id}: slot C is always a sun"
+        );
+    }
+
+    // Bro Roulette: four independent slots over a multiset, so the roll is a coin
+    // flip and then an even choice among four bros.
+    for id in ["bro-roulette-time-trial", "bro-roulette-survival"] {
+        let t = m.challenge(id).unwrap().patch_table.as_ref().expect("generated");
+        let offsets: Vec<usize> = t.slots.iter().map(|s| s.offset).collect();
+        assert_eq!(offsets, vec![0xC6CB, 0xC6CE, 0xC6D1, 0xC6D4], "{id}");
+        for slot in &t.slots {
+            match &slot.values {
+                content_gen::ValueSource::Pool(p) => {
+                    assert_eq!(p.iter().filter(|v| **v == 0x72).count(), 4, "{id}");
+                    assert_eq!(p.len(), 8, "{id}");
+                }
+                other => panic!("{id}: {other:?}"),
+            }
+        }
+        assert!(t.groups.is_empty(), "{id}: this is not a permutation");
+    }
+
+    // Both stages run on the hack, and neither vanilla stage does.
+    assert_eq!(m.stage("sun-storm").unwrap().rom, "hack1");
+    assert_eq!(m.stage("1-1").unwrap().rom, "base");
+    // A hack has its own name, and it is what a player is shown.
+    assert_eq!(m.content_title(m.stage("sun-storm").unwrap()), "SMB3: Gamer Trials");
 }
 
 /// What a DOS game actually needed, pinned so a later refactor cannot quietly

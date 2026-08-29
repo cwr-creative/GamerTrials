@@ -21,12 +21,16 @@
 //!
 //! ```no_run
 //! use session_api::StageRunner;
-//! use session_libretro::{manifest::Manifest, runner::LibretroRunner};
+//! use session_libretro::{manifest::Manifest, prep, runner::LibretroRunner};
 //! # fn main() -> Result<(), String> {
 //! let manifest = Manifest::load(std::path::Path::new("manifests/dkc.toml"))?;
-//! let stage = manifest.stage("jungle-hijinx").expect("declared in the manifest");
-//! let spec = manifest.stage_spec(stage);
-//! let mut runner = LibretroRunner::start(manifest, None, None, Vec::new())?;
+//! let stage = manifest.stage("jungle-hijinx").expect("declared in the manifest").clone();
+//! // The bytes the stage runs on: the player's dump, or a contributor's hack
+//! // applied to it, or an artifact rolled from a seed. The runner is not told
+//! // which (ADR 0013, ADR 0020).
+//! let content = prep::content_for(&manifest, &stage, None, None, &Default::default())?;
+//! let spec = manifest.stage_spec(&stage, content.key.clone());
+//! let mut runner = LibretroRunner::start(manifest, None, content, Vec::new())?;
 //! runner.enter(&spec).map_err(|e| e.to_string())?;
 //! loop {
 //!     for event in runner.advance().map_err(|e| e.to_string())? {
@@ -41,6 +45,7 @@ pub mod input;
 pub mod libretro;
 pub mod manifest;
 pub mod memory;
+pub mod prep;
 pub mod ramsearch;
 pub mod runner;
 pub mod statebind;

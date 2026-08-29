@@ -142,6 +142,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "content-gen"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,6 +1001,7 @@ version = "0.1.0"
 name = "session-libretro"
 version = "0.1.0"
 dependencies = [
+ "content-gen",
  "cpal",
  "gilrs",
  "libloading",

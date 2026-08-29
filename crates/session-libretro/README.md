@@ -25,6 +25,7 @@ in [`docs/games/`](../../docs/games).
 | `libretro` | raw FFI plus a `Core` that loads a core DLL directly (ADR 0001) |
 | `memory` | an address in a manifest → a byte, per the console's routing rules |
 | `manifest` | TOML in, validated `Manifest` out. The authority on what parses |
+| `prep` | manifest → bytes: the player's dump, a hack applied to it, a seeded roll |
 | `watch` | the interpreter: markers, rules, edges, attempts |
 | `runner` | `LibretroRunner`: `StageRunner` + `Presentable` |
 | `input` | host keyboard and pad → a joypad bitmask, or keys passed through |
@@ -57,6 +58,11 @@ is the other half of the work: checking that an address is the right address.
   values and default, plus every environment call it asked for and did not get.
   Also worth running once per core: an option left at its default is a machine
   configured differently from the next player's
+- `--seed 3` — roll a generated challenge's patch slots and run the ROM that
+  comes out, printing every byte it wrote. Without it, a generated challenge
+  runs unrolled, which is what capturing its entry state wants
+- `--rom base=<PATH>` — run one of the manifest's `[[rom]]` entries from a file.
+  The id is required: a manifest may declare a base ROM and hacks of it
 - `--frames 600` — run headless and print what fired. Same frame numbers as on
   screen, because they are emulated frames (ADR 0005)
 - `--capture <PATH>` — write a savestate where a `--frames` run ended. With a
@@ -70,8 +76,8 @@ is the other half of the work: checking that an address is the right address.
    and `--dump-options` first. They answer the two questions everything else
    depends on: is there a route to a byte, and is the machine configured the
    same way twice.
-1. Copy a manifest in `manifests/` and change the identity, the ROM and the
-   `[runner.libretro]` block.
+1. Copy a manifest in `manifests/` and change the identity, the `[[rom]]` and
+   the `[runner.libretro]` block.
 2. Find the addresses. `--watch`, then F3-F8/F10 for a counter, F11 for a
    one-shot event. Write down where each one came from in its `note`.
 3. Write the rules. Start with death and stage completion; everything else is
@@ -86,6 +92,25 @@ If step 3 makes you want arithmetic or a second rule for one stage, stop: that
 is usually a sign a better address exists and has not been found yet. It was,
 twice, for DKC. Step 4 is where a per-stage difference legitimately goes — two
 challenges on one stage is the normal case.
+
+## Adding a hack, or a generated challenge
+
+Also data, and also no Rust (ADR 0020, ADR 0015).
+
+A **hack** is a `[[rom]]` with a `from` and a `patch`, plus the stages that name
+it. It shares the manifest only if the telemetry holds against it unchanged; a
+hack that moves an address is a different game and gets its own file. Its entry
+states are captured on it, not on the base — `--stage <its stage>` derives it and
+runs it, and F1 captures as usual.
+
+A **generated challenge** is an ordinary `[[challenge]]` plus a `generator_version`
+and a `patch_slot` table: an offset, a width, and the values that are legal there.
+`content-gen` rolls it. Find the offsets in a disassembly, find the legal values in
+the same place, and playtest them — the engine guarantees it wrote one of the
+values you declared, and nothing more.
+
+`docs/games/smb3.md` is the worked example for both, including how the object
+list of a hack was located without source for it.
 
 ## Adding a game that has no savestate to start from
 

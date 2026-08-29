@@ -58,11 +58,18 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0017 | Challenges are contributor-authored manifest entries, not core-defined kinds | Accepted |
 | 0018 | Support PC games only through emulation, and retire the external-process adapter | Accepted |
 | 0019 | Rebind an entry state to a generated ROM rather than regenerating it | Accepted |
-| 0020 | Manifest includes one slot for an alternative ROM and stage defines which ROM | Proposed |
+| 0020 | Carry alternative ROMs as patches against the base, and let a stage name one | Accepted |
 
-0003, 0013, 0014, 0015, 0016, 0017, 0018 and 0019 are written up; 0003 is the
-exemplar. Fill in the rest as you implement each area; an unwritten ADR is fine,
-a wrong one is not.
+0003, 0013, 0014, 0015, 0016, 0017, 0018, 0019 and 0020 are written up; 0003 is
+the exemplar. Fill in the rest as you implement each area; an unwritten ADR is
+fine, a wrong one is not.
+
+**0013 is still `Proposed` although `content-gen` is built, and that is
+accurate.** What exists is the client half: the derivation key, deterministic
+local generation, and the artifact hash. The half that makes it a *decision about
+a session* — a server issuing the seed, clients comparing hashes, and the abort
+on mismatch — has nothing to be built into yet. 0015 and 0020, which are about
+what a generator may do and how content is declared, are Accepted and implemented.
 
 ## Notes on a few unwritten ones
 
@@ -116,11 +123,3 @@ both would have to be rebuilt.
 
 **0012** — Records *when* to abstract, not *what*. Included because the reasoning
 generalises: build the second implementation before extracting the interface.
-
-**0020** — Contributors would likely want to create their own ROM-hacks when
-authoring custom challenges, as our patching method limits creative design.
-In practical use, `content-gen` will likely be used only to randomize certain
-elements (enemy types, position, etc) in an already-designed custom challenge.
-
-Therefore, manifests should be designed to accomodate a second ROM for a game.
-And the manifest schema should require stages to define which ROM and which entry point.

@@ -1,0 +1,26 @@
+[package]
+name = "content-gen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Content derivation, and the only crate that touches ROM bytes: applying a
+# contributor's BPS patch (ADR 0020) and the seeded value-substitution engine
+# (ADR 0015). No per-game code, no emulator dependency, no I/O — the whole crate
+# is `(bytes, declaration, seed) -> bytes` plus the hashes that identify the
+# result.
+#
+# The empty-but-for-serde dependency list is the point. ADR 0015 put the engine
+# in its own crate specifically so it could be exercised with golden-hash tests
+# and reused by contributor tooling without linking a libretro core, an audio
+# backend or a window. Adding anything here that a core would pull in is the
+# reason this crate exists being undone.
+#
+# serde is here because the patch-slot schema belongs to the engine that reads
+# it: `session-libretro`'s manifest loader deserializes `[[challenge.patch_slot]]`
+# straight into these types rather than re-describing them. Harness crates depend
+# on `content-gen`; `content-gen` depends on none of them.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

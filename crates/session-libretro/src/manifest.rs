@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use content_gen::{Console, GroupDoc, PatchSlotDoc, PatchTable};
 use serde::Deserialize;
 use session_api::{
     AssetKey, ChallengeId, ChallengeKind, ChallengeSpec, Completion, EntryPoint, Framerate, GameId,
@@ -26,9 +27,18 @@ use crate::memory::{AddressSpace, Endian, Prefer, Width};
 /// The only schema version this build understands. A manifest states its own,
 /// and one from the future is refused rather than half-read.
 ///
-/// 2 is ADR 0017: `[[challenge]]` became the contributor-authored definition of
+/// 2 was ADR 0017: `[[challenge]]` became the contributor-authored definition of
 /// a challenge, and `[[stage]]` lost `challenges` and `endurance`.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// 3 is ADR 0020 and ADR 0015, and it is the version at which content stopped
+/// being a single file this manifest was written against. `[rom]` became an
+/// array with an `id`, so a hand-authored hack can live beside the base ROM it
+/// patches; `[[stage]]` gained a required `rom`, because an entry state is bound
+/// to one piece of content's bytes; and `[[challenge]]` may now carry the
+/// `patch_slot` table `content-gen` rolls from. The first two are a breaking
+/// change to every manifest — twelve stages, one line each — which is why this
+/// is a version rather than an addition.
+pub const SCHEMA_VERSION: u32 = 3;
 
 // ------------------------------------------------------------- raw documents
 
@@ -37,7 +47,9 @@ pub const SCHEMA_VERSION: u32 = 2;
 struct Doc {
     schema_version: u32,
     game: GameDoc,
-    rom: RomDoc,
+    /// One or more. Exactly one omits `from` and is the base; the rest are
+    /// derivations from it (ADR 0020).
+    rom: Vec<RomDoc>,
     runner: RunnerDoc,
     #[serde(default)]
     watch: BTreeMap<String, WatchDoc>,
@@ -68,15 +80,30 @@ struct GameDoc {
     framerate: f64,
 }
 
+/// One piece of content this game runs on: the base ROM, or a hack derived from
+/// it by a BPS patch (ADR 0020).
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 struct RomDoc {
+    /// What a `[[stage]]` names. Unique inside the manifest.
+    id: String,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     sha1: Option<String>,
+    /// The file. On the base only: a derived ROM is not a file, it is a
+    /// derivation, and the platform never distributes one (ADR 0013, ADR 0020).
     #[serde(default)]
     path: Option<String>,
+    /// Its presence is what makes this ROM derived. Must name the base.
+    #[serde(default)]
+    from: Option<String>,
+    /// The BPS patch that derives it.
+    #[serde(default)]
+    patch: Option<String>,
+    /// Base only. `header` and `min_bytes` exist to recognise a good *dump*; a
+    /// hack may legitimately be a different size, and its `sha1` is a stricter
+    /// check than either.
     #[serde(default)]
     header: Option<String>,
     #[serde(default)]
@@ -262,6 +289,11 @@ struct StageDoc {
     id: String,
     #[serde(default)]
     name: Option<String>,
+    /// Which `[[rom]]` this stage runs on. Required in every manifest,
+    /// including one that declares a single ROM: nothing about a stage is
+    /// inferred, for the same reason nothing about a challenge is (ADR 0017,
+    /// ADR 0020).
+    rom: String,
     entry: EntryDoc,
     #[serde(default)]
     note: Option<String>,
@@ -294,14 +326,18 @@ struct ChallengeDoc {
     #[serde(default)]
     note: Option<String>,
 
-    // ADR 0015's generated-challenge keys. Declared, rather than left to
-    // `deny_unknown_fields`, so the refusal can explain what they are and why
-    // nothing reads them yet — "unknown field `patch_slot`" would read like a
-    // typo in a key that is in fact documented.
+    // ADR 0015's generated-challenge keys, read by `content-gen` and by nothing
+    // else. The three go together: a table with no version cannot be bumped
+    // without silently invalidating every artifact derived from it, and a
+    // version with no table describes a generator that does nothing.
+    //
+    // The shapes are `content-gen`'s own, deserialized straight into its types.
+    // The engine that reads a slot owns what a slot looks like; this loader only
+    // decides where in a manifest one may appear.
     #[serde(default)]
-    patch_slot: Vec<toml::Value>,
+    patch_slot: Vec<PatchSlotDoc>,
     #[serde(default)]
-    group: Option<toml::Value>,
+    group: BTreeMap<String, GroupDoc>,
     #[serde(default)]
     generator_version: Option<i64>,
 }
@@ -420,6 +456,12 @@ pub struct Trigger {
 pub struct Stage {
     pub id: StageId,
     pub name: String,
+    /// The `[[rom]]` id this stage runs on. ROM and entry point belong in one
+    /// table because an entry state is bound to one ROM's bytes — ADR 0019
+    /// measured that rather than assuming it — and because several challenges
+    /// share a stage and must not be able to disagree about which machine they
+    /// are on (ADR 0020).
+    pub rom: String,
     pub entry: EntryPoint,
     pub note: Option<String>,
 }
@@ -437,6 +479,13 @@ pub struct Challenge {
     /// `SessionEvent` or the wire.
     pub complete_when: Completion,
     pub note: Option<String>,
+    /// How this challenge's ROM is derived from the one its stage names, if it
+    /// is derived at all (ADR 0013, ADR 0015). Validated at load; rolled by
+    /// `content-gen` when a stage is prepared, from a seed the session issues.
+    ///
+    /// A vanilla challenge has `None` here, and that is the ordinary case: the
+    /// stage's ROM is what runs.
+    pub patch_table: Option<PatchTable>,
 }
 
 /// Everything the libretro adapter needs about a game that is not an address
@@ -507,11 +556,25 @@ pub enum PadLayout {
     Snes,
 }
 
+/// One piece of content the game runs on.
+///
+/// Either it is the base — a dump the player supplies, recognised by `header`,
+/// `min_bytes` and eventually `sha1` — or it is derived from the base by a BPS
+/// patch, in which case `sha1` is the artifact's and is the identity (ADR 0020).
+/// There is no third kind, and in particular there is no field holding a path to
+/// a hacked ROM: that would be the platform distributing a derivative of a
+/// copyrighted dump, which is the thing ADR 0013 was built to avoid.
 #[derive(Clone, Debug)]
 pub struct RomSpec {
+    /// What a `[[stage]]` names.
+    pub id: String,
     pub name: Option<String>,
     pub sha1: Option<String>,
     pub path: Option<PathBuf>,
+    /// The base this one is derived from, and the patch that derives it. Both
+    /// present or both absent; absent means this *is* the base.
+    pub from: Option<String>,
+    pub patch: Option<PathBuf>,
     /// `"ines"` checks the 16-byte iNES magic; `"copier-optional"` notes a
     /// 512-byte SNES copier header when the size implies one; `"none"` checks
     /// nothing. The set is closed and small, per console family, which is the
@@ -535,7 +598,9 @@ pub struct Manifest {
     pub console: String,
     pub region: Option<String>,
     pub framerate: Framerate,
-    pub rom: RomSpec,
+    /// Every ROM this game runs on, base first. One entry is the ordinary case;
+    /// a second is a hand-authored hack (ADR 0020).
+    pub roms: Vec<RomSpec>,
     pub libretro: LibretroConfig,
     pub watches: Vec<WatchDef>,
     pub labels: BTreeMap<String, BTreeMap<u32, String>>,
@@ -568,6 +633,33 @@ impl Manifest {
 
     pub fn stage(&self, id: &str) -> Option<&Stage> {
         self.stages.iter().find(|s| s.id.0 == id)
+    }
+
+    pub fn rom(&self, id: &str) -> Option<&RomSpec> {
+        self.roms.iter().find(|r| r.id == id)
+    }
+
+    /// The one ROM that is not derived from another. Validation proved there is
+    /// exactly one, and it is first.
+    pub fn base_rom(&self) -> &RomSpec {
+        self.roms.first().expect("validation proved a manifest declares a base ROM")
+    }
+
+    /// The console family, for the two things that key off it: the header a
+    /// patch-slot offset is counted from, and the checksum a substitution has to
+    /// repair (ADR 0015). Everything else about a game is declared, not implied
+    /// by the name of its machine.
+    pub fn console_family(&self) -> Result<Console, String> {
+        Console::parse(&self.console)
+    }
+
+    /// What a player should be shown for a stage: the ROM's name if it has one,
+    /// because a hack has its own title and `[game].title` is the base game's
+    /// (ADR 0020).
+    pub fn content_title(&self, stage: &Stage) -> String {
+        self.rom(&stage.rom)
+            .and_then(|r| r.name.clone())
+            .unwrap_or_else(|| self.title.clone())
     }
 
     pub fn challenge(&self, id: &str) -> Option<&Challenge> {
@@ -628,12 +720,18 @@ impl Manifest {
 
     /// The spec a `StageRunner` is handed, resolved against the manifest's own
     /// directory so a manifest can name its states relatively.
-    pub fn stage_spec(&self, stage: &Stage) -> StageSpec {
+    ///
+    /// `content` is whatever stage prep actually derived — the base ROM's key
+    /// for a vanilla stage, an artifact's hash for a hack or a roll (ADR 0020).
+    /// It is passed in rather than computed here because this module reads
+    /// declarations and `content-gen` produces bytes, and only the second knows
+    /// what the first turned into.
+    pub fn stage_spec(&self, stage: &Stage, content: AssetKey) -> StageSpec {
         let entry = match &stage.entry {
             EntryPoint::State(key) => EntryPoint::State(AssetKey(self.resolve(&key.0))),
             other => other.clone(),
         };
-        StageSpec { game: self.id.clone(), stage: stage.id.clone(), entry }
+        StageSpec { game: self.id.clone(), stage: stage.id.clone(), content, entry }
     }
 
     /// The challenge as `challenge-core` will see it. Nothing adapter-shaped
@@ -672,6 +770,121 @@ impl Manifest {
 }
 
 // ------------------------------------------------------------- construction
+
+/// Every `[[rom]]`, checked into the shape ADR 0020 describes: exactly one base,
+/// every other one derived from it by a patch, and no field on the wrong kind.
+///
+/// The six rules here are the whole of what makes an array of ROMs mean one
+/// thing, so each refusal says which one it is rather than "invalid".
+fn build_roms(docs: &[RomDoc], console: &str) -> Result<Vec<RomSpec>, String> {
+    if docs.is_empty() {
+        return Err("no [[rom]]: a manifest declares the content its stages run on".to_string());
+    }
+
+    let bases: Vec<&RomDoc> = docs.iter().filter(|r| r.from.is_none()).collect();
+    let base = match bases.as_slice() {
+        [one] => *one,
+        [] => {
+            return Err("every [[rom]] declares a `from`, so none of them is the base. \
+                        Exactly one omits it, and that one is the dump the player supplies"
+                .to_string())
+        }
+        many => {
+            return Err(format!(
+                "{} [[rom]] entries omit `from` ({}), so there is no single base. A hack is \
+                 declared as a derivation from the base, never as a second ROM of its own \
+                 (ADR 0020)",
+                many.len(),
+                many.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
+            ))
+        }
+    };
+
+    let mut out: Vec<RomSpec> = Vec::with_capacity(docs.len());
+    // Base first, so that `base_rom()` is `roms[0]` and the order a manifest
+    // happens to declare them in decides nothing.
+    for doc in std::iter::once(base).chain(docs.iter().filter(|r| r.from.is_some())) {
+        let what = format!("rom `{}`", doc.id);
+        if out.iter().any(|r| r.id == doc.id) {
+            return Err(format!("{what}: declared twice"));
+        }
+
+        if let Some(from) = &doc.from {
+            if from != &base.id {
+                return Err(format!(
+                    "{what}: `from` names `{from}`, which is not the base (`{}`). A patch \
+                     against a patch is refused; a derivation stays two deep",
+                    base.id
+                ));
+            }
+            if doc.patch.is_none() {
+                return Err(format!(
+                    "{what}: declares `from` and no `patch`. A derived ROM *is* its patch — \
+                     the platform carries the difference, never the hacked ROM (ADR 0020)"
+                ));
+            }
+            if doc.path.is_some() {
+                return Err(format!(
+                    "{what}: a derived ROM has no `path`. A field holding a path to a hacked \
+                     ROM is the platform distributing a derivative of a copyrighted dump, \
+                     which is what ADR 0013 generates client-side to avoid"
+                ));
+            }
+            if doc.sha1.is_none() {
+                return Err(format!(
+                    "{what}: a derived ROM needs the `sha1` of the artifact its patch \
+                     produces. BPS's CRC32s catch an accident; the sha1 is the identity \
+                     ADR 0013's cross-player comparison rests on"
+                ));
+            }
+            // `header` and `min_bytes` recognise a good dump. A hack may
+            // legitimately be a different size, and its sha1 is stricter than
+            // either, so declaring one here is an error rather than ignored.
+            if doc.header.is_some() || doc.min_bytes.is_some() {
+                return Err(format!(
+                    "{what}: `header` and `min_bytes` belong to the base ROM only — they \
+                     recognise a dump, and this one is derived from a dump that was already \
+                     recognised"
+                ));
+            }
+            // A BPS patch against a zip is meaningless: the bundle's hash
+            // depends on how it was zipped. Refused by name rather than
+            // silently accepted (ADR 0018, ADR 0020).
+            if let Err(e) = Console::parse(console).and_then(|c| c.is_derivable()) {
+                return Err(format!("{what}: {e}"));
+            }
+        } else if doc.patch.is_some() {
+            return Err(format!(
+                "{what}: declares a `patch` and no `from`, so there is nothing to apply it to"
+            ));
+        }
+
+        out.push(RomSpec {
+            id: doc.id.clone(),
+            name: doc.name.clone(),
+            sha1: doc.sha1.clone(),
+            path: doc.path.clone().map(PathBuf::from),
+            from: doc.from.clone(),
+            patch: doc.patch.clone().map(PathBuf::from),
+            header: match doc.header.as_deref() {
+                None | Some("none") => RomHeader::None,
+                Some("ines") => RomHeader::INes,
+                Some("copier-optional") => RomHeader::CopierOptional,
+                Some(other) => {
+                    return Err(format!(
+                        "{what}: header is `{other}`; try none, ines or copier-optional"
+                    ))
+                }
+            },
+            min_bytes: match doc.min_bytes {
+                Some(v) => as_usize(v, &format!("{what}: min_bytes"))?,
+                None => 0,
+            },
+        });
+    }
+
+    Ok(out)
+}
 
 fn parse_int(s: &str) -> Result<u32, String> {
     let t = s.trim();
@@ -1032,6 +1245,8 @@ impl Doc {
             }
         };
 
+        let roms = build_roms(&self.rom, &self.game.console)?;
+
         let mut stages = Vec::new();
         for s in &self.stage {
             let what = format!("stage `{}`", s.id);
@@ -1042,12 +1257,20 @@ impl Doc {
                     return Err(format!("{what}: entry needs exactly one of `state` or `named`"))
                 }
             };
+            if !roms.iter().any(|r| r.id == s.rom) {
+                return Err(format!(
+                    "{what}: runs on rom `{}`, which this manifest does not declare; it has {}",
+                    s.rom,
+                    roms.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            }
             if stages.iter().any(|x: &Stage| x.id.0 == s.id) {
                 return Err(format!("{what}: declared twice"));
             }
             stages.push(Stage {
                 id: StageId(s.id.clone()),
                 name: s.name.clone().unwrap_or_else(|| s.id.clone()),
+                rom: s.rom.clone(),
                 entry,
                 note: s.note.clone(),
             });
@@ -1092,14 +1315,6 @@ impl Doc {
         let mut challenges: Vec<Challenge> = Vec::new();
         for c in &self.challenge {
             let what = format!("challenge `{}`", c.id);
-            if !c.patch_slot.is_empty() || c.group.is_some() || c.generator_version.is_some() {
-                return Err(format!(
-                    "{what}: `patch_slot`, `group` and `generator_version` declare a \
-                     generated challenge's ROM patches (ADR 0015). The shape is documented \
-                     in docs/manifest-schema.md, but no crate reads them yet — `content-gen` \
-                     will. Remove them until then."
-                ));
-            }
             if challenges.iter().any(|x| x.id.0 == c.id) {
                 return Err(format!("{what}: declared twice"));
             }
@@ -1198,6 +1413,50 @@ impl Doc {
                 ));
             }
 
+            // A generated challenge, if this is one. The three keys go together
+            // or not at all: a table with no version cannot be corrected without
+            // silently invalidating every artifact ever derived from it (ADR
+            // 0013), and a version with no table describes a generator that does
+            // nothing.
+            let patch_table = match (c.patch_slot.is_empty(), c.generator_version) {
+                (true, None) => {
+                    if !c.group.is_empty() {
+                        return Err(format!(
+                            "{what}: declares [challenge.group.*] and no patch_slot; a group \
+                             is a pool that slots draw from"
+                        ));
+                    }
+                    None
+                }
+                (false, None) => {
+                    return Err(format!(
+                        "{what}: declares patch_slot and no generator_version. A generated \
+                         challenge is identified by (base rom, generator, version, seed), so \
+                         the version is what a correction to the table bumps rather than \
+                         editing it in place (ADR 0013)"
+                    ))
+                }
+                (true, Some(_)) => {
+                    return Err(format!(
+                        "{what}: declares generator_version and no patch_slot, so nothing is \
+                         generated. Remove it, or say what rolls"
+                    ))
+                }
+                (false, Some(v)) => {
+                    // The console decides the header a slot's offset is counted
+                    // from and the checksum a substitution has to repair — and
+                    // for a DOS bundle it decides that there is no such thing.
+                    let console = Console::parse(&self.game.console)
+                        .map_err(|e| format!("{what}: {e}"))?;
+                    console.is_derivable().map_err(|e| format!("{what}: {e}"))?;
+                    let version = as_u32(v, &format!("{what}: generator_version"))?;
+                    Some(
+                        PatchTable::build(&c.id, version, &c.patch_slot, &c.group)
+                            .map_err(|e| format!("{what}: {e}"))?,
+                    )
+                }
+            };
+
             challenges.push(Challenge {
                 id: ChallengeId(c.id.clone()),
                 name: c.name.clone().unwrap_or_else(|| stage.name.clone()),
@@ -1205,6 +1464,7 @@ impl Doc {
                 kind,
                 complete_when,
                 note: c.note.clone(),
+                patch_table,
             });
         }
 
@@ -1214,25 +1474,7 @@ impl Doc {
             console: self.game.console,
             region: self.game.region,
             framerate,
-            rom: RomSpec {
-                name: self.rom.name,
-                sha1: self.rom.sha1,
-                path: self.rom.path.map(PathBuf::from),
-                header: match self.rom.header.as_deref() {
-                    None | Some("none") => RomHeader::None,
-                    Some("ines") => RomHeader::INes,
-                    Some("copier-optional") => RomHeader::CopierOptional,
-                    Some(other) => {
-                        return Err(format!(
-                            "rom.header is `{other}`; try none, ines or copier-optional"
-                        ))
-                    }
-                },
-                min_bytes: match self.rom.min_bytes {
-                    Some(v) => as_usize(v, "rom.min_bytes")?,
-                    None => 0,
-                },
-            },
+            roms,
             libretro: LibretroConfig {
                 core_dir: PathBuf::from(lr.core_dir),
                 controller,
@@ -1264,13 +1506,14 @@ mod tests {
     use super::*;
 
     const MINIMAL: &str = r#"
-schema_version = 2
+schema_version = 3
 [game]
 id = "t"
 title = "Test"
 console = "nes"
 framerate = 60.0
-[rom]
+[[rom]]
+id = "base"
 [runner]
 kind = "libretro"
 [runner.libretro]
@@ -1305,6 +1548,7 @@ edge = "increases"
 emit = "stage_cleared"
 [[stage]]
 id = "s"
+rom = "base"
 entry = { state = "a.state" }
 "#;
 
@@ -1314,7 +1558,7 @@ entry = { state = "a.state" }
 
     #[test]
     fn a_future_schema_version_is_refused_rather_than_half_read() {
-        let text = MINIMAL.replace("schema_version = 2", "schema_version = 3");
+        let text = MINIMAL.replace("schema_version = 3", "schema_version = 4");
         assert!(parse(&text).unwrap_err().contains("schema_version"));
     }
 
@@ -1323,7 +1567,7 @@ entry = { state = "a.state" }
     /// dying on an unknown key.
     #[test]
     fn a_schema_1_manifest_is_refused_at_the_version() {
-        let text = MINIMAL.replace("schema_version = 2", "schema_version = 1");
+        let text = MINIMAL.replace("schema_version = 3", "schema_version = 1");
         assert!(parse(&text).unwrap_err().contains("schema_version"));
     }
 
@@ -1481,7 +1725,8 @@ entry = { state = "a.state" }
 
     #[test]
     fn an_entry_needs_exactly_one_kind() {
-        let text = format!("{MINIMAL}\n[[stage]]\nid = \"s\"\nentry = {{ }}\n");
+        let text =
+            format!("{MINIMAL}\n[[stage]]\nid = \"s\"\nrom = \"base\"\nentry = {{ }}\n");
         assert!(parse(&text).unwrap_err().contains("exactly one"));
     }
 
@@ -1555,7 +1800,7 @@ entry = { state = "a.state" }
     #[test]
     fn a_criterion_over_a_fact_nothing_emits_is_refused() {
         let text = format!(
-            "{MINIMAL}\n[[stage]]\nid = \"s\"\nentry = {{ state = \"a.state\" }}\n\
+            "{MINIMAL}\n[[stage]]\nid = \"s\"\nrom = \"base\"\nentry = {{ state = \"a.state\" }}\n\
              [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
              complete_when = {{ cleared = true }}\n"
         );
@@ -1615,18 +1860,191 @@ entry = { state = "a.state" }
         assert!(parse(&text).unwrap_err().contains("needs an `objective` name"));
     }
 
-    /// ADR 0015 documented patch slots; nothing implements them. The challenge
-    /// itself is real now, so the refusal is of the generator keys alone, and it
-    /// says which ones and why.
+    // -------------------------------------------------- generated challenges
+
+    /// A patch table reaches `content-gen` intact — including the duplicates in
+    /// its pool, which are the weighting and are not a mistake
+    /// (`docs/games/smb3.md`).
     #[test]
-    fn patch_slots_are_refused_with_an_explanation() {
+    fn a_generated_challenge_carries_its_patch_table() {
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ cleared = true }}\ngenerator_version = 2\n\
+             [[challenge.patch_slot]]\noffset = 0xC6BD\nwidth = \"u8\"\n\
+             values = {{ pool = [0x72, 0x72, 0x81] }}\n"
+        );
+        let m = parse(&text).unwrap();
+        let t = m.challenge("reroll").unwrap().patch_table.as_ref().unwrap();
+        assert_eq!(t.generator_id, "reroll");
+        assert_eq!(t.generator_version, 2);
+        assert_eq!(t.slots.len(), 1);
+        assert_eq!(t.slots[0].offset, 0xC6BD);
+        match &t.slots[0].values {
+            content_gen::ValueSource::Pool(p) => assert_eq!(p, &[0x72, 0x72, 0x81]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An ordinary challenge has no table at all, and that is the common case.
+    #[test]
+    fn a_vanilla_challenge_has_no_patch_table() {
+        let m = with_challenge("id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n")
+            .unwrap();
+        assert!(m.challenge("c").unwrap().patch_table.is_none());
+    }
+
+    /// The version is what a correction to a table bumps, so a table without one
+    /// is a generator whose output cannot be told apart from its predecessor's
+    /// (ADR 0013).
+    #[test]
+    fn patch_slots_without_a_generator_version_are_refused() {
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ cleared = true }}\n\
+             [[challenge.patch_slot]]\noffset = 0x10\nwidth = \"u8\"\n\
+             values = {{ pool = [1] }}\n"
+        );
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("generator_version"), "{e}");
+    }
+
+    #[test]
+    fn a_generator_version_with_nothing_to_roll_is_refused() {
         let text = format!(
             "{MINIMAL}{CLEARABLE}\
              [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
              complete_when = {{ cleared = true }}\ngenerator_version = 1\n"
         );
         let e = parse(&text).unwrap_err();
-        assert!(e.contains("ADR 0015"), "{e}");
+        assert!(e.contains("nothing is generated"), "{e}");
+    }
+
+    /// The engine's own validation is reached rather than duplicated here: a
+    /// value that does not fit its slot is refused by `content-gen`, and the
+    /// loader only says which challenge it was in.
+    #[test]
+    fn the_engines_validation_is_reported_against_the_challenge() {
+        let text = format!(
+            "{MINIMAL}{CLEARABLE}\
+             [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+             complete_when = {{ cleared = true }}\ngenerator_version = 1\n\
+             [[challenge.patch_slot]]\noffset = 0x10\nwidth = \"u8\"\n\
+             values = {{ pool = [0x100] }}\n"
+        );
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("challenge `reroll`"), "{e}");
+        assert!(e.contains("does not fit in a u8"), "{e}");
+    }
+
+    /// A DOS bundle is a zip, and there is nothing to substitute a value into.
+    /// Refused by name rather than by producing a corrupt archive (ADR 0020).
+    #[test]
+    fn a_generated_challenge_on_a_dos_game_is_refused() {
+        let text = format!("{MINIMAL}{CLEARABLE}")
+            .replace("console = \"nes\"", "console = \"dos\"")
+            + "[[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+               complete_when = { cleared = true }\ngenerator_version = 1\n\
+               [[challenge.patch_slot]]\noffset = 0x10\nwidth = \"u8\"\n\
+               values = { pool = [1] }\n";
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("member-level overlay"), "{e}");
+    }
+
+    // ------------------------------------------------------ alternative ROMs
+
+    const HACKED: &str = r#"
+[[rom]]
+id = "hack"
+name = "A Hack Of It"
+from = "base"
+patch = "a.bps"
+sha1 = "55c34fe15e7753ee6781f7f5de477f5610fc3428"
+"#;
+
+    #[test]
+    fn a_hack_is_a_patch_against_the_base_and_a_stage_names_it() {
+        let text = format!(
+            "{MINIMAL}{HACKED}\n[[stage]]\nid = \"s\"\nrom = \"hack\"\n\
+             entry = {{ state = \"a.state\" }}\n"
+        );
+        let m = parse(&text).unwrap();
+        assert_eq!(m.roms.len(), 2);
+        assert_eq!(m.base_rom().id, "base");
+        assert_eq!(m.stage("s").unwrap().rom, "hack");
+        // A hack has its own name, and it is what a player is shown — ADR 0020
+        // accepted the base game's *labels* leaking, not its title.
+        assert_eq!(m.content_title(m.stage("s").unwrap()), "A Hack Of It");
+    }
+
+    #[test]
+    fn a_stage_naming_an_undeclared_rom_is_refused() {
+        let text = format!(
+            "{MINIMAL}\n[[stage]]\nid = \"s\"\nrom = \"hack\"\n\
+             entry = {{ state = \"a.state\" }}\n"
+        );
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("does not declare"), "{e}");
+    }
+
+    /// One level of derivation, so that content stays two deep and a patch is
+    /// always against the dump the player actually owns.
+    #[test]
+    fn a_patch_against_a_patch_is_refused() {
+        let text = format!(
+            "{MINIMAL}{HACKED}\n[[rom]]\nid = \"hack2\"\nfrom = \"hack\"\n\
+             patch = \"b.bps\"\nsha1 = \"abc\"\n"
+        );
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("not the base"), "{e}");
+    }
+
+    #[test]
+    fn two_roms_without_a_from_leave_no_base() {
+        let text = format!("{MINIMAL}\n[[rom]]\nid = \"other\"\npath = \"b.nes\"\n");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("no single base"), "{e}");
+    }
+
+    /// The rule that keeps a derivative of a copyrighted dump out of the
+    /// manifest: a hack is a patch, never a file.
+    #[test]
+    fn a_path_on_a_derived_rom_is_refused() {
+        let text = format!("{MINIMAL}{HACKED}").replace("patch = \"a.bps\"", "path = \"h.nes\"");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("no `patch`"), "{e}");
+
+        let text = format!("{MINIMAL}{HACKED}\npath = \"h.nes\"\n");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("distributing a derivative"), "{e}");
+    }
+
+    #[test]
+    fn a_derived_rom_needs_the_hash_of_what_it_produces() {
+        let text = format!("{MINIMAL}{HACKED}")
+            .replace("sha1 = \"55c34fe15e7753ee6781f7f5de477f5610fc3428\"\n", "");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("sha1"), "{e}");
+    }
+
+    /// `header` and `min_bytes` recognise a *dump*. A hack is derived from one
+    /// that was already recognised, and may legitimately be a different size.
+    #[test]
+    fn dump_checks_on_a_derived_rom_are_refused_rather_than_ignored() {
+        let text = format!("{MINIMAL}{HACKED}\nheader = \"ines\"\n");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("base ROM only"), "{e}");
+    }
+
+    /// A BPS patch against a zip is meaningless — the bundle's hash depends on
+    /// how it was zipped — so a DOS alternative waits on member hashing.
+    #[test]
+    fn a_hack_of_a_dos_game_is_refused_with_its_reason() {
+        let text =
+            format!("{MINIMAL}{HACKED}").replace("console = \"nes\"", "console = \"dos\"");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("member-level overlay"), "{e}");
     }
 
     #[test]

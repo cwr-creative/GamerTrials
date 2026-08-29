@@ -8,7 +8,7 @@
 # Read the address caveat there before trusting a number: most of this has two
 # independent sources and none of it has a full playtest.
 
-schema_version = 2
+schema_version = 3
 
 [game]
 id = "dkc"
@@ -17,7 +17,8 @@ console = "snes"
 region = "usa"
 framerate = 60.0988
 
-[rom]
+[[rom]]
+id = "base"
 name = "Donkey Kong Country (U) (V1.0) [!]"
 path = "assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc"
 # A SNES ROM has no magic number - its header is in-band, at a position that
@@ -289,31 +290,37 @@ emit = "stage_cleared"
 [[stage]]
 id = "jungle-hijinx"
 name = "Jungle Hijinx"
+rom = "base"
 entry = { state = "assets/states/dkc_jungle-hijinxs.state" }
 
 [[stage]]
 id = "reptile-rumble"
 name = "Reptile Rumble"
+rom = "base"
 entry = { state = "assets/states/dkc_reptile-rumble.state" }
 
 [[stage]]
 id = "ropey-rampage"
 name = "Ropey Rampage"
+rom = "base"
 entry = { state = "assets/states/dkc_ropey-rampage.state" }
 
 [[stage]]
 id = "barrel-cannon-canyon"
 name = "Barrel Cannon Canyon"
+rom = "base"
 entry = { state = "assets/states/dkc_barrel-cannon-canyon.state" }
 
 [[stage]]
 id = "coral-capers"
 name = "Coral Capers"
+rom = "base"
 entry = { state = "assets/states/dkc_coral-capers.state" }
 
 [[stage]]
 id = "mine-cart-carnage"
 name = "Mine Cart Carnage"
+rom = "base"
 entry = { state = "assets/states/dkc_mine-cart-carnage.state" }
 note = "forced-scrolling: everyone finishes in the same number of frames, so there is no time trial on it"
 

@@ -20,8 +20,9 @@ use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 
 use session_api::{Presentable, SessionEvent, StageRunner};
 use session_libretro::libretro::{self, RETRO_MEMORY_IDS};
-use session_libretro::manifest::{Controller, Manifest};
+use session_libretro::manifest::{Challenge, Controller, Manifest};
 use session_libretro::memory::{AddressSpace, Width};
+use session_libretro::prep::{self, RomOverrides};
 use session_libretro::ramsearch::{Filter, Probe, Search};
 use session_libretro::runner::LibretroRunner;
 use session_libretro::{audio, input};
@@ -53,15 +54,27 @@ GAME:
 OPTIONS:
     --core <PATH>    libretro core DLL. Default: the single *_libretro.dll in
                      the manifest's core_dir
-    --rom <PATH>     ROM to run. Default: the manifest's rom.path
+    --rom <ID=PATH>  Run one of the manifest's [[rom]] entries from this file
+                     instead of the declared one. The id is required: a manifest
+                     may declare a base ROM and hacks of it, and a bare path no
+                     longer says which one it means. Overriding the base means
+                     the dump lives elsewhere; overriding a hack means the patch
+                     was already applied by hand
+    --seed <N>       Roll the challenge's patch slots from this seed and run the
+                     ROM that comes out (decimal, or 0x hex). Only means anything
+                     with --challenge, and only for a challenge that declares
+                     patch slots. Without it a generated challenge runs unrolled,
+                     which is what capturing its entry state wants
     --state <PATH>   Override the entry state, and the target for F1/F2
     --rebind-state   Let the entry state restore onto a ROM it was not captured
                      on, by rewriting the ROM hash in a copy of it (ADR 0019).
-                     This is how a generated ROM is entered: the state ships
-                     bound to the base ROM and is rebound per seed. The file on
-                     disk is never written to. Without it, the core refuses a
-                     state that names a different ROM - which is what you want
-                     everywhere except generated content
+                     The file on disk is never written to. Not needed with
+                     --seed: a roll is derived from the ROM the stage names, so
+                     the pairing is already known to be sound and rebinding is
+                     turned on for it. Pass this when you derived the ROM
+                     yourself and handed it over with --rom. Without either, the
+                     core refuses a state that names a different ROM - which is
+                     what you want everywhere except a value-substituted one
     --scale <1-4>    Window scale. Default: 3
     --watch <ADDRS>  Comma-separated addresses to report on change, e.g.
                      --watch 0x7E0577,0x057B. An entry may be a range lo-hi,
@@ -131,7 +144,8 @@ struct Args {
     stage: Option<String>,
     challenge: Option<String>,
     core: Option<PathBuf>,
-    rom: Option<PathBuf>,
+    roms: RomOverrides,
+    seed: Option<u64>,
     state: Option<PathBuf>,
     rebind_state: bool,
     scale: usize,
@@ -200,14 +214,21 @@ fn run() -> Result<(), String> {
     // the criteria and then ignores them: judging a run against them needs
     // `challenge-core`, and an adapter that decided a run was won would be the
     // exact mistake ADR 0017 exists to prevent.
-    let stage = match (&args.stage, &args.challenge) {
-        (Some(id), _) => manifest
-            .stage(id)
-            .ok_or_else(|| format!("{game} declares no stage `{id}`; try --list-stages"))?,
+    let (stage, challenge): (_, Option<Challenge>) = match (&args.stage, &args.challenge) {
+        (Some(id), _) => (
+            manifest
+                .stage(id)
+                .ok_or_else(|| format!("{game} declares no stage `{id}`; try --list-stages"))?
+                .clone(),
+            None,
+        ),
         (None, Some(id)) => {
-            let c = manifest.challenge(id).ok_or_else(|| {
-                format!("{game} declares no challenge `{id}`; try --list-challenges")
-            })?;
+            let c = manifest
+                .challenge(id)
+                .ok_or_else(|| {
+                    format!("{game} declares no challenge `{id}`; try --list-challenges")
+                })?
+                .clone();
             println!(
                 "[challenge] {} ({}) — completed by: {}",
                 c.id.0,
@@ -215,14 +236,25 @@ fn run() -> Result<(), String> {
                 describe(&c.complete_when)
             );
             println!("[challenge] the harness scores nothing; this is what challenge-core will read");
-            manifest.stage(&c.stage.0).expect("validation proved the stage exists")
+            let stage =
+                manifest.stage(&c.stage.0).expect("validation proved the stage exists").clone();
+            (stage, Some(c))
         }
-        (None, None) => manifest
-            .stages
-            .first()
-            .ok_or_else(|| format!("{game} declares no stages at all"))?,
+        (None, None) => (
+            manifest
+                .stages
+                .first()
+                .ok_or_else(|| format!("{game} declares no stages at all"))?
+                .clone(),
+            None,
+        ),
     };
-    let mut spec = manifest.stage_spec(stage);
+
+    // Everything between what a manifest declares and bytes a core can run: the
+    // player's own dump, a contributor's hack applied to it, and a seeded roll
+    // of whatever the challenge declares (ADR 0013, ADR 0015, ADR 0020).
+    let content = prep::content_for(&manifest, &stage, challenge.as_ref(), args.seed, &args.roms)?;
+    let mut spec = manifest.stage_spec(&stage, content.key.clone());
     if let Some(p) = &args.state {
         spec.entry = session_api::EntryPoint::State(session_api::AssetKey(
             p.to_string_lossy().into_owned(),
@@ -237,8 +269,13 @@ fn run() -> Result<(), String> {
     let space = manifest.libretro.space;
     let controller = manifest.libretro.controller;
     let mut runner =
-        LibretroRunner::start(manifest, args.core.clone(), args.rom.clone(), args.watch.clone())?;
-    runner.set_state_rebinding(args.rebind_state);
+        LibretroRunner::start(manifest, args.core.clone(), content, args.watch.clone())?;
+    // Stage prep already turns rebinding on for the one pairing ADR 0019
+    // sanctions. The flag stays for the case it was written for: a ROM derived
+    // outside the harness and passed in with --rom.
+    if args.rebind_state {
+        runner.set_state_rebinding(true);
+    }
 
     if args.dump_memory_map {
         print_memory_map(&runner);
@@ -543,6 +580,22 @@ fn print_addrs(m: &Manifest) {
 }
 
 fn print_stages(m: &Manifest) {
+    println!("[stage] content declared by {}:", m.id);
+    for r in &m.roms {
+        let how = match (&r.from, &r.patch) {
+            (Some(from), Some(patch)) => format!("{} + {}", from, patch.display()),
+            _ => r
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "no path".to_string()),
+        };
+        println!(
+            "        {:<12} {:<38} {how}",
+            r.id,
+            r.name.as_deref().unwrap_or("")
+        );
+    }
     println!("[stage] stages declared by {}:", m.id);
     for s in &m.stages {
         let n = m.challenges_on(&s.id).count();
@@ -551,7 +604,7 @@ fn print_stages(m: &Manifest) {
             1 => "1 challenge".to_string(),
             n => format!("{n} challenges"),
         };
-        println!("        {:<22} {:<26} {carries}", s.id.0, s.name);
+        println!("        {:<22} {:<26} on {:<10} {carries}", s.id.0, s.name, s.rom);
         if let Some(note) = &s.note {
             println!("        {:<22} {note}", "");
         }
@@ -571,6 +624,17 @@ fn print_challenges(m: &Manifest) {
             c.stage.0,
             describe(&c.complete_when)
         );
+        if let Some(t) = &c.patch_table {
+            // A generated challenge is a challenge that additionally says how
+            // its ROM is derived (ADR 0015). Worth printing: it is the
+            // difference between playing a level and playing a roll of one.
+            println!(
+                "        {:<34} generated: {} slots, generator v{} — needs --seed",
+                "",
+                t.slots.len(),
+                t.generator_version
+            );
+        }
         if let Some(note) = &c.note {
             println!("        {:<34} {note}", "");
         }
@@ -820,7 +884,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         stage: None,
         challenge: None,
         core: None,
-        rom: None,
+        roms: RomOverrides::new(),
+        seed: None,
         state: None,
         rebind_state: false,
         scale: 3,
@@ -854,7 +919,27 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--stage" => args.stage = Some(value("--stage")?),
             "--challenge" => args.challenge = Some(value("--challenge")?),
             "--core" => args.core = Some(PathBuf::from(value("--core")?)),
-            "--rom" => args.rom = Some(PathBuf::from(value("--rom")?)),
+            "--rom" => {
+                // ADR 0020 made a bare path ambiguous: a manifest declares more
+                // than one ROM now, so an override says which one it replaces.
+                let v = value("--rom")?;
+                let (id, path) = v.split_once('=').ok_or_else(|| {
+                    format!(
+                        "--rom takes <ID>=<PATH>, e.g. --rom base=my-dump.nes; got `{v}`. \
+                         The id names a [[rom]] this manifest declares"
+                    )
+                })?;
+                args.roms.insert(id.to_string(), PathBuf::from(path));
+            }
+            "--seed" => {
+                let v = value("--seed")?;
+                let parsed = match v.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16),
+                    None => v.parse(),
+                };
+                args.seed =
+                    Some(parsed.map_err(|_| format!("--seed wants a number, got {v}"))?);
+            }
             "--state" => args.state = Some(PathBuf::from(value("--state")?)),
             "--rebind-state" => args.rebind_state = true,
             "--no-audio" => args.audio = false,

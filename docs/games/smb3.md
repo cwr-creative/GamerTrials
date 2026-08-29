@@ -37,6 +37,10 @@ cargo run --release -p session-libretro --bin harness -- --game smb3 --list-stag
 
 # 600 frames with no window, for checking a rule against the real ROM
 cargo run --release -p session-libretro --bin harness -- --game smb3 --stage 1-1 --frames 600
+
+# a custom challenge: derive the hack from its patch, roll its slots, and enter
+cargo run --release -p session-libretro --bin harness -- \
+    --game smb3 --challenge sun-storm-survival --seed 3
 ```
 
 | Key | |
@@ -171,21 +175,28 @@ real ROM is a manual test, or `--frames`.
 
 ## Stages and challenges
 
-Four entry points, all in world 1, all cleared by the standard `stage_cleared`
+Six entry points, all in world 1, all cleared by the standard `stage_cleared`
 signal — which here is the card rule, so it holds only for card-awarding levels.
 A fortress or an airship awards no card and would need ADR 0014's missing
 detector before it could carry a `cleared = true` criterion.
 
-| Stage | Challenges on it |
-|---|---|
-| `1-1` | time trial, survival, and `1-1-stomp-rush` |
-| `1-2` | time trial, survival |
-| `1-3` | time trial, survival |
-| `1-4` | survival only — forced-scrolling, so everyone finishes in the same number of frames |
+| Stage | Runs on | Challenges on it |
+|---|---|---|
+| `1-1` | `base` | time trial, survival, and `1-1-stomp-rush` |
+| `1-2` | `base` | time trial, survival |
+| `1-3` | `base` | time trial, survival |
+| `1-4` | `base` | survival only — forced-scrolling, so everyone finishes in the same number of frames |
+| `sun-storm` | `hack1` | time trial, survival — both generated |
+| `bro-roulette` | `hack1` | time trial, survival — both generated |
 
 Nothing above is declared as a constraint anywhere: a stage with no time trial
 simply has no time-trial `[[challenge]]` naming it (ADR 0017). Read the current
 list back with `--list-challenges` rather than trusting this table.
+
+The last two run on a hand-authored hack rather than on the base ROM, and their
+challenges carry patch slots. They are written up under
+[generated content](#generated-content), which is where the offsets and pools are
+argued for.
 
 `1-1-stomp-rush` is a worked example of a criterion other than "reach the end":
 five `enemy_defeated` events and the clock stops, wherever the player is. It is
@@ -194,10 +205,47 @@ kill does not advance it, and five stomps means five stomps.
 
 ## Generated content
 
-`content-gen` is not written. Two custom challenges were authored ahead of it,
-so the engine answers to real slot tables rather than a guess, and everything
-below was derived and verified against the ROM. ADR 0015 scopes a patch to
-declarative value substitution; ADR 0019 depends on that scope holding.
+Two custom challenges, authored *before* `content-gen` was written so that the
+engine answered to real slot tables rather than a guess. Everything below was
+derived and verified against the ROM, and all of it is now in
+`manifests/smb3.toml` and runs. ADR 0015 scopes a patch to declarative value
+substitution; ADR 0019 depends on that scope holding.
+
+What is *not* done is playing one: no human has taken either challenge to its
+criteria on a rolled ROM. The mechanism below is measured; the level design on
+top of it is not.
+
+Both challenges run on a **hand-authored hack**, not on the base ROM (ADR 0020).
+Their levels were built in a level editor, so every object list is the
+contributor's own and every slot in it exists to be rolled. That is the shape
+CLAUDE.md calls expected rather than exotic — a human designs the level, the
+generator rerolls enemies inside it — and it is why the base-ROM tables that used
+to be here (World 2 Sand Trap, World 8 hand trap) are gone. Pinning a sun to
+column `$5B` so it spawned already inside its activation gate, and parking a
+fifth bro off the end of the level so that only four could be counted, were both
+workarounds for not owning the level. Owning it removes the constraint instead of
+routing around it.
+
+### The two ROMs
+
+| | sha1 | |
+|---|---|---|
+| base | `6bd518e85eb46a4252af07910f61036e84b020d1` | `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes` |
+| hack | `55c34fe15e7753ee6781f7f5de477f5610fc3428` | `assets/patches/smb3-rom-hack1.bps` applied to it |
+
+The patch is BPS and carries the base's CRC32, so it refuses a different revision
+at apply time. No derived ROM is in the repo and none should be: the harness
+applies the patch whenever a stage names the hack, and caches the result under
+`build/derived/`, which is ignored.
+
+```sh
+cargo run -p session-libretro --bin harness -- --game smb3 --stage sun-storm --frames 1
+```
+
+The hack rewrites World 1's structure tables so both custom levels are entered
+from the World 1 map, and rewrites most of the object bank at `$C000-$DFFF`. Its
+BPS metadata names the editor it came out of:
+`{"project":"SMB3-hack2","tool":"Bank12"}`.
 
 ### The disassembly reassembles byte-for-byte
 
@@ -212,188 +260,392 @@ Output is identical to `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes`,
 than a database lookup, and `[rom].sha1` in the manifest is still empty — a
 loose end.
 
-Working from the disassembly was chosen over hacking a ROM and diffing it, for a
-reason worth keeping: **the deliverable is a slot table, not a patch.** A diff
-yields an offset, a width and exactly one sample value; the *pool* — the
-substance of a reroll — is not recoverable from it. The disassembly supplies the
-pool directly, as the `OBJ_*` constants. SMB3 level editors re-serialise and
-repack object lists, producing structural diffs that ADR 0015 puts permanently
-out of scope.
+**The disassembly is still what supplies the pool**, and that is the part a diff
+cannot give you. A diff yields an offset, a width and exactly one sample value;
+the *legal values* — the substance of a reroll — come from the `OBJ_*` constants
+in `smb3.asm`, and whether a value is safe comes from reading the routines that
+consume it. What changed is where the *offsets* come from: they are read out of
+the hack rather than derived by editing source and reassembling, because these
+levels do not exist in the source.
 
-Every offset below was derived by changing one symbol in the disassembly,
-reassembling, and diffing: each probe produced exactly one differing byte, and
-the original value at each offset matched the source constant. The whole patch
-was then built two independent ways — assembled from edited source, and
-byte-patched into the base ROM — and the two were identical. Offsets are into the
-base ROM **after the 16-byte iNES header**, per the schema.
+### Finding the slots in a hack
 
-### Sun Storm — World 2 Sand Trap, survival, 30 seconds
+Worth writing down, because it is the same procedure for the next hack.
 
-One to three extra Angry Suns, rolled into spawn slots that already exist.
-`complete_when = { survive_seconds = 30.0 }`, which is count-independent — so a
-rolled count causes no criterion trouble here. Source: `PRG/objects/SandTrap.asm`.
+`PRG/prg006.asm` is `.bank 6 / .org $C000`, so the object bank maps one to one
+onto ROM offsets `0xC000-0xDFFF` after the iNES header — an object list's CPU
+address *is* its offset. The bank is a plain concatenation of lists, each one a
+lead byte, then three-byte `(id, column, row)` entries, then `$FF`. Parsing it
+forward from `0xC000` recovers every list in either ROM; on the base it
+reproduces `SandTrap.asm` at `$C843` exactly, which is the check that the parse
+is aligned before trusting it on a hack.
 
-| Offset | Byte | Was | Roll |
+Two lists in the hack are then unmistakable — three `$AF` and a card, four `$72`
+and a card — and both are confirmed twice over:
+
+* `W1_ObjSets` (a `.word` table at `$B452`, located by searching for
+  `W1_ByRowType`'s bytes) points entry 0 at `$C6BC` and entry 8 at `$C6CA`. Both
+  entries' row types were changed by the hack, which is how the levels became
+  enterable.
+* Each entry state carries the pointer the map had already prepared, in cartridge
+  WRAM at `Level_ObjPtrOrig` (`$7EBB`): `$C6BC` in one, `$C6CA` in the other.
+
+### Sun Storm — `W2_32`, entered from the World 1 map
+
+Object list `$C6BC`: three Angry Suns and the end-level card. The roll decides
+how many of the three are actually suns, and the answer is one, two or three.
+
+| Offset | Byte | Is | Roll |
 |---|---|---|---|
-| `0xC856` | slot A id | `$5D` `OBJ_TORNADO` | `pool = [0xAF]` — always a sun |
-| `0xC857` | slot A column | `$51` | `pool = [0x5B]` |
-| `0xC859` | slot B id | `$6E` `OBJ_PARATROOPAGREENHOP` | `pool = [0xAF, 0x6E]` |
-| `0xC85A` | slot B column | `$7E` | `pool = [0x5C]` |
-| `0xC85C` | slot C id | `$6E` `OBJ_PARATROOPAGREENHOP` | `pool = [0xAF, 0x6E]` |
-| `0xC85D` | slot C column | `$9E` | `pool = [0x5D]` |
+| `0xC6BD` | slot A id, column `$01` | `$AF` `OBJ_ENEMYSUN` | `pool = [0xAF, 0xBB]` |
+| `0xC6C0` | slot B id, column `$03` | `$AF` `OBJ_ENEMYSUN` | `pool = [0xAF, 0xBB]` |
+| `0xC6C3` | slot C id, column `$05` | `$AF` `OBJ_ENEMYSUN` | `pool = [0xAF]` — always a sun |
 
-Row bytes (`0xC858`, `0xC85B`, `0xC85E`) are deliberately **not** slots — a sun
-repositions itself, so patching them adds risk for nothing.
+Columns and rows are **not** slots. The columns are load-bearing (finding 1
+below) and a sun repositions itself anyway, so patching either adds risk for
+nothing.
 
-Slot A's single-value pool is what makes the roll 1–3 rather than 0–3. If B or C
-rolls back to its original paratroopa, that paratroopa still moves to screen 5,
-because the column slot is fixed; harmless for a 30-second survival run, but a
-behaviour change and not a no-op.
+**`$BB` is `OBJ_CANCELEVENT`, and it is how an empty slot is spelled** under pure
+value substitution. Object IDs from `$B4` to `$BB` are handled before any actor
+exists (`prg005.asm:5053`): the ID is turned into a `Level_Event` number and the
+routine returns. `$BB` becomes event 8, whose handler is `LevelEvent_Cancel`,
+which does nothing but clear `Level_Event`. Nothing spawns, no object slot is
+taken, no sprite appears. It is the closest SMB3 has to deleting a list entry
+without deleting it — which ADR 0015 does not allow.
 
-### Bro Roulette — World 8 Hammer Bro hand trap, time trial *and* survival
+The distribution follows from the pools: **25% one sun, 50% two, 25% three.** A
+uniform one-third each would need the three slots to share a single roll, and the
+schema has no way to correlate them — `mode = "permutation"` fixes the multiset,
+which is the opposite of what is wanted here. Biasing toward more suns is free by
+weighting a pool (`[0xAF, 0xAF, 0xBB]` gives 11% / 44% / 44%); changing the
+*shape* of the distribution is not.
 
-`PRG/objects/W8HTrap1.asm` already holds five bro slots containing all four
-variants, so the pool is playtested by Nintendo rather than by us. Four slots are
-permuted over `pool = [0x81, 0x82, 0x86, 0x87]` with `mode = "permutation"`; the
-fifth is parked off the level. `complete_when = { enemies_defeated = 4 }`.
+Slot C is the fixed one deliberately, and it is the highest column rather than the
+lowest. A sun activates when accumulated scroll carries it into the gate, so the
+rightmost sun activates first — roughly 32 pixels of scroll ahead of slot B and 64
+ahead of slot A. Fixing slot C means every roll delivers its first sun at the same
+point in the level, and the roll only decides what follows it.
 
-| Offset | Byte | Was | Roll |
+### Bro Roulette — `W1_03`, entered from the World 1 map
+
+Object list `$C6CA`: four goombas, a hidden warp object, and the end-level card.
+Each goomba independently either stays a goomba or becomes one of the four bro
+variants.
+
+| Offset | Byte | Is | Roll |
 |---|---|---|---|
-| `0xD0B1` | bro 1 id | `$87` `OBJ_FIREBRO` | `group = "bro-shuffle"` |
-| `0xD0B4` | bro 2 id | `$81` `OBJ_HAMMERBRO` | `group = "bro-shuffle"` |
-| `0xD0B7` | bro 3 id | `$81` `OBJ_HAMMERBRO` | `group = "bro-shuffle"` |
-| `0xD0BA` | bro 4 id | `$82` `OBJ_BOOMERANGBRO` | `group = "bro-shuffle"` |
-| `0xD0BE` | bro 5 column | `$37` | `pool = [0x7F]` — parks it off-level |
+| `0xC6CB` | goomba 1 id, column `$02` row `$13` | `$72` `OBJ_GOOMBA` | the pool below |
+| `0xC6CE` | goomba 2 id, column `$0A` row `$19` | `$72` `OBJ_GOOMBA` | ″ |
+| `0xC6D1` | goomba 3 id, column `$0D` row `$19` | `$72` `OBJ_GOOMBA` | ″ |
+| `0xC6D4` | goomba 4 id, column `$0D` row `$15` | `$72` `OBJ_GOOMBA` | ″ |
 
-The level is four screens wide (`LEVEL1_SIZE_04`), so column `$7F` never spawns.
-The per-screen index table is built for 16 screens regardless of level width, so
-this is safe.
+The pool is the same for all four and is a **multiset, not a set**:
 
-Two decisions here were taken deliberately and should not be silently revisited:
+```
+[0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87]
+```
 
-- **The count is fixed at four, not rolled.** `complete_when` is static TOML and
-  `enemies_defeated = N` means *at least* N. A rolled count cannot be expressed —
-  set it to the minimum and a short roll wins early, set it to the maximum and a
-  short roll is unwinnable. There is no arithmetic and nothing that can reference
-  the seed, by design. **A rolled quantity cannot reach `complete_when`.** That is
-  the first real boundary a generator hits, and it is unsettled.
+Four goombas against one each of `OBJ_HAMMERBRO`, `OBJ_BOOMERANGBRO`,
+`OBJ_HEAVYBRO` and `OBJ_FIREBRO`. Drawn uniformly, that is exactly the two-stage
+roll the challenge wants — a coin flip on whether this goomba is replaced, then an
+even choice among the four variants — expressed without the schema growing
+weights.
+
+**`content-gen` must therefore sample a pool with its duplicates, not
+deduplicate it.** Small decision, large blast radius: duplication is the only way
+a manifest can express a non-uniform roll at all, and an engine that dedupes turns
+this table into 20% goomba without saying so.
+
+This is not a permutation group. A group would force all four variants to appear
+exactly once, which was the old World 8 table's constraint and is not this one:
+two hammer bros is a legal outcome, and so is four goombas — 6.25%, a real roll
+rather than a failure.
+
+Two things have not changed and should not be silently revisited:
+
+- **A rolled quantity still cannot reach `complete_when`.** It is static TOML,
+  `enemies_defeated = N` means *at least* N, and nothing can reference the seed.
+  Here the enemy *count* is fixed by the level and only the *types* roll, so the
+  question does not arise — but it is still the first real boundary a generator
+  hits, and the next challenge that wants a rolled count will hit it.
 - **"Kill all four" means "stomp all four."** `enemy_defeated` comes from `$05F4`,
-  which counts stomps only. Accepted for now; better SMB3 detectors are owed
-  anyway (ADR 0014).
+  which counts stomps only; a fireball, shell or star kill does not advance it.
+  Accepted for now, and better SMB3 detectors are owed anyway (ADR 0014).
+
+Two notes on the level as authored. Neither is the patch table's business, and
+both are worth knowing before this is playtested:
+
+- Goombas 3 and 4 share column `$0D`. Both still spawn: the look-ahead is snapped
+  to a 16-pixel boundary and the level-load pass runs the spawn scan twice per
+  step (finding 2), so one column window admits two objects. Mid-level at full
+  running speed it would admit fewer — these are on the starting screen, which is
+  what makes it safe.
+- `$C6D7` holds `$07` `OBJ_WARPHIDE` at column `$96`, two columns before the card.
+  It only fires with `Player_Behind` set, so it is a deliberate secret rather than
+  an accident — but taking it ends the level with no card, and it is gated on
+  `Map_Got13Warp`, which persists per save file. Two players with different saves
+  therefore have different routes available, which is a scoring problem rather
+  than a bug.
 
 ### Golden hashes
 
-Base ROM patched with sand trap `AF/5B, AF/5C, AF/5D` and bros `86, 87, 82, 81`
-plus the park — exactly 11 bytes differ:
+Each is the hack with its seven rollable object-list bytes written — four of them
+actually differing in any given roll, since a slot may roll back to what it
+already held. The input is `55c34fe1…`, never the base ROM.
 
-    sha1 b60ba24bca183b8c707d01b3f7b835ec7e38614d
+| Roll | Suns | Bros | sha1 |
+|---|---|---|---|
+| `golden` | `BB AF AF` — two | `81 87 72 86` | `7b6989c1d511ade0a33a7e50aa035cade734d799` |
+| `b` | `BB BB AF` — one | `72 72 82 81` | `10e69a037e821fea5a5a4c0822ff2ffe58bef4fe` |
+| `max` | `AF AF AF` — three | `87 86 82 81` | `6333b57ff78e0bce43d8114d08279bbf93689918` |
 
-That is `content-gen`'s first golden test, and it depends on none of the
-unresolved questions. A second roll (`AF/5B, 6E/5C, AF/5D`, bros `81, 82, 86,
-87`, same park) gives `bf8e21ff2e4e5958f7f7391f40187534c54bb671`; it exists only
-to prove that a rebind works for more than one seed.
+`golden` is `content-gen`'s first test and depends on none of the unresolved
+questions. `b` and `max` exist to prove more than one roll works: `b` is the
+minimum sun count with the maximum goomba count, `max` the reverse.
 
-Neither slot table is in `manifests/smb3.toml`, on purpose: the loader **refuses**
-a challenge carrying `patch_slot` keys (ADR 0015 rejected an inert opt-in path),
-so adding them now would fail the whole manifest and take all seven working
-challenges with it.
+**All three are now `content-gen`'s golden tests**
+(`crates/content-gen/tests/golden.rs`), and the fact that they were recorded
+first, by `tools/smb3-roll.py`, is what makes them worth anything: a different
+implementation, in a different language, from a table a human wrote down. A
+round-trip against the crate's own output would have proved nothing.
 
-`patch_slot` tables hang off `[[challenge]]`, so a stage played as both a time
-trial and a survival run duplicates the entire table and the copies can drift.
-Unresolved.
+They pin the engine's *writing* — offsets, header skip, widths, checksum — and
+not its *choosing*, so each is applied as an explicitly chosen roll rather than
+drawn from a seed. `tools/smb3-roll.py` could never have pinned the choosing
+either: its `--seed` is Python's RNG, not ADR 0013's derivation key.
 
-## Five mechanism findings
+```sh
+cargo test -p content-gen                  # the three hashes, if the ROMs are here
+cargo run -p session-libretro --bin harness -- \
+    --game smb3 --challenge bro-roulette-time-trial --seed 3 --frames 30
+```
+
+The harness derives the hack from the patch, rolls the challenge's slots, rebinds
+the entry state and enters — and prints every byte it wrote on the way. The
+artifacts land in `build/derived/`, which is a cache and is not in the
+repository. `tools/smb3-roll.py` is now redundant and kept only as the thing the
+hashes were first taken with.
+
+### The manifest block
+
+Both slot tables are now in `manifests/smb3.toml`, along with the `[[rom]]` array
+and the two stages, and the loader reads them. What follows is the same thing,
+kept here because this document is where the offsets and pools are argued for and
+a reader should not have to hold two files open.
+
+```toml
+schema_version = 3
+
+[[rom]]
+id = "base"
+name = "Super Mario Bros. 3 (USA) (Rev 1)"
+path = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
+sha1 = "6bd518e85eb46a4252af07910f61036e84b020d1"
+header = "ines"
+
+[[rom]]
+id = "hack1"
+name = "SMB3: Gamer Trials"
+from = "base"
+patch = "assets/patches/smb3-rom-hack1.bps"
+sha1 = "55c34fe15e7753ee6781f7f5de477f5610fc3428"
+
+# Every existing [[stage]] also gained `rom = "base"` — twelve one-line changes
+# across the three manifests, which is what made this a breaking change.
+#
+# The shipped manifest still leaves [[rom]].sha1 off the *base*, and that stays a
+# loose end: prep enforces a declared hash, and no dump has been verified to
+# declare one against. The disassembly reassembling to 6bd518e8… is the strongest
+# evidence there is, and it is evidence about this checkout, not about a player's.
+
+[[stage]]
+id = "sun-storm"
+name = "Sun Storm"
+rom = "hack1"
+entry = { state = "assets/states/smb3_sun-storm.state" }
+note = "captured on the World 1 map, on the tile that enters W2_32"
+
+[[stage]]
+id = "bro-roulette"
+name = "Bro Roulette"
+rom = "hack1"
+entry = { state = "assets/states/smb3_bro-roulette.state" }
+note = "captured on the World 1 map, on the tile that enters W1_03"
+
+# --- Sun Storm -------------------------------------------------------------
+# One to three Angry Suns. The two kinds duplicate the table rather than share
+# it: patch_slot hangs off [[challenge]], so the copies can drift. Unresolved,
+# and the strongest argument for hanging it off [[stage]] instead.
+
+[[challenge]]
+id = "sun-storm-survival"
+name = "Sun Storm"
+stage = "sun-storm"
+kind = "survival"
+complete_when = { cleared = true }
+generator_version = 1
+
+[[challenge.patch_slot]]
+offset = 0xC6BD                      # slot A, column $01
+width = "u8"
+values = { pool = [0xAF, 0xBB] }     # a sun, or nothing at all
+
+[[challenge.patch_slot]]
+offset = 0xC6C0                      # slot B, column $03
+width = "u8"
+values = { pool = [0xAF, 0xBB] }
+
+[[challenge.patch_slot]]
+offset = 0xC6C3                      # slot C, column $05 — always a sun
+width = "u8"
+values = { pool = [0xAF] }
+
+[[challenge]]
+id = "sun-storm-time-trial"
+name = "Sun Storm"
+stage = "sun-storm"
+kind = "time_trial"
+complete_when = { cleared = true }
+generator_version = 1
+
+# ... the same three patch_slot entries again.
+
+# --- Bro Roulette ----------------------------------------------------------
+# Four goombas, each independently a goomba or one of four bros. The repeated
+# 0x72 entries are the weighting, and are not a mistake.
+
+[[challenge]]
+id = "bro-roulette-time-trial"
+name = "Bro Roulette"
+stage = "bro-roulette"
+kind = "time_trial"
+complete_when = { enemies_defeated = 4 }
+generator_version = 1
+note = "the clock stops on the fourth stomp; reaching the card is not required"
+
+[[challenge.patch_slot]]
+offset = 0xC6CB                      # goomba 1, column $02
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6CE                      # goomba 2, column $0A
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6D1                      # goomba 3, column $0D
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge.patch_slot]]
+offset = 0xC6D4                      # goomba 4, column $0D
+width = "u8"
+values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
+
+[[challenge]]
+id = "bro-roulette-survival"
+name = "Bro Roulette"
+stage = "bro-roulette"
+kind = "survival"
+complete_when = { enemies_defeated = 4 }
+generator_version = 1
+
+# ... the same four patch_slot entries again.
+```
+
+Both levels award an end-level card, so `cleared = true` is available on either —
+which the base-ROM tables could not offer, and which is why neither challenge
+needs `survive_seconds` any more. `enemies_defeated = 4` is on Bro Roulette
+because that is what the challenge is about; swap in `cleared = true` if it should
+be a race to the card instead.
+
+## Six mechanism findings
 
 All confirmed in the disassembly, none of them guessable from a RAM map. They
 are what makes the two challenges above work, and they generalise to any SMB3
 generator.
 
-1. **The Angry Sun activates only at screen 5 exactly.** `Sun_WaitFarEnough`
-   (`PRG/prg005.asm:2718`) gates on `CMP #$05 / BNE` — equality, not "at least" —
-   plus `X >= 176`. A sun that spawns past screen 5 never activates at all. This
-   is why the extra suns sit at columns `$5B`–`$5D`: they spawn already inside the
-   gate and activate on the frame they spawn.
+1. **The Angry Sun activates on accumulated scroll, not on where it was placed.**
+   `Sun_WaitFarEnough` (`PRG/prg005.asm:2718`) gates on the sun's *live* position:
+   `CMP #$05 / BNE` against `Objects_XHi` — equality, not "at least" — plus
+   `Objects_X >= 176`. But `ObjNorm_Sun` moves the sun by `Level_ScrollDiffH`
+   every frame (`prg005.asm:2727`), so it tracks the camera: its absolute X is
+   *spawn column × 16 + total scroll*. A sun therefore activates once the level
+   has scrolled it into `[1456, 1535]`, and the earlier its column, the more
+   scroll that takes — the rightmost sun in a group activates first. A sun placed
+   *past* the gate never activates, because scrolling right only carries it
+   further away.
+
+   This corrects what used to be recorded here. The old base-ROM table pinned its
+   suns to columns `$5B`–`$5D` so they spawned already inside the gate; that
+   worked, but it was one solution rather than the rule. Sun Storm's suns sit at
+   columns `$01`–`$05` and activate about five and a half screens in, staggered
+   two columns apart, which is the same mechanism used deliberately.
 2. **Objects spawn from a look-ahead of +272 pixels** (`LOSBS_LookAhead`,
-   `prg005.asm:4918`), and **only one ordinary object spawns per frame** — the
-   normal path falls through to `RTS` (`prg005.asm:5155`). Three suns on one
-   column would need the scroll to dwell in a single 16-pixel window for three
-   frames; on consecutive columns each gets its own boundary. The sand trap entry
-   needs ~32 pixels of scroll to spawn all three, which a full P-meter coast
-   supplies regardless of input — that is what stops a player defeating a survival
-   challenge by standing still.
+   `prg005.asm:4918`) **snapped down to a 16-pixel boundary** (`AND #$f0`), and
+   **only one ordinary object spawns per call** — the normal path falls through to
+   `RTS` (`prg005.asm:5155`). So a column window is open for as many frames as the
+   camera spends inside it, and two objects on one column both spawn if it dwells
+   two frames. At level load that is guaranteed: `prg005.asm:6385` walks the
+   starting screen in 16-pixel steps and calls the spawn scan **twice per step**,
+   which is why Bro Roulette's two goombas on column `$0D` both appear. Mid-level
+   at speed it is not guaranteed, and consecutive columns are still the safe
+   pattern.
 3. **The object list must stay sorted ascending by column.** The spawn scan stops
    at the first entry on a different screen, and `Level_ObjIdxStartByScreen` is
    built at load by walking the list in order. Any column pool must be bounded by
-   its neighbours' values or everything after it silently stops spawning.
+   its neighbours' values or everything after it silently stops spawning. Rolling
+   only IDs, as both tables above do, cannot violate this.
 4. **There are five object slots** for ordinary enemies (`LDX #$04`,
    `prg005.asm:5110`); the end-level card forces slot 6. If no slot is free the
    object is simply lost — the column alignment has passed and it is not retried.
-   Sun Storm uses four of the five.
+   Sun Storm needs three of the five, Bro Roulette four.
 5. **`Level_ObjectID` at `$0671`–`$0678` is the live actor ID table**, and
    `Objects_State` at `$0661`–`$0668`. This is a far better foundation for "kill
    all enemies" than the stomp counter, at least in a scroll-locked arena. Not
    proposed yet: a slot emptying conflates a kill with an off-screen delete.
+6. **Object IDs `$B4`–`$BB` never become actors**, so one of them is how a value
+   substitution spells "nothing here". `prg005.asm:5053` turns such an ID into a
+   `Level_Event` number and returns before a slot is claimed. `$BB`
+   `OBJ_CANCELEVENT` is event 8, whose handler clears `Level_Event` and does
+   nothing else — a list entry that costs a frame's spawn opportunity and produces
+   no object. It is the only way to roll an enemy *out* of a level without
+   deleting a list entry, which ADR 0015 forbids.
 
-## Capturing an entry state for a generated challenge
+## Capturing an entry state for a custom challenge
 
-Entry states are captured on the **base** ROM and rebound to the generated one at
-entry (ADR 0019). A patch is only ever visible for objects that have not yet
-spawned when the state was taken, so capturing on the base ROM is what makes a
-state usable for every seed rather than for one.
+Both entry states here are captured **on the hack, on the World 1 map**, standing
+on the tile that enters the level — not inside it. That is the shape to copy, and
+it settles a question the base-ROM version of this document had to leave open.
 
-`tools/smb3-roll.py` applies one roll from the tables above, so there is
-something to check a state against before `content-gen` exists. It is
-scaffolding and the crate replaces it.
+A state captured *inside* a level carries `Level_ObjIdxStartByScreen`, which is
+built from the object list when the level loads (finding 3) — so a mid-level state
+carries an index built from the *unrolled* list and the rolled list is then read
+against it. It probably works, and "probably" is the problem. A map state has no
+index yet: the level loads fresh when the player walks in, from whatever bytes the
+roll wrote. The cost is the frames a map entry takes, and it is worth them.
 
-```sh
-# either of the two rolls with a recorded hash, or any seed
-python tools/smb3-roll.py --roll golden --out build/smb3-golden.nes
-python tools/smb3-roll.py --seed 7 --out build/smb3-seed7.nes
-```
-
-```sh
-# play to the place the challenge starts, from whatever state is nearest.
-# F1 saves to --state's path, so name the file you are authoring and press F1
-# at intermediate landmarks too - it is a long way to World 8
-harness --game smb3 --stage 1-1 --state assets/states/smb3_w2-sand-trap.state \
-        --watch 0x0012,0x00FD,0x0671-0x0675
-
-# check the state against a generated ROM, without touching the file
-harness --game smb3 --state assets/states/smb3_w2-sand-trap.state \
-        --rom <patched.nes> --rebind-state --frames 600
-```
-
-For Sun Storm, capture with `Horz_Scroll_Hi` (`$0012`) `= $04` and `Horz_Scroll`
-(`$00FD`) just under `$A0`, running right with a full P-meter — finding 2 above
-is why. Watch `$0671`–`$0675` to see the suns take slots as they spawn.
-
-`--rebind-state` never writes to the state file. A state captured *on* a
-generated ROM carries that ROM's board and is 52224 bytes rather than 35840; it
-is not portable back to the base ROM, so do not ship one.
-
-### What the first capture session actually tests
-
-A state carries RAM, and RAM holds derived copies of ROM data.
-`Level_ObjIdxStartByScreen` is built when the level loads (finding 3), so a state
-captured *inside* the sand trap carries an index built from the **base** object
-list, and the rolled list is then read against it.
-
-It should still work: the table records where each screen starts, the scan runs
-forward from there until the screen changes, and the rolled columns `$5B`–`$5D`
-all sit on screen 5, which slot A already indexed. That is reasoning, not a
-measurement. The measurement is:
+Nothing is rebound *onto the hack*. ADR 0019's rebind exists for a ROM the seeded
+engine derived, which is the same length, mapper and geometry as what it came
+from; a hand-authored hack is none of those, so a state is rebound only onto an
+artifact derived from the ROM its own stage names, never from the base onto a
+hack. These states name the hack's hash (`55C34FE1…`) and load onto the hack
+directly — and then onto a *roll* of the hack, which is a rebind stage prep turns
+on by itself because it knows how those bytes were made.
 
 ```sh
-harness --game smb3 --state assets/states/smb3_w2-sand-trap.state \
-        --rom build/smb3-golden.nes --rebind-state \
-        --frames 600 --watch 0x0671-0x0675
+# derive the hack, roll a challenge on it, and enter with its own state
+cargo run -p session-libretro --bin harness -- \
+    --game smb3 --challenge sun-storm-survival --seed 3 \
+    --frames 900 --watch 0x0671-0x0675
 ```
 
-Three suns taking actor slots means the stale index is harmless and a mid-level
-entry state is fine. One sun means it is not, and the entry state has to be
-captured on the world map before the level loads — costing the frames a map
-entry takes, which is the price of the patch being read fresh.
+One command now, rather than three: the harness applies the patch, rolls the
+slots, rebinds the state and enters. To play the level *unrolled* — which is how
+its entry state was captured in the first place — leave `--seed` off, and it says
+so rather than quietly running a rolled ROM.
 
-Either way, **a generator must never move an object to a screen its slot was not
-already indexed under.** That is a constraint on `content-gen`, and it is why
-both column pools above are single-valued.
+Walk right off the map tile, and watch `$0671`–`$0675` fill as the suns take actor
+slots. Rolling `b` (one sun) and `max` (three) against the same state is the
+cheapest end-to-end check that a slot table does what it claims.

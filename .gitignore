@@ -3,3 +3,8 @@
 /vendor
 /.dos-spike
 /shots
+
+# Locally derived content. A hack is carried as a BPS patch and a roll is
+# derived per seed; neither artifact belongs in the repository, and neither is
+# ours to distribute (ADR 0013, ADR 0020).
+/build/derived

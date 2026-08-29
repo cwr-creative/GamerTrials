@@ -35,9 +35,15 @@ predicate set over facts the same manifest emits — never code, never arithmeti
 Neither kind has a failure bound yet, and one is owed before either ships; see
 ADR 0017.
 
-Either kind may run on **vanilla** content (a stage as it originally shipped) or
-on **generated** content (a ROM patched per attempt from a seed — ADR 0013/0015,
-not before Phase 3). Both feed the same sequencing and scoring.
+Either kind may run on **vanilla** content (a stage as it originally shipped), on
+a **hack** (content a contributor authored in a level editor, carried as a BPS
+patch against the base ROM and named by the stage — ADR 0020), or on **generated**
+content (a ROM patched per attempt from a seed — ADR 0013/0015). All three are
+built and run; the last two are not yet playtested, and the seed a generated
+challenge needs still comes from a harness flag rather than from a session. All
+three feed the same sequencing and scoring, and the last two compose — a
+generated challenge sitting on a hack is the expected shape, not an exotic one: a
+human designs the level, the generator rerolls enemies inside it.
 
 Head-to-head, where players share one running game, is last by choice: it needs
 synchronised netcode rather than one-way telemetry. Nothing in the slice may
@@ -58,10 +64,15 @@ These are settled. Do not violate them without writing a superseding ADR.
 4. **Timing is measured in emulated frames, never wall-clock.** `SessionEvent`
    carries `frame: u64` by design.
 5. **Adding a game is a data change, not a code change.** New game = new manifest.
-   So is adding a *challenge* to a game (ADR 0017). If either requires touching
-   Rust, the abstraction has failed — fix the abstraction. Adding a *generator*
-   for procedural content is code (ADR 0013); its output is still data, and
-   `challenge-core` still never learns generators exist.
+   So is adding a *challenge* to a game (ADR 0017), and so is adding a *hack* — a
+   patch, a `[[rom]]` entry, and the stages that name it (ADR 0020). If any of
+   those requires touching Rust, the abstraction has failed — fix the abstraction.
+   So is adding a *generated challenge*: a `patch_slot` table and a
+   `generator_version`, rolled by one shared engine (ADR 0015 narrowing ADR
+   0013). What is code is a new *console family* — a header size and a checksum
+   rule in `content-gen`, reviewed once per family, never per game. Whatever a
+   generator produces is still data, and `challenge-core` never learns
+   generators exist.
 6. **Every phase ends in something runnable.** No big-bang integration.
 7. **Every game runs on an emulated machine** (ADR 0018). Not "runs under
    libretro" — that is the delivery mechanism, and native ports behind a
@@ -79,10 +90,10 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
 | `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
-| `asset-store` | ROM hash verification, content-addressed bundles. |
+| `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. |
 | `app-client` | Tauri shell, overlay, wiring. |
 | `server` | Lobby, clock sync, telemetry aggregation. Never runs a game. |
-| `content-gen` | Per-game procedural stage generators. |
+| `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 
 ## Conventions
 
@@ -90,6 +101,14 @@ These are settled. Do not violate them without writing a superseding ADR.
   field, and live in `manifests/`. The schema is `docs/manifest-schema.md`;
   `session-libretro` is the authority on what parses. Generated artifacts get no
   manifest of their own; they are identified by their derivation key (ADR 0013).
+  A hand-authored hack gets no manifest of its own either — it is a `[[rom]]`
+  beside the base it patches, and every stage names which ROM it runs on (ADR
+  0020). It may only share that manifest if the telemetry holds against it
+  unchanged; a hack that moves an address earns a manifest of its own.
+- **The platform never distributes ROM bytes.** A player supplies their own dump.
+  A hack ships as a patch, and a generated ROM never leaves the machine that
+  derived it (ADR 0013/0020). A field holding a path to a hacked ROM is that rule
+  being broken.
 - A manifest reports *facts* — cleared, exited, died, damaged, item, objective —
   and declares *criteria* (`[[challenge]].complete_when`). It never produces a
   verdict: an adapter must never decide a run was won, and there is no
@@ -139,6 +158,31 @@ Three things learned there are worth not rediscovering:
   changes how many emulated frames a piece of play takes, so two players on
   different values have incomparable scores (invariant 4).
 
+Then `schema_version = 3` and `content-gen` (ADR 0020/0015/0013): content
+stopped being one file per manifest. `[rom]` became `[[rom]]` with an `id`,
+`[[stage]].rom` is required everywhere, and `[[challenge]]` may carry the
+`patch_slot` table the seeded engine rolls from. `content-gen` applies a
+contributor's BPS patch and performs the value substitution; it has no emulator
+dependency and no per-game code, so its golden-hash tests are ordinary
+`cargo test`. `session-libretro::prep` is what ADR 0013 called "whatever
+prepares a stage": dump → hack → roll → bytes, and the runner below it cannot
+tell which of the three it was handed.
+
+Three things learned there, in the same spirit:
+
+- **A pool's duplicates are its weights.** `[0x72, 0x72, 0x72, 0x72, 0x81,
+  0x82, 0x86, 0x87]` is a coin flip then an even choice among four. An engine
+  that deduplicated it would make it a 20% roll and say nothing. Duplication is
+  the only way this schema can express a non-uniform roll at all.
+- **The generator is a wire contract.** Every player derives the artifact
+  locally and the server aborts on a hash mismatch, so the RNG is written out
+  by hand rather than taken from a crate, and changing it is a
+  `generator_version` bump for the whole library.
+- **A golden hash from another implementation is worth more than a round
+  trip.** The three SMB3 hashes in `docs/games/smb3.md` were recorded against a
+  Python script before the crate existed, and the crate reproducing them is
+  evidence rather than a tautology.
+
 Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
 What is *not* done, and the next things to settle:
@@ -152,11 +196,23 @@ What is *not* done, and the next things to settle:
   finishing E1M1 from the `state` entry. `docs/games/doom.md` lists what would
   close that gap.
 - **`asset-store` will need to hash a bundle's members, not the container.** A
-  DOS game is a zip, and its hash depends on how it was zipped (ADR 0018).
-- No generated content (`content-gen`, ADR 0013/0015 — the schema documents
-  patch slots and the loader refuses them), no scoring, no head-to-head. The
-  entry-point problem that blocked it is settled: Mesen binds a savestate to the
-  ROM's SHA-1, and stage prep rebinds the state to the generated ROM rather than
-  regenerating it (ADR 0019, `--rebind-state`). Two SMB3 slot tables and a golden
-  hash are in `docs/games/smb3.md`, waiting for the engine. What is still open is
-  whether a *rolled quantity* may reach `complete_when`; today it cannot.
+  DOS game is a zip, and its hash depends on how it was zipped (ADR 0018). That
+  work also gates DOS hacks: a BPS patch against a zip is meaningless, so a PWAD
+  arrives as a member overlay and ADR 0020 defers it until members are hashable.
+- **Generated content runs but is not playtested.** The pipeline is end to end —
+  dump, patch, roll, rebind, enter — and the two SMB3 custom challenges are in
+  `manifests/smb3.toml`. Nobody has yet *played* one to its criteria, and the
+  entry states were captured on the map for a reason worth confirming
+  (`docs/games/smb3.md`). The seed also has nowhere to come from: ADR 0013 has
+  the server issuing it and the clients comparing artifact hashes, and neither
+  exists — today it is a `--seed` flag on the harness.
+- **A rolled quantity still cannot reach `complete_when`.** It is static TOML
+  with no arithmetic and nothing that can name the seed, so a generator cannot
+  roll a count a criterion then refers to. Both SMB3 challenges avoid it by
+  rolling types rather than counts. It is the first real boundary a generator
+  hits and it is still unsettled.
+- **Patch slots hang off `[[challenge]]`, so two kinds on one stage duplicate the
+  table.** `manifests/smb3.toml` carries each of its two tables twice, and
+  nothing stops the copies drifting. The alternative is hanging them off
+  `[[stage]]`, which is a schema decision nobody has made.
+- No scoring and no head-to-head.

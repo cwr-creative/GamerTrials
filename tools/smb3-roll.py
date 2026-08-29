@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply one SMB3 custom-challenge roll to the base ROM.
+"""Apply one SMB3 custom-challenge roll to the ROM a challenge runs on.
 
 Scaffolding, not the engine. `content-gen` (ADR 0013/0015) is the seeded patch
 engine and it will replace this; what this exists for is producing a patched ROM
@@ -7,6 +7,10 @@ today, so entry states can be captured and checked against one before the crate
 is written. The slot tables it carries are the ones in `docs/games/smb3.md`, and
 the two named rolls reproduce the golden hashes recorded there.
 
+Both custom challenges live on a hand-authored hack, not on the base ROM
+(ADR 0020), so the roll's input is the *derived* ROM:
+
+    python tools/smb3-roll.py --apply-patch --out build/rom-hack1.nes
     python tools/smb3-roll.py --roll golden --out build/smb3-golden.nes
     python tools/smb3-roll.py --seed 7 --out build/smb3-seed7.nes
 
@@ -21,83 +25,186 @@ import hashlib
 import pathlib
 import random
 import sys
+import zlib
 
 BASE_ROM = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
+HACK_PATCH = "assets/patches/smb3-rom-hack1.bps"
+HACK_ROM = "build/rom-hack1.nes"
 INES_HEADER = 0x10
 
-# Sun Storm - World 2 Sand Trap. PRG/objects/SandTrap.asm.
-# Slot A's single-value pool is what makes the roll 1-3 suns rather than 0-3.
-SUN_STORM = {
-    0xC856: [0xAF],          # slot A id      - always a sun
-    0xC857: [0x5B],          # slot A column
-    0xC859: [0xAF, 0x6E],    # slot B id      - sun, or the original paratroopa
-    0xC85A: [0x5C],          # slot B column
-    0xC85C: [0xAF, 0x6E],    # slot C id
-    0xC85D: [0x5D],          # slot C column
+BASE_SHA1 = "6bd518e85eb46a4252af07910f61036e84b020d1"
+HACK_SHA1 = "55c34fe15e7753ee6781f7f5de477f5610fc3428"
+
+# Sun Storm - W2_32 on the hack, entered from the World 1 map. Object list at
+# $C6BC. Three Angry Sun slots; the last one is fixed so the roll is 1-3 suns
+# rather than 0-3. $BB is OBJ_CANCELEVENT, which spawns nothing and consumes no
+# object slot - the closest thing SMB3 has to an empty entry under pure value
+# substitution.
+SUN_SLOT_FIXED = {
+    0xC6C3: [0xAF],                # column $05 - always a sun, and the first to activate
+}
+SUN_SLOTS = {
+    0xC6BD: [0xAF, 0xBB],          # column $01
+    0xC6C0: [0xAF, 0xBB],          # column $03
 }
 
-# Bro Roulette - World 8 Hammer Bro hand trap. PRG/objects/W8HTrap1.asm.
-# The four ids are a permutation, not four independent draws: the pool is the
-# four variants Nintendo already put in this level.
-BRO_SLOTS = [0xD0B1, 0xD0B4, 0xD0B7, 0xD0BA]
-BRO_POOL = [0x81, 0x82, 0x86, 0x87]
-BRO_PARK = {0xD0BE: [0x7F]}  # column 0x7F is past the level's four screens
+# Bro Roulette - W1_03 on the hack. Object list at $C6CA. Four goomba slots,
+# each rolled independently over a *multiset*: four goombas against one of each
+# bro, so a coin flip decides whether the goomba is replaced and the four bro
+# variants share the other half evenly.
+BRO_SLOTS = [0xC6CB, 0xC6CE, 0xC6D1, 0xC6D4]
+BRO_POOL = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87]
 
-# The two rolls `docs/games/smb3.md` records a hash for.
+# The rolls `docs/games/smb3.md` records a hash for.
 NAMED_ROLLS = {
     "golden": {
-        0xC856: 0xAF, 0xC857: 0x5B, 0xC859: 0xAF, 0xC85A: 0x5C,
-        0xC85C: 0xAF, 0xC85D: 0x5D,
-        0xD0B1: 0x86, 0xD0B4: 0x87, 0xD0B7: 0x82, 0xD0BA: 0x81,
-        0xD0BE: 0x7F,
+        0xC6BD: 0xBB, 0xC6C0: 0xAF, 0xC6C3: 0xAF,
+        0xC6CB: 0x81, 0xC6CE: 0x87, 0xC6D1: 0x72, 0xC6D4: 0x86,
     },
     "b": {
-        0xC856: 0xAF, 0xC857: 0x5B, 0xC859: 0x6E, 0xC85A: 0x5C,
-        0xC85C: 0xAF, 0xC85D: 0x5D,
-        0xD0B1: 0x81, 0xD0B4: 0x82, 0xD0B7: 0x86, 0xD0BA: 0x87,
-        0xD0BE: 0x7F,
+        0xC6BD: 0xBB, 0xC6C0: 0xBB, 0xC6C3: 0xAF,
+        0xC6CB: 0x72, 0xC6CE: 0x72, 0xC6D1: 0x82, 0xC6D4: 0x81,
+    },
+    "max": {
+        0xC6BD: 0xAF, 0xC6C0: 0xAF, 0xC6C3: 0xAF,
+        0xC6CB: 0x87, 0xC6CE: 0x86, 0xC6D1: 0x82, 0xC6D4: 0x81,
     },
 }
 NAMED_HASHES = {
-    "golden": "b60ba24bca183b8c707d01b3f7b835ec7e38614d",
-    "b": "bf8e21ff2e4e5958f7f7391f40187534c54bb671",
+    "golden": "7b6989c1d511ade0a33a7e50aa035cade734d799",
+    "b": "10e69a037e821fea5a5a4c0822ff2ffe58bef4fe",
+    "max": "6333b57ff78e0bce43d8114d08279bbf93689918",
+}
+
+OBJ_NAMES = {
+    0x72: "OBJ_GOOMBA", 0x81: "OBJ_HAMMERBRO", 0x82: "OBJ_BOOMERANGBRO",
+    0x86: "OBJ_HEAVYBRO", 0x87: "OBJ_FIREBRO", 0xAF: "OBJ_ENEMYSUN",
+    0xBB: "OBJ_CANCELEVENT",
 }
 
 
+# ------------------------------------------------------------------- BPS apply
+#
+# The hack ships as a patch, never as a ROM (ADR 0020). This is the same
+# transform `content-gen` owes; it lives here so there is one command that gets
+# from a player's own dump to something runnable.
+
+def _vuint(buf, pos):
+    val, shift = 0, 1
+    while True:
+        b = buf[pos]
+        pos += 1
+        val += (b & 0x7F) * shift
+        if b & 0x80:
+            return val, pos
+        shift <<= 7
+        val += shift
+
+
+def apply_bps(src, patch):
+    if patch[:4] != b"BPS1":
+        raise ValueError("not a BPS patch")
+    pos = 4
+    src_size, pos = _vuint(patch, pos)
+    dst_size, pos = _vuint(patch, pos)
+    meta_size, pos = _vuint(patch, pos)
+    pos += meta_size
+    if len(src) != src_size:
+        raise ValueError(f"source is {len(src)} bytes, patch expects {src_size}")
+    if zlib.crc32(src) != int.from_bytes(patch[-12:-8], "little"):
+        raise ValueError("source CRC32 mismatch: wrong ROM revision")
+    dst = bytearray(dst_size)
+    out = src_rel = dst_rel = 0
+    end = len(patch) - 12
+    while pos < end:
+        data, pos = _vuint(patch, pos)
+        action, length = data & 3, (data >> 2) + 1
+        if action == 0:
+            dst[out:out + length] = src[out:out + length]
+            out += length
+        elif action == 1:
+            dst[out:out + length] = patch[pos:pos + length]
+            pos += length
+            out += length
+        else:
+            d, pos = _vuint(patch, pos)
+            delta = (-1 if d & 1 else 1) * (d >> 1)
+            if action == 2:
+                src_rel += delta
+                dst[out:out + length] = src[src_rel:src_rel + length]
+                src_rel += length
+                out += length
+            else:
+                dst_rel += delta
+                for _ in range(length):
+                    dst[out] = dst[dst_rel]
+                    dst_rel += 1
+                    out += 1
+    if zlib.crc32(bytes(dst)) != int.from_bytes(patch[-8:-4], "little"):
+        raise ValueError("target CRC32 mismatch: the patch did not apply cleanly")
+    return bytes(dst)
+
+
+# ----------------------------------------------------------------------- rolls
+
 def roll_from_seed(seed):
     rng = random.Random(seed)
-    patch = {off: rng.choice(pool) for off, pool in SUN_STORM.items()}
-    patch.update(dict(zip(BRO_SLOTS, rng.sample(BRO_POOL, len(BRO_POOL)))))
-    patch.update({off: pool[0] for off, pool in BRO_PARK.items()})
+    patch = {off: pool[0] for off, pool in SUN_SLOT_FIXED.items()}
+    patch.update({off: rng.choice(pool) for off, pool in SUN_SLOTS.items()})
+    patch.update({off: rng.choice(BRO_POOL) for off in BRO_SLOTS})
     return patch
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--rom", default=BASE_ROM, help=f"base ROM. Default: {BASE_ROM}")
+    ap.add_argument("--rom", help=f"ROM to roll. Default: {HACK_ROM}")
+    ap.add_argument("--base", default=BASE_ROM, help=f"base ROM. Default: {BASE_ROM}")
+    ap.add_argument("--patch", default=HACK_PATCH, help=f"BPS patch. Default: {HACK_PATCH}")
+    ap.add_argument("--apply-patch", action="store_true",
+                    help="derive the hack from --base + --patch and write it to --out, without rolling")
     ap.add_argument("--roll", choices=sorted(NAMED_ROLLS), help="a roll with a recorded hash")
     ap.add_argument("--seed", type=int, help="roll from the slot tables with this seed")
-    ap.add_argument("--out", required=True, help="where to write the patched ROM")
+    ap.add_argument("--out", required=True, help="where to write the ROM")
     args = ap.parse_args()
 
-    if (args.roll is None) == (args.seed is None):
-        ap.error("pass exactly one of --roll or --seed")
+    chosen = [bool(args.apply_patch), args.roll is not None, args.seed is not None]
+    if sum(chosen) != 1:
+        ap.error("pass exactly one of --apply-patch, --roll or --seed")
 
-    rom = bytearray(pathlib.Path(args.rom).read_bytes())
-    base_sha1 = hashlib.sha1(rom).hexdigest()
-    print(f"base    {base_sha1}  {args.rom}")
+    out = pathlib.Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.apply_patch:
+        base = pathlib.Path(args.base).read_bytes()
+        print(f"base    {hashlib.sha1(base).hexdigest()}  {args.base}")
+        rom = apply_bps(base, pathlib.Path(args.patch).read_bytes())
+        sha1 = hashlib.sha1(rom).hexdigest()
+        out.write_bytes(rom)
+        print(f"hack    {sha1}  {out}")
+        if sha1 != HACK_SHA1:
+            print(f"MISMATCH: docs/games/smb3.md records {HACK_SHA1}", file=sys.stderr)
+            return 1
+        print("matches the hash in docs/games/smb3.md")
+        return 0
+
+    rom_path = args.rom or HACK_ROM
+    if not pathlib.Path(rom_path).exists():
+        print(f"{rom_path} does not exist; derive it first:\n"
+              f"  python tools/smb3-roll.py --apply-patch --out {HACK_ROM}", file=sys.stderr)
+        return 1
+    rom = bytearray(pathlib.Path(rom_path).read_bytes())
+    print(f"input   {hashlib.sha1(rom).hexdigest()}  {rom_path}")
 
     patch = NAMED_ROLLS[args.roll] if args.roll else roll_from_seed(args.seed)
     for off, val in sorted(patch.items()):
         was = rom[INES_HEADER + off]
         rom[INES_HEADER + off] = val
-        print(f"  0x{off:04X}  {was:02X} -> {val:02X}" + ("  (unchanged)" if was == val else ""))
+        note = "  (unchanged)" if was == val else ""
+        print(f"  0x{off:04X}  {was:02X} -> {val:02X}  {OBJ_NAMES.get(val, '?'):<16}{note}")
 
-    out = pathlib.Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(rom)
     sha1 = hashlib.sha1(rom).hexdigest()
-    print(f"patched {sha1}  {out}")
+    print(f"rolled  {sha1}  {out}")
 
     expected = NAMED_HASHES.get(args.roll)
     if expected and sha1 != expected:
