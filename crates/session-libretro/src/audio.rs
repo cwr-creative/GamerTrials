@@ -20,10 +20,18 @@ pub struct Audio {
     _stream: cpal::Stream,
 }
 
-/// Frames of audio to keep queued. Three frames of a 60 Hz core is ~50 ms:
-/// enough that a scheduling hiccup does not underrun, short enough that input
-/// still feels attached to the picture.
-pub const TARGET_QUEUED_FRAMES: usize = 3;
+/// Frames of audio to keep queued, and therefore how far behind the sound card
+/// the whole loop runs: the main loop will not start a frame until the queue
+/// has drained to this, so this constant is added to every input's latency, not
+/// just to the sound's.
+///
+/// Two frames of a 60 Hz core is ~33 ms. Three was the first value that did not
+/// underrun and it was never revisited; two does not underrun either, measured
+/// on Windows/WASAPI where `thread::sleep(1ms)` returns in ~1.5 ms, so the
+/// drain loop below can actually resolve a two-frame queue. Raise it back if a
+/// slower device clicks — it is the one number here that trades latency for
+/// robustness, and it is not worth guessing at.
+pub const TARGET_QUEUED_FRAMES: usize = 2;
 
 pub fn start(core_rate: f64) -> Result<Audio, String> {
     let host = cpal::default_host();

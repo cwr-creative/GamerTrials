@@ -423,6 +423,284 @@ note = "every DKC level holds exactly four letters; the counts are 1 each, not 4
 cleared = true
 items_collected = { "kong_letter:K" = 1, "kong_letter:O" = 1, "kong_letter:N" = 1, "kong_letter:G" = 1 }
 
+# ----------------------------------------------------------- Reptile Roulette
+#
+# Reptile Rumble with every enemy in the room rerolled into a reptile, one
+# independent roll per spawn slot. Everything else is `reptile-rumble-survival`
+# unchanged: same stage, same entry state, same criterion. Only the ROM moves.
+#
+# Where the numbers come from
+# ---------------------------
+# DKC keeps one object list per room, and the table that finds them is
+# `LevelSpritePointersStart` in the Yoshifanatic1 disassembly's
+# `AsarScripts/AssetPointersAndFiles.asm`:
+#
+#     dl $FD81CC,$FD846C,SPR_ReptileRumble_Main,SPR_ReptileRumble_MainEnd
+#
+# The cart is HiROM, so $FD81CC is file offset 0x3D81CC in a headerless 4 MB
+# dump (address & $3FFFFF, and this ROM is exactly 0x400000 bytes, so there is
+# no copier header to count past). 0x2A0 bytes, 84 records of eight, sorted by
+# X - which is how the game streams them in as the camera advances:
+#
+#     u16 flags | u16 X | u16 Y | u16 spawn-script pointer, bank $B5
+#
+# That last word *is* the object. It points at a sprite spawn script, the small
+# bytecode disassembled into `Routine_Macros_DKC1.asm`, where
+# `%DKC1_SSS_OpXX($0D45, $0005)` writes sprite id $05 (Kritter) to $7E0D45,
+# `Op88` picks the palette, `Op81` the animation, `Op97` the OAM flip, and
+# `Op82` calls a shared prefix. A script therefore carries the whole enemy -
+# species, palette, animation, speed and behaviour - and swapping the pointer
+# swaps all of it at once. Nothing is relocated, no slot is created and the
+# file length does not change, which is the ADR 0015 restriction and also what
+# keeps the entry state rebindable under ADR 0019.
+#
+# Palettes ride along with the enemy: DKC streams sprite graphics and palettes
+# per object rather than per level, which is why one room can hold Kritter,
+# Klaptrap, Klump and Krusha at once (Trick Track Trek does) and why the pool
+# below needs no per-level graphics budget checked.
+#
+# The pool
+# --------
+# Ten scripts, every one of them behaviour mode $0002 - "walk until a wall or a
+# ledge, then turn about" - read from the $7E152D write in the flattened
+# script. That is the one mode with no dependency on where the object was
+# placed: a patrol variant ($0001) is tuned to the ledge it shipped on, and a
+# Kritter hop ($0004, what this room's own Kritters use) to the gap it shipped
+# over. Mode $0002 drops in anywhere. Every value is also a script the shipped
+# game runs somewhere, so none of them is a path nobody has ever executed:
+#
+#   $94ED  Kritter, green   -1.00 px/f  Jungle Hijinx, Ropey Rampage, +3 more
+#   $96F5  Klaptrap, blue   -2.00       Stop & Go Station, Misty Mine, +2
+#   $9703  Klaptrap, blue   -1.50       Snow Barrel Blast, Blackout Basement
+#   $9711  Klaptrap, blue   +2.00       Slipslide Ride
+#   $98B3  Klump            -1.00       Torchlight Trouble, Platform Perils
+#   $98E5  Klump            +1.00       Elevator Antics
+#   $9CCF  Slippa           -1.50       this room's own, and three others
+#   $9CD9  Slippa           -2.50       this room
+#   $9CE3  Slippa           -2.00       this room
+#   $B5CB  Krusha, blue     -1.00       Torchlight Trouble, Millstone Mayhem
+#
+# Kritter is listed three times because it has exactly one mode-$0002 script
+# and a pool is a multiset: the repeats are the weight, not a mistake. Per
+# slot that gives Kritter 3/12, Klaptrap 3/12, Slippa 3/12, Klump 2/12,
+# Krusha 1/12. Krusha is deliberately the rare one - he is the only member a
+# Kong cannot stomp, so he is scenery to get around rather than an enemy to
+# clear, and a room full of him would be a different challenge.
+#
+# Three reptiles are left out on purpose:
+#   - Rockkroc ($68) is invulnerable and driven by the Stop & Go light
+#     controller, a sprite this room does not contain. It would spawn stuck in
+#     one state, and it is the one candidate that could wall a corridor for
+#     good.
+#   - Grey Krusha ($78) was only ever authored as a bounded patrol ($0001), so
+#     there is no placement-independent variant of it to use.
+#   - Croctopus ($57) is an octopus, whatever the name says, and underwater.
+#
+# Not playtested. Two things to watch when it is
+# ----------------------------------------------
+#   - Four of the 26 slots held Zingers, which hover. A ground reptile rolled
+#     into one falls to the floor beneath it, or out of the room if there is
+#     nothing under it. That makes the level easier, never harder, so it is a
+#     looks-wrong risk rather than a completability one.
+#   - The entry state is captured a moment after the room loads, not at the
+#     instant of it. In `dkc_reptile-rumble.state`, sprite slot 5 already holds
+#     id $0029 at X=$01E5 - the Slippa this list places at X=$0228, 67 px into
+#     its walk. Slot 1 below is therefore the one roll a player will not meet
+#     on the way out; they would have to backtrack far enough to despawn and
+#     reload it. It is patched anyway, because leaving it out would make the
+#     derived ROM disagree with the room it claims to describe.
+
+[[challenge]]
+id = "reptile-roulette"
+name = "Reptile Roulette"
+stage = "reptile-rumble"
+kind = "survival"
+complete_when = { cleared = true }
+generator_version = 1
+note = "26 enemy spawn slots in SPR_ReptileRumble_Main, each rerolled independently over the reptile pool"
+
+#  1. Slippa      at X=$0228 Y=$0118, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D81DA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  2. Kritter     at X=$0430 Y=$00D2, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D81FA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  3. Kritter     at X=$0470 Y=$00B2, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8202
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  4. Kritter     at X=$0690 Y=$00B8, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8232
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  5. Kritter     at X=$06E8 Y=$00B8, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D823A
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  6. Kritter     at X=$0738 Y=$00B8, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8242
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  7. Kritter     at X=$0798 Y=$00B8, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8252
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  8. Kritter     at X=$0A50 Y=$0090, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8292
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+#  9. Kritter     at X=$0AB0 Y=$0070, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D82A2
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 10. Kritter     at X=$0B20 Y=$0048, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D82AA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 11. Zinger      at X=$0CF8 Y=$00C0, script $9D21
+[[challenge.patch_slot]]
+offset = 0x3D82C2
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 12. Zinger      at X=$0D74 Y=$00C0, script $9D21
+[[challenge.patch_slot]]
+offset = 0x3D82E2
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 13. Slippa      at X=$0F99 Y=$00D6, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D8302
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 14. Slippa      at X=$0FCB Y=$00D6, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D830A
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 15. Zinger      at X=$1070 Y=$00A0, script $9E95
+[[challenge.patch_slot]]
+offset = 0x3D833A
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 16. Slippa      at X=$129C Y=$0090, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D8382
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 17. Slippa      at X=$12CC Y=$0086, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D838A
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 18. Zinger      at X=$13F0 Y=$0130, script $9D21
+[[challenge.patch_slot]]
+offset = 0x3D83A2
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 19. Kritter     at X=$14D8 Y=$01DE, script $9C61
+[[challenge.patch_slot]]
+offset = 0x3D83AA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 20. Kritter     at X=$1578 Y=$01DE, script $9C61
+[[challenge.patch_slot]]
+offset = 0x3D83BA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 21. Slippa      at X=$1688 Y=$0119, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D83CA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 22. Slippa      at X=$16B8 Y=$0119, script $9CE3
+[[challenge.patch_slot]]
+offset = 0x3D83DA
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 23. Slippa      at X=$16E0 Y=$0119, script $9CD9
+[[challenge.patch_slot]]
+offset = 0x3D83E2
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 24. Slippa      at X=$1720 Y=$0119, script $9CCF
+[[challenge.patch_slot]]
+offset = 0x3D83F2
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 25. Kritter     at X=$18EB Y=$011D, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8412
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
+# 26. Kritter     at X=$19B0 Y=$0178, script $9C15
+[[challenge.patch_slot]]
+offset = 0x3D8442
+width = "u16"
+endian = "little"
+values = { pool = [0x94ED, 0x94ED, 0x94ED, 0x96F5, 0x9703, 0x9711, 0x98B3, 0x98E5, 0x9CCF, 0x9CD9, 0x9CE3, 0xB5CB] }
+
 # ----------------------------------------------------- level names, for the log
 #
 # What the byte at $7E003E means, transcribed from the RainbowZ Editor's

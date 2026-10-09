@@ -145,7 +145,17 @@ schema — `controller = "keyboard"`, `boot_seconds`,
 watch width — and nothing in `[watch]`, `[[rule]]`, `[[challenge]]` or
 `SessionEvent` changed. The spike crate is deleted.
 
-Three things learned there are worth not rediscovering:
+Four things learned there are worth not rediscovering:
+
+- **A DOS bundle carries the game's configuration, not just its files.** DOOM
+  reads its sound card out of a `DEFAULT.CFG` that `SETUP.EXE` normally writes;
+  with no such file both devices default to `snd_none` and the game boots
+  correctly, runs correctly and plays in total silence. A console ROM has no
+  equivalent — there is nothing beside it to get wrong. Two of the four members
+  of `doom-shareware-e1m1.zip` are ours rather than id's, and the state a stage
+  enters at has to be recaptured whenever any of them changes, because a DOS
+  state is the whole machine including whatever the config already
+  initialised.
 
 - **A core may publish no system RAM at all.** dosbox-pure answers
   `retro_get_memory_data` with nothing and publishes `SET_MEMORY_MAPS`

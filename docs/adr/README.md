@@ -9,7 +9,10 @@ proposed again.
 
 - ADRs are **append-only**. Never edit an accepted ADR to reflect a new decision.
   Write a new ADR, set the old one's status to `Superseded by NNNN`, and link both.
-- Status is one of: `Proposed`, `Accepted`, `Superseded by NNNN`, `Deprecated`.
+- Status is one of: `Proposed`, `Accepted`, `Rejected`, `Superseded by NNNN`,
+  `Deprecated`. A `Rejected` one needs no file if it never got past this index —
+  but the reason it was rejected is recorded below, because that is the part that
+  stops it being proposed again.
 - Write the ADR when the decision is made, not later. The rationale is the part
   you forget first.
 - Keep them short. One page. If it needs more, the decision is probably two decisions.
@@ -59,6 +62,8 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0018 | Support PC games only through emulation, and retire the external-process adapter | Accepted |
 | 0019 | Rebind an entry state to a generated ROM rather than regenerating it | Accepted |
 | 0020 | Carry alternative ROMs as patches against the base, and let a stage name one | Accepted |
+| 0021 | Savestates are generated based on instructions from manifests, superseding 0019 | Rejected |
+| 0022 | Instead of 0021, savestates are rebound based on instructions from manifests | Rejected |
 
 0003, 0013, 0014, 0015, 0016, 0017, 0018, 0019 and 0020 are written up; 0003 is
 the exemplar. Fill in the rest as you implement each area; an unwritten ADR is

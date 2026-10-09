@@ -21,13 +21,15 @@ Doom shareware v1.9, the freely redistributable `doom19s.zip` from the idgames
 archive. Its `DEICE`/`DOOMS_19.*` installer is a split PKZIP self-extractor, so
 no DOS-side install is needed: concatenating the parts gives an ordinary zip.
 
-The bundle the manifest names is those two files plus a `dosbox.conf`, rezipped:
+The bundle the manifest names is those two files plus two small text files it
+does not ship with, rezipped:
 
 | Member | SHA-1 |
 |---|---|
 | `DOOM.EXE` | `aa0668fae2f743ee5e3e5634ee42d3c8ace7d907` |
 | `DOOM1.WAD` | `5b2e249b9c5133ec987b3ea77596381dc0d6bc1d` |
 | `dosbox.conf` | `[autoexec]` running `C:` then `DOOM.EXE -warp 1 1` |
+| `DEFAULT.CFG` | `f193767bde9b9b36a27d14d23780b27db79a74e3` — see [Sound](#sound) |
 
 `dosbox-pure` mounts the zip as `C:` and runs the `[autoexec]`, so the bundle is
 **one file with one hash** — the same shape as "one manifest per base ROM".
@@ -36,9 +38,73 @@ The bundle the manifest names is those two files plus a `dosbox.conf`, rezipped:
 was zipped, so `asset-store` will want to hash the members rather than the
 container (ADR 0018).
 
+Note what that member list means: **a DOS bundle carries the game's
+configuration, not only its files.** A console ROM is the whole machine's
+content and there is nothing else to get right. Here two of the four members are
+ours, neither ships with the game, and one of them is the difference between the
+game making a sound and not.
+
+## Sound
+
+`DOOM.EXE` and `DOOM1.WAD` alone boot correctly and play in **silence**, which
+is the game working as designed rather than anything being broken. DOS DOOM does
+not probe for a sound card: it reads one out of `DEFAULT.CFG`, which `SETUP.EXE`
+normally writes at install time, and with no such file both devices fall back to
+`0` — `snd_none` in DOOM's `cardenum_t`. An installation that never ran SETUP is
+mute.
+
+So the bundle carries one, and it is the whole of it:
+
+```
+sfx_volume		8
+music_volume		8
+snd_channels		3
+snd_musicdevice		3
+snd_sfxdevice		3
+snd_sbport		544
+snd_sbirq		7
+snd_sbdma		1
+snd_mport		0
+```
+
+Tab-separated, CRLF, 146 bytes. `3` is `snd_SB`; `544` is `0x220`. Those three
+port/IRQ/DMA numbers are why `dosbox_pure_sblaster_conf` is now pinned in the
+manifest next to the cycles — DOOM talks to the address it was told rather than
+finding the card, so if the core's default ever moved, the game would go silent
+again with nothing in any log to say why.
+
+Music is the SoundBlaster's OPL, not MIDI, and that is deliberate.
+`dosbox_pure_midi` defaults to `frontend`, meaning "ask the frontend for a MIDI
+device"; there is no frontend MIDI interface in this harness, so it resolves to
+nothing and the core logs `MIDI: Opened device:none` on every boot. The manifest
+pins `disabled` so that line stops looking like a failure. `snd_musicdevice 2`
+(`snd_Adlib`) measures identically to `3` and either is fine.
+
+### How this was measured, and how to re-check it
+
+Counting samples rather than listening, because "I can't hear anything" does not
+distinguish a silent game from a broken output path. Over 900 frames the core
+handed the harness 720,353 stereo sample-frames — exactly 900 × 48000/60, so the
+mixer was running and `session_libretro::audio` was draining it correctly — at a
+**peak amplitude of 0.0000**. Adding `DEFAULT.CFG` and changing nothing else took
+that to **0.1840**. That is the whole diagnosis: the emulator's audio path was
+never the problem.
+
+### The entry state has to be recaptured with it
+
+`assets/states/doom_e1m1.state` was recaptured after this change, and had to be.
+A DOS state carries the whole machine, including a DOOM that has already
+initialised its sound devices — so restoring the *old* state onto the *fixed*
+bundle still measures 0.0000. Fixing the bundle without recapturing fixes
+nothing a race would ever see, because a race enters at the state.
+
+**Any change to the bundle means recapturing every state that entered on it.**
+That is not special to sound; it is what "the state is the whole machine" costs.
+
 ## What is different about a DOS game
 
-Four things, all in `[runner.libretro]`, and nothing below that line:
+Four things, all in `[runner.libretro]`, and nothing below that line — plus the
+bundle carrying configuration of its own, which is [Sound](#sound) above:
 
 1. **No system-RAM slice.** `retro_get_memory_data` answers nothing for every
    id, `SYSTEM_RAM` included. `dosbox-pure` publishes three `SET_MEMORY_MAPS`
@@ -47,7 +113,10 @@ Four things, all in `[runner.libretro]`, and nothing below that line:
    "memory_map"` is the route that works, which is the route SMB3 already uses.
 2. **A keyboard, not a pad.** `controller = "keyboard"`, and every host key
    passes through unchanged. Doom maps its own keys.
-3. **Pinned core options.** See below. This is the load-bearing one.
+3. **Pinned core options.** See below. This is the load-bearing one — eight of
+   them now: six that decide what machine is built, and two
+   (`dosbox_pure_sblaster_conf`, `dosbox_pure_midi`) that the bundle's
+   `DEFAULT.CFG` is written against.
 4. **Four-byte fields.** Doom's globals are C `int`s, so `default_width =
    "u32"`.
 
@@ -70,6 +139,45 @@ part of the game's identity rather than a preference, which is why
 `auto` agreeing with itself proves less than it looks: both runs were on one
 machine under matched load. It is repeatable here and not portable, which is the
 worst combination — it would pass a single-machine test and diverge in a race.
+
+### 26800 is not a performance ceiling, so do not raise it to fix a feel
+
+Doom felt laggy long before anyone measured it, and `dosbox_pure_cycles` is the
+obvious suspect: it is the setting that says how fast the machine is. It is the
+wrong one, and raising it costs a real thing — every frame count in the library
+becomes incomparable with every previous one — in exchange for nothing.
+
+Measured per 16.67 ms frame, release build, entering at `e1m1-hangar`:
+
+| | ms |
+|---|---|
+| `retro_run` plus the watcher (`--no-probe`) | 0.53 |
+| `scan_window`, the probe's 64 KB read | 0.33 |
+| `Probe::tick` | 0.01 |
+
+Under 0.9 ms of 16.67 — the emulated machine has roughly eighteen times the
+headroom it needs, at 26800, on the probe's default settings.
+`dosbox_pure_perfstats = "simple"` shows the same thing on screen if you want to
+watch it rather than take this table's word.
+
+What the lag actually was is latency rather than throughput, all of it in the
+harness's own loop, and it is fixed there: the loop used to read the keyboard
+*before* waiting for the frame's turn, so a whole frame of pacing sat between a
+keypress and the frame it reached; minifb only refreshes what `is_key_down`
+reports when the window is pumped, which used to happen only at the bottom of
+the loop; the audio queue that paces the loop was three frames (~50 ms) deep and
+is now two; and minifb's own 250 fps limiter was still on underneath ours,
+sleeping out the remainder of 4 ms inside every update. See the comments around
+the loop in `src/bin/harness.rs` and `TARGET_QUEUED_FRAMES` in `src/audio.rs`.
+
+One thing there is worth watching rather than fixing yet. `scan_window` reads
+its window a byte at a time through `AddressSpace::read_u8`, and for a core with
+no system-RAM slice every one of those bytes takes the `MEMORY_MAP` mutex and
+walks the descriptor list — 65,536 lock/scan pairs per frame for the 64 KB
+window below. That is the 0.33 ms, which is affordable. It is also linear in the
+window, and the advice below is to *widen* the window when hunting for a new
+address, so it is the first thing to hoist if a search ever feels slow.
+`--no-probe` removes it entirely.
 
 ## The addresses
 
@@ -184,14 +292,20 @@ changes:
 
 ```sh
 cargo run --release -p session-libretro --bin harness -- --game doom \
-    --stage e1m1-hangar-boot --rom assets/ROMs/dos/doom-shareware.zip \
+    --stage e1m1-hangar-boot --rom base=assets/ROMs/dos/doom-shareware.zip \
     --frames 16000 --no-audio
 ```
 
-A 16 000-frame run of that reported 41 damage events, two deaths (frames 7996
-and 15079) and two map changes (E1M5 -> E1M3 -> E1M7, each ~500 frames after a
+A 16 000-frame run of that reported 41 damage events, two deaths (frames 8002
+and 15082) and two map changes (E1M5 -> E1M3 -> E1M7, each ~500 frames after a
 death, which is the next demo starting). That is every rule in the manifest except `stage_cleared`,
 which needs someone to reach an exit.
+
+Those frame numbers moved by six when `DEFAULT.CFG` was added — the deaths were
+at 7996 and 15079 before it. Nothing about the rules changed; initialising a
+sound device takes the boot a few frames longer, so the demos are a few frames
+further along when the stage's own clock starts. Worth knowing before reading a
+shift like that as a regression.
 
 ## Verifying the addresses
 

@@ -31,14 +31,20 @@ id = "base"
 # as C: and runs the [autoexec] in the dosbox.conf inside it, so the bundle is
 # one file with one hash and [rom] keeps working unchanged — one manifest per
 # base bundle, exactly as before.
-name = "DOOM shareware 1.9 (DOOM.EXE + DOOM1.WAD + dosbox.conf)"
+name = "DOOM shareware 1.9 (DOOM.EXE + DOOM1.WAD + dosbox.conf + DEFAULT.CFG)"
 path = "assets/ROMs/dos/doom-shareware-e1m1.zip"
 header = "none"
 # Members, not the container:
-#   DOOM.EXE  sha1 aa0668fae2f743ee5e3e5634ee42d3c8ace7d907
-#   DOOM1.WAD sha1 5b2e249b9c5133ec987b3ea77596381dc0d6bc1d
+#   DOOM.EXE    sha1 aa0668fae2f743ee5e3e5634ee42d3c8ace7d907
+#   DOOM1.WAD   sha1 5b2e249b9c5133ec987b3ea77596381dc0d6bc1d
+#   DEFAULT.CFG sha1 f193767bde9b9b36a27d14d23780b27db79a74e3
 # The archive's own sha1 depends on how it was zipped, so `sha1` is left unset
 # until asset-store can hash the members rather than the container (ADR 0018).
+#
+# DEFAULT.CFG is what makes the game audible. DOOM takes its sound card from
+# that file, SETUP.EXE normally writes it, and without one both devices default
+# to 0 = none — so a bundle of just the executable and the WAD boots correctly
+# and plays in silence. docs/games/doom.md has its contents byte for byte.
 
 [runner]
 kind = "libretro"
@@ -74,6 +80,18 @@ dosbox_pure_menu_time = "0"           # auto-start: no start menu in a race
 dosbox_pure_conf = "inside"           # honour the bundle's own dosbox.conf
 dosbox_pure_savestate = "on"          # `state` entry points need serialize
 dosbox_pure_on_screen_keyboard = "false"
+# The bundle's DEFAULT.CFG names a SoundBlaster at 220/7/1 in DOOM's own
+# numbering (snd_sbport 544 is 0x220). DOOM does not probe for the card; it
+# talks to the address it was told, so if the core's default ever moved the
+# game would go silent again with nothing to indicate why. Same list, same
+# reason as the cycles: a machine configuration the game is written against.
+dosbox_pure_sblaster_conf = "A220 I7 D1 H5"
+# `frontend` is the default and means "ask the frontend for a MIDI device".
+# There is no frontend MIDI interface here, so it resolves to nothing and the
+# core logs `MIDI: Opened device:none`. Music is the SoundBlaster's OPL
+# instead (snd_musicdevice 3), so say so rather than leaving it to look like
+# something that failed.
+dosbox_pure_midi = "disabled"
 
 [runner.libretro.memory]
 # The emulated physical address space. dosbox-pure answers

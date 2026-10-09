@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
+use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
 use session_api::{Presentable, SessionEvent, StageRunner};
 use session_libretro::libretro::{self, RETRO_MEMORY_IDS};
@@ -373,6 +373,12 @@ fn run() -> Result<(), String> {
         },
     )
     .map_err(|e| format!("cannot open window: {e}"))?;
+    // minifb defaults to 250 fps and sleeps out the remainder of 4 ms inside
+    // every `update`, which is its own idea of pacing on top of ours. This loop
+    // is paced by the audio queue (or by the wall clock without one), so that
+    // sleep is dead time between the last key we read and the frame it drives.
+    // 0 is minifb's spelling of "do no waiting".
+    window.set_target_fps(0);
 
     let mut pads = match controller {
         Controller::Pad(layout) => Some(input::Pads::new(layout)),
@@ -382,6 +388,7 @@ fn run() -> Result<(), String> {
     };
     let mut search = Search::new(args.search_width);
     let mut probe = args.probe.then(Probe::new);
+    let mut hotkeys = Hotkeys::new();
 
     runner.enter(&spec).map_err(|e| e.to_string())?;
     if let Some(p) = probe.as_mut() {
@@ -406,7 +413,46 @@ fn run() -> Result<(), String> {
             println!("[core] the game asked to shut down; stopping");
             break;
         }
-        for key in window.get_keys_pressed(KeyRepeat::No) {
+
+        // Wait for this frame's turn *before* reading anything, so that the
+        // keys below are the ones held when the frame runs rather than the
+        // ones held when the previous frame finished. The order used to be the
+        // other way round, which put the whole of this wait between a
+        // keypress and the frame it reached.
+        //
+        // Pace on the audio queue when we have one: it follows the sound card
+        // clock, which is what playback actually drains at. Wall-clock pacing
+        // drifts against it and underruns every few seconds.
+        match audio_target {
+            Some(target) => {
+                // Bounded: if the audio device stops draining (unplugged, or
+                // the stream died), fall through and keep running rather than
+                // spinning here forever.
+                let give_up_at = Instant::now() + frame_time * 4;
+                while audio::queued_frames() > target && Instant::now() < give_up_at {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            None => {
+                let now = Instant::now();
+                if next_deadline > now {
+                    std::thread::sleep(next_deadline - now);
+                } else {
+                    // Behind schedule; give up the lost time rather than
+                    // sprinting to catch up.
+                    next_deadline = now;
+                }
+                next_deadline += frame_time;
+            }
+        }
+
+        // Waiting does not deliver keystrokes; pumping the window is what
+        // does. Without this the keys read below would still be whatever the
+        // presenting `update` at the bottom of the previous iteration saw, and
+        // moving the wait above would have bought nothing.
+        window.update();
+
+        for key in hotkeys.pressed(&window) {
             match key {
                 Key::F1 => {
                     if let Err(e) = write_state(&runner, &state_path) {
@@ -482,32 +528,6 @@ fn run() -> Result<(), String> {
             None => input::keyboard_passthrough(&window),
         }
 
-        // Pace on the audio queue when we have one: it follows the sound card
-        // clock, which is what playback actually drains at. Wall-clock pacing
-        // drifts against it and underruns every few seconds.
-        match audio_target {
-            Some(target) => {
-                // Bounded: if the audio device stops draining (unplugged, or
-                // the stream died), fall through and keep running rather than
-                // spinning here forever.
-                let give_up_at = Instant::now() + frame_time * 4;
-                while audio::queued_frames() > target && Instant::now() < give_up_at {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-            None => {
-                let now = Instant::now();
-                if next_deadline > now {
-                    std::thread::sleep(next_deadline - now);
-                } else {
-                    // Behind schedule; give up the lost time rather than
-                    // sprinting to catch up.
-                    next_deadline = now;
-                }
-                next_deadline += frame_time;
-            }
-        }
-
         if probe.is_some() {
             let frame = runner.frame() + 1;
             if let Some((_, ram)) = runner.scan_window() {
@@ -552,6 +572,53 @@ fn run() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The harness's own keys — the ones [`input::keyboard_passthrough`] withholds
+/// from the game — and whether each was pressed since the last look.
+///
+/// minifb has `get_keys_pressed` for this, but it derives its edges from
+/// whenever the window was last pumped, and this loop pumps twice per frame:
+/// once after pacing, so the keys driving a frame are current, and once to
+/// present. An edge landing between the two would be erased by the next pump
+/// before anything read it, which is a save-state keypress silently doing
+/// nothing every other frame. Tracking held-state ourselves is independent of
+/// how often the window is pumped.
+struct Hotkeys {
+    held: [bool; HOTKEYS.len()],
+}
+
+/// F12 is not here: it quits, and the loop condition tests it as a level.
+const HOTKEYS: [Key; 11] = [
+    Key::F1,
+    Key::F2,
+    Key::F3,
+    Key::F4,
+    Key::F5,
+    Key::F6,
+    Key::F7,
+    Key::F8,
+    Key::F9,
+    Key::F10,
+    Key::F11,
+];
+
+impl Hotkeys {
+    fn new() -> Hotkeys {
+        Hotkeys { held: [false; HOTKEYS.len()] }
+    }
+
+    fn pressed(&mut self, window: &Window) -> Vec<Key> {
+        let mut edges = Vec::new();
+        for (key, held) in HOTKEYS.iter().zip(self.held.iter_mut()) {
+            let down = window.is_key_down(*key);
+            if down && !*held {
+                edges.push(*key);
+            }
+            *held = down;
+        }
+        edges
+    }
 }
 
 /// `--game dkc` and `--game manifests/dkc.toml` both work; a name without a

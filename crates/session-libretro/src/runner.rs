@@ -351,12 +351,15 @@ impl StageRunner for LibretroRunner {
                     RunnerError(format!("cannot read entry state {}: {e}", path.display()))
                 })?;
                 // A generated ROM is a different ROM to the one this state was
-                // captured on, and the core says so rather than guessing. Give
-                // it the answer it wants (ADR 0019) — in memory, so the file
-                // stays bound to the base ROM and stays the shipped asset.
+                // captured on. Whether that needs saying is the state format's
+                // business, not this one's: Mesen checks the pairing and is
+                // given the answer it wants (ADR 0019) — in memory, so the file
+                // stays bound to the base ROM and stays the shipped asset —
+                // while snes9x records no ROM identity and there is nothing to
+                // do. Both are reported; neither is assumed.
                 if self.rebind_state {
-                    match statebind::rebind(&data, &self.rom) {
-                        Ok(Some(rebound)) => {
+                    match statebind::reconcile(&data, &self.rom) {
+                        Ok(statebind::Pairing::Rebound(rebound)) => {
                             println!(
                                 "[state] rebound from ROM {}… to {}… ({}); \
                                  the file on disk is untouched",
@@ -366,8 +369,18 @@ impl StageRunner for LibretroRunner {
                             );
                             data = rebound.state;
                         }
-                        Ok(None) => {}
-                        Err(e) => return Err(RunnerError(format!("cannot rebind this state: {e}"))),
+                        Ok(statebind::Pairing::NoIdentity(format)) => {
+                            println!(
+                                "[state] a {format} state records no ROM identity, so this one \
+                                 restores onto a derived ROM unchanged"
+                            );
+                        }
+                        Ok(statebind::Pairing::Bound) => {}
+                        Err(e) => {
+                            return Err(RunnerError(format!(
+                                "cannot reconcile this state with the ROM it will run on: {e}"
+                            )))
+                        }
                     }
                 }
                 // No boot first, deliberately. A DOS state carries the whole
