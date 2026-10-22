@@ -66,12 +66,18 @@ its tests are golden hashes rather than a running game. See
 crate layout and the invariants, and `docs/adr/` for why the architecture is
 the way it is — start with `docs/adr/README.md`.
 
-What is not done: nothing yet *compares* the facts a manifest reports against
-the criteria it declares. That is `challenge-core`, and it does not exist. There
-is no scoring and no head-to-head, and the seed a generated challenge runs on
-still comes from a developer flag rather than from a session.
+`challenge-core` compares the facts a manifest reports against the criteria it
+declares: it judges a run, re-enters a time trial on death, deals a session's
+challenges, and places the players of one challenge. The harness drives it with
+`--challenge`.
+
+What is not done: there is no session yet — nothing deals a real one, scores
+across challenges, or decides how long a run may take — and no head-to-head.
+The seed a generated challenge runs on still comes from a developer flag rather
+than from a session.
 
 ```sh
 cargo run --release -p session-libretro --bin harness -- --game dkc  --stage jungle-hijinx
 cargo run --release -p session-libretro --bin harness -- --game doom --stage e1m1-hangar
+cargo run --release -p session-libretro --bin harness -- --game smb3 --challenge 1-1-time-trial --limit 60
 ```

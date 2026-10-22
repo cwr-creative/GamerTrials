@@ -197,10 +197,19 @@ Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
 What is *not* done, and the next things to settle:
 
-- **`challenge-core` does not exist.** `SessionEvent`s are produced, challenges
-  declare what completes them, and nothing yet compares the two. It also owes
-  the failure bound neither kind has (ADR 0017) and the crate split that moves
-  `[[challenge]]` parsing out of an adapter. This is the next thing.
+- **`challenge-core` judges a run, but nothing runs a session yet.** It
+  compares `SessionEvent`s against `complete_when`, re-enters a time trial on
+  death, deals a session's challenges from a seed, and places the players of
+  one challenge — and the harness drives it (`--challenge`, `--limit`). The
+  rules it judges by are ADR 0023, still `Proposed`. Still owed:
+  - *the bound's policy.* A run takes a frame limit and a forfeit; how long,
+    and whether per challenge or per round, is the session's to decide.
+  - *the crate split.* `[[challenge]]` is still parsed by `session-libretro`,
+    which is backwards under invariant 2 (ADR 0017).
+  - *scoring across challenges.* Ranking within one challenge is all the
+    documented rules say; points and totals are undecided.
+  - *`session-fake`*, now that there is a driver loop worth exercising without
+    a ROM.
 - **Doom is measured, not playtested.** Every rule has been seen firing against
   a real machine, but `stage_cleared` has not been watched through a human
   finishing E1M1 from the `state` entry. `docs/games/doom.md` lists what would

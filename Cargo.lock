@@ -121,6 +121,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "challenge-core"
+version = "0.1.0"
+dependencies = [
+ "session-api",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1001,6 +1008,7 @@ version = "0.1.0"
 name = "session-libretro"
 version = "0.1.0"
 dependencies = [
+ "challenge-core",
  "content-gen",
  "cpal",
  "gilrs",

@@ -3,9 +3,10 @@
 //! This is not the client. It is the tool a manifest is *authored* with — it
 //! prints every address it is watching and where that address came from, lets
 //! any of them be retargeted without a rebuild, and carries the two RAM
-//! discovery tools for finding one nobody has written down. What it does not
-//! do is score anything: it prints [`SessionEvent`]s, and what a run was worth
-//! is `challenge-core`'s question.
+//! discovery tools for finding one nobody has written down. It judges nothing
+//! itself: given `--challenge`, it hands what the runner reports to
+//! `challenge-core`, prints the verdict that comes back, and re-enters a time
+//! trial when told to. What a run was worth is never decided here.
 //!
 //! ```sh
 //! cargo run --release -p session-libretro -- --game dkc --stage jungle-hijinx
@@ -18,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
-use session_api::{Presentable, SessionEvent, StageRunner};
+use challenge_core::{Next, Run};
+use session_api::{ChallengeSpec, Presentable, SessionEvent, StageRunner, StageSpec};
 use session_libretro::libretro::{self, RETRO_MEMORY_IDS};
 use session_libretro::manifest::{Challenge, Controller, Manifest};
 use session_libretro::memory::{AddressSpace, Width};
@@ -44,8 +46,12 @@ GAME:
     --game <NAME>    Manifest to run: a name (looked up as manifests/<NAME>.toml)
                      or a path to a .toml
     --stage <ID>     Stage to enter at startup. Default: the first one declared
-    --challenge <ID> Challenge to run: enters its stage and prints its criteria.
-                     The harness still scores nothing
+    --challenge <ID> Challenge to run: enters its stage and judges the run with
+                     challenge-core. A time trial re-enters on death; the
+                     verdict is printed when the run ends. F2 starts a new run
+    --limit <SECS>   End a --challenge run as timed out after this long, across
+                     every attempt. Converted to frames at the game's rate, so
+                     it is the same number of frames on every machine
     --list-stages    Print the manifest's stages and exit
     --list-challenges
                      Print every challenge and what completes it, and exit
@@ -146,6 +152,7 @@ struct Args {
     core: Option<PathBuf>,
     roms: RomOverrides,
     seed: Option<u64>,
+    limit: Option<f64>,
     state: Option<PathBuf>,
     rebind_state: bool,
     scale: usize,
@@ -210,10 +217,9 @@ fn run() -> Result<(), String> {
     // The entry point, chosen before the core is loaded so a bad --stage costs
     // nothing.
     //
-    // A challenge is only ever resolved to its stage here. The harness prints
-    // the criteria and then ignores them: judging a run against them needs
-    // `challenge-core`, and an adapter that decided a run was won would be the
-    // exact mistake ADR 0017 exists to prevent.
+    // A challenge is resolved to its stage here and judged by `challenge-core`
+    // below. Nothing in this crate decides a run was won: an adapter that did
+    // would be the exact mistake ADR 0017 exists to prevent.
     let (stage, challenge): (_, Option<Challenge>) = match (&args.stage, &args.challenge) {
         (Some(id), _) => (
             manifest
@@ -235,7 +241,6 @@ fn run() -> Result<(), String> {
                 c.kind,
                 describe(&c.complete_when)
             );
-            println!("[challenge] the harness scores nothing; this is what challenge-core will read");
             let stage =
                 manifest.stage(&c.stage.0).expect("validation proved the stage exists").clone();
             (stage, Some(c))
@@ -264,6 +269,20 @@ fn run() -> Result<(), String> {
         session_api::EntryPoint::State(k) => PathBuf::from(&k.0),
         _ => PathBuf::from("state.bin"),
     };
+
+    if args.limit.is_some() && challenge.is_none() {
+        return Err("--limit bounds a run, and only --challenge starts one".into());
+    }
+    // What `challenge-core` reads: the challenge in shared vocabulary, and the
+    // limit already in frames. Taken before the runner owns the manifest.
+    let judged = challenge.as_ref().map(|c| {
+        let limit = args.limit.map(|s| manifest.framerate.frames(s));
+        if let Some(l) = limit {
+            println!("[run] limited to {l} frames across every attempt");
+        }
+        (manifest.challenge_spec(c), limit)
+    });
+    let mut run = judged.as_ref().map(start_run).transpose()?;
 
     print_addrs(&manifest);
     let space = manifest.libretro.space;
@@ -309,17 +328,33 @@ fn run() -> Result<(), String> {
     // rules get exercised against a real ROM in one command.
     if let Some(n) = args.frames {
         runner.enter(&spec).map_err(|e| e.to_string())?;
+        if let Some(r) = run.as_mut() {
+            r.enter();
+        }
         for _ in 0..n {
             if runner.shutdown_requested() {
                 println!("[core] the game asked to shut down at frame {}", runner.frame());
                 break;
             }
-            for event in runner.advance().map_err(|e| e.to_string())? {
+            let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
+            for event in &events {
                 if let SessionEvent::StageCleared { .. } | SessionEvent::StageExited { .. } = event
                 {
                     println!("{event}");
                 }
             }
+            if let Some(r) = run.as_mut() {
+                if judge(r, &mut runner, &spec, &events)? == Judged::Finished {
+                    break;
+                }
+            }
+        }
+        if let Some(r) = run.as_ref().filter(|r| r.result().is_none()) {
+            println!(
+                "[run] still going when --frames ran out: {} frames over {} attempt(s)",
+                r.frames(),
+                r.attempts()
+            );
         }
         println!("[done] {} frames", runner.frame());
         if let Some(path) = &args.capture {
@@ -391,6 +426,9 @@ fn run() -> Result<(), String> {
     let mut hotkeys = Hotkeys::new();
 
     runner.enter(&spec).map_err(|e| e.to_string())?;
+    if let Some(r) = run.as_mut() {
+        r.enter();
+    }
     if let Some(p) = probe.as_mut() {
         p.reset();
     }
@@ -462,6 +500,17 @@ fn run() -> Result<(), String> {
                 Key::F2 => {
                     if let Err(e) = runner.enter(&spec) {
                         eprintln!("[state] {e}");
+                    }
+                    // Neither kind allows a manual re-entry mid-run, so under
+                    // a challenge F2 starts a fresh run rather than an attempt
+                    // the judge would have to explain.
+                    if let Some(j) = judged.as_ref() {
+                        if let Some(old) = run.as_mut().filter(|r| r.result().is_none()) {
+                            println!("[run] abandoned: {}", old.forfeit());
+                        }
+                        let mut fresh = start_run(j)?;
+                        fresh.enter();
+                        run = Some(fresh);
                     }
                     if let Some(p) = probe.as_mut() {
                         // RAM has just been replaced wholesale. Without
@@ -540,16 +589,29 @@ fn run() -> Result<(), String> {
             }
         }
 
-        for event in runner.advance().map_err(|e| e.to_string())? {
+        let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
+        for event in &events {
             // The watcher has already printed a line for each of these; what is
-            // worth repeating is the verdict, because it is the one thing a
-            // playtester is looking for in the scroll.
+            // worth repeating is how the stage ended, because it is the one
+            // thing a playtester is looking for in the scroll.
             match event {
                 SessionEvent::StageCleared { frame } => println!("STAGE CLEARED at frame {frame}"),
                 SessionEvent::StageExited { frame, reason } => {
                     println!("STAGE EXITED at frame {frame} ({reason})")
                 }
                 _ => {}
+            }
+        }
+        // A finished run stays on screen, playable, until F2 starts another.
+        if let Some(r) = run.as_mut().filter(|r| r.result().is_none()) {
+            match judge(r, &mut runner, &spec, &events)? {
+                Judged::Reentered => {
+                    if let Some(p) = probe.as_mut() {
+                        p.reset();
+                    }
+                }
+                Judged::Finished => println!("[run] F2 starts another run"),
+                Judged::Continue => {}
             }
         }
 
@@ -618,6 +680,50 @@ impl Hotkeys {
             *held = down;
         }
         edges
+    }
+}
+
+/// A fresh run of the `--challenge`, limited if `--limit` was given.
+fn start_run((spec, limit): &(ChallengeSpec, Option<u64>)) -> Result<Run, String> {
+    let run = Run::new(spec.clone()).map_err(|e| e.to_string())?;
+    Ok(match limit {
+        Some(frames) => run.with_limit(*frames),
+        None => run,
+    })
+}
+
+#[derive(PartialEq)]
+enum Judged {
+    Continue,
+    Reentered,
+    Finished,
+}
+
+/// Hands one frame to `challenge-core` and does what it says. The harness
+/// carries out the verdict and never forms one.
+fn judge(
+    run: &mut Run,
+    runner: &mut LibretroRunner,
+    spec: &StageSpec,
+    events: &[SessionEvent],
+) -> Result<Judged, String> {
+    let frame = runner.frame();
+    match run.observe(frame, events) {
+        Next::Continue => Ok(Judged::Continue),
+        Next::Reenter => {
+            println!(
+                "[run] attempt {} ended at frame {frame}; re-entering with {} frames on the clock",
+                run.attempts(),
+                run.frames()
+            );
+            runner.enter(spec).map_err(|e| e.to_string())?;
+            run.enter();
+            Ok(Judged::Reentered)
+        }
+        Next::Finished(result) => {
+            println!("[run] {result}");
+            Ok(Judged::Finished)
+        }
     }
 }
 
@@ -953,6 +1059,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         core: None,
         roms: RomOverrides::new(),
         seed: None,
+        limit: None,
         state: None,
         rebind_state: false,
         scale: 3,
@@ -1006,6 +1113,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                 };
                 args.seed =
                     Some(parsed.map_err(|_| format!("--seed wants a number, got {v}"))?);
+            }
+            "--limit" => {
+                let v = value("--limit")?;
+                let secs: f64 =
+                    v.parse().map_err(|_| format!("--limit wants seconds, got {v}"))?;
+                if !(secs > 0.0) {
+                    return Err(format!("--limit must be more than zero seconds, got {v}"));
+                }
+                args.limit = Some(secs);
             }
             "--state" => args.state = Some(PathBuf::from(value("--state")?)),
             "--rebind-state" => args.rebind_state = true,

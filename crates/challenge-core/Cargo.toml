@@ -1,0 +1,17 @@
+[package]
+name = "challenge-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# What a run was worth. Reads `SessionEvent`s against a `ChallengeSpec` and
+# produces the verdict, deals a session's challenges from the library, and
+# orders the players who ran one (ADR 0006, ADR 0017).
+#
+# Pure, and the dependency list is how that is kept true (invariant 1): the
+# vocabulary it reads, and nothing else. No adapter, no I/O, no clock, no RNG
+# crate. A thing this crate needs to know arrives as an argument.
+
+[dependencies]
+session-api = { path = "../session-api" }

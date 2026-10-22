@@ -64,8 +64,9 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0020 | Carry alternative ROMs as patches against the base, and let a stage name one | Accepted |
 | 0021 | Savestates are generated based on instructions from manifests, superseding 0019 | Rejected |
 | 0022 | Instead of 0021, savestates are rebound based on instructions from manifests | Rejected |
+| 0023 | Judge a run per attempt, end an attempt at a death, and let the session bound it | Proposed |
 
-0003, 0013, 0014, 0015, 0016, 0017, 0018, 0019 and 0020 are written up; 0003 is
+0003, 0013, 0014, 0015, 0016, 0017, 0018, 0019, 0020 and 0023 are written up; 0003 is
 the exemplar. Fill in the rest as you implement each area; an unwritten ADR is
 fine, a wrong one is not.
 

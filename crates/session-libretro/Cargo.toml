@@ -17,6 +17,12 @@ session-api = { path = "../session-api" }
 # ADR 0020). The dependency goes this way and never the other: `content-gen`
 # has no idea an emulator exists.
 content-gen = { path = "../content-gen" }
+# For the harness binary only, which is wiring rather than the adapter: it
+# feeds what the runner reports to `challenge-core` and carries out the verdict.
+# The library half of this crate must never use it — an adapter that judged a
+# run is the mistake ADR 0017 exists to prevent. The dependency points the
+# allowed way: core still knows nothing of this crate (invariant 1).
+challenge-core = { path = "../challenge-core" }
 
 libloading = "0.8"   # load the libretro core ourselves (ADR 0001)
 minifb = "0.27"      # window + framebuffer blit + keyboard

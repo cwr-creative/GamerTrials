@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/content-gen", "crates/session-api", "crates/session-libretro"]
+members = [
+    "crates/challenge-core",
+    "crates/content-gen",
+    "crates/session-api",
+    "crates/session-libretro",
+]
 
 [workspace.package]
 edition = "2021"
