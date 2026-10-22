@@ -138,7 +138,7 @@ fn the_smb3_custom_challenges_carry_the_tables_the_docs_record() {
     assert_eq!(hack.from.as_deref(), Some("base"));
     assert_eq!(
         hack.sha1.as_deref(),
-        Some("55c34fe15e7753ee6781f7f5de477f5610fc3428")
+        Some("11f4851c7b4e8413432eed30b0a3760e5dcac638")
     );
     // A hack is a patch, never a file (ADR 0020).
     assert!(hack.path.is_none());

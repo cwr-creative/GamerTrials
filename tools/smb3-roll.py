@@ -33,7 +33,7 @@ HACK_ROM = "build/rom-hack1.nes"
 INES_HEADER = 0x10
 
 BASE_SHA1 = "6bd518e85eb46a4252af07910f61036e84b020d1"
-HACK_SHA1 = "55c34fe15e7753ee6781f7f5de477f5610fc3428"
+HACK_SHA1 = "11f4851c7b4e8413432eed30b0a3760e5dcac638"
 
 # Sun Storm - W2_32 on the hack, entered from the World 1 map. Object list at
 # $C6BC. Three Angry Sun slots; the last one is fixed so the roll is 1-3 suns
@@ -71,9 +71,9 @@ NAMED_ROLLS = {
     },
 }
 NAMED_HASHES = {
-    "golden": "7b6989c1d511ade0a33a7e50aa035cade734d799",
-    "b": "10e69a037e821fea5a5a4c0822ff2ffe58bef4fe",
-    "max": "6333b57ff78e0bce43d8114d08279bbf93689918",
+    "golden": "33d3ebc2183122237e9105e0e39f0c40ce902002",
+    "b": "3153bf8dedcd541de3d802fc475638559a6b1d8e",
+    "max": "c7172e2cfb051f5411bb053f222dc3de57cbfe11",
 }
 
 OBJ_NAMES = {

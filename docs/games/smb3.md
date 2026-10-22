@@ -231,7 +231,7 @@ routing around it.
 | | sha1 | |
 |---|---|---|
 | base | `6bd518e85eb46a4252af07910f61036e84b020d1` | `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes` |
-| hack | `55c34fe15e7753ee6781f7f5de477f5610fc3428` | `assets/patches/smb3-rom-hack1.bps` applied to it |
+| hack | `11f4851c7b4e8413432eed30b0a3760e5dcac638` | `assets/patches/smb3-rom-hack1.bps` applied to it |
 
 The patch is BPS and carries the base's CRC32, so it refuses a different revision
 at apply time. No derived ROM is in the repo and none should be: the harness
@@ -391,13 +391,13 @@ both are worth knowing before this is playtested:
 
 Each is the hack with its seven rollable object-list bytes written — four of them
 actually differing in any given roll, since a slot may roll back to what it
-already held. The input is `55c34fe1…`, never the base ROM.
+already held. The input is `11f4851c…`, never the base ROM.
 
 | Roll | Suns | Bros | sha1 |
 |---|---|---|---|
-| `golden` | `BB AF AF` — two | `81 87 72 86` | `7b6989c1d511ade0a33a7e50aa035cade734d799` |
-| `b` | `BB BB AF` — one | `72 72 82 81` | `10e69a037e821fea5a5a4c0822ff2ffe58bef4fe` |
-| `max` | `AF AF AF` — three | `87 86 82 81` | `6333b57ff78e0bce43d8114d08279bbf93689918` |
+| `golden` | `BB AF AF` — two | `81 87 72 86` | `33d3ebc2183122237e9105e0e39f0c40ce902002` |
+| `b` | `BB BB AF` — one | `72 72 82 81` | `3153bf8dedcd541de3d802fc475638559a6b1d8e` |
+| `max` | `AF AF AF` — three | `87 86 82 81` | `c7172e2cfb051f5411bb053f222dc3de57cbfe11` |
 
 `golden` is `content-gen`'s first test and depends on none of the unresolved
 questions. `b` and `max` exist to prove more than one roll works: `b` is the
@@ -448,7 +448,7 @@ id = "hack1"
 name = "SMB3: Gamer Trials"
 from = "base"
 patch = "assets/patches/smb3-rom-hack1.bps"
-sha1 = "55c34fe15e7753ee6781f7f5de477f5610fc3428"
+sha1 = "11f4851c7b4e8413432eed30b0a3760e5dcac638"
 
 # Every existing [[stage]] also gained `rom = "base"` — twelve one-line changes
 # across the three manifests, which is what made this a breaking change.

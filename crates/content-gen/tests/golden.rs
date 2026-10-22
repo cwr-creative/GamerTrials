@@ -30,7 +30,7 @@ const PATCH: &str = "../../assets/patches/smb3-rom-hack1.bps";
 const DKC: &str = "../../assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc";
 
 const BASE_SHA1: &str = "6bd518e85eb46a4252af07910f61036e84b020d1";
-const HACK_SHA1: &str = "55c34fe15e7753ee6781f7f5de477f5610fc3428";
+const HACK_SHA1: &str = "11f4851c7b4e8413432eed30b0a3760e5dcac638";
 
 /// Reads an asset, or gives up on this test. A checkout without ROMs is the
 /// normal case for anyone who is not the person holding the dumps.
@@ -166,17 +166,17 @@ fn the_recorded_rolls_reproduce_their_recorded_hashes() {
         (
             "golden",
             [0xBB, 0xAF, 0xAF, 0x81, 0x87, 0x72, 0x86],
-            "7b6989c1d511ade0a33a7e50aa035cade734d799",
+            "33d3ebc2183122237e9105e0e39f0c40ce902002",
         ),
         (
             "b",
             [0xBB, 0xBB, 0xAF, 0x72, 0x72, 0x82, 0x81],
-            "10e69a037e821fea5a5a4c0822ff2ffe58bef4fe",
+            "3153bf8dedcd541de3d802fc475638559a6b1d8e",
         ),
         (
             "max",
             [0xAF, 0xAF, 0xAF, 0x87, 0x86, 0x82, 0x81],
-            "6333b57ff78e0bce43d8114d08279bbf93689918",
+            "c7172e2cfb051f5411bb053f222dc3de57cbfe11",
         ),
     ] {
         let art = table.apply(&hack, Console::Nes, &chosen(&table, &values)).unwrap();
