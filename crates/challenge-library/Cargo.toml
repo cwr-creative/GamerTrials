@@ -1,0 +1,22 @@
+[package]
+name = "challenge-library"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The challenge half of a manifest: which challenges a game offers, on which
+# stages, and what completes each (ADR 0017). Read by everything that deals or
+# judges — the server, and the client playing the server's half for solo play
+# (ADR 0009) — none of which may link an emulator to do it (ADR 0024).
+#
+# The dependency list is held to that. No `session-libretro`: this crate is
+# what an adapter depends on, never the reverse (invariant 2). No
+# `content-gen`: a patch table is a generator's business, and the server only
+# needs to know that a challenge is generated, not how. No I/O: the caller
+# reads the file and hands over the text.
+
+[dependencies]
+session-api = { path = "../session-api" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

@@ -11,42 +11,43 @@
 //! unknown fields, because the failure mode a permissive loader produces is a
 //! detector that silently never fires from a typo in a key name, and that looks
 //! exactly like a wrong address.
+//!
+//! It reads the *runner* half. The challenge half — `[game]`, the stages by
+//! name, every `[[challenge]]` and its criteria — is `challenge-library`'s,
+//! because the server deals and judges from it and must not link an emulator
+//! to do so (ADR 0009, ADR 0024). [`Manifest::parse`] runs that crate first and
+//! builds on what it returns, so the client and the server cannot read one file
+//! into two different libraries. What stays here from `[[challenge]]` is the
+//! `patch_slot` table, because building it needs `content-gen`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use challenge_library::Library;
 use content_gen::{Console, GroupDoc, PatchSlotDoc, PatchTable};
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 use session_api::{
-    AssetKey, ChallengeId, ChallengeKind, ChallengeSpec, Completion, EntryPoint, Framerate, GameId,
-    StageId, StageSpec,
+    AssetKey, ChallengeId, ChallengeSpec, EntryPoint, Framerate, GameId, StageId, StageSpec,
 };
 
 use crate::memory::{AddressSpace, Endian, Prefer, Width};
 
-/// The only schema version this build understands. A manifest states its own,
-/// and one from the future is refused rather than half-read.
-///
-/// 2 was ADR 0017: `[[challenge]]` became the contributor-authored definition of
-/// a challenge, and `[[stage]]` lost `challenges` and `endurance`.
-///
-/// 3 is ADR 0020 and ADR 0015, and it is the version at which content stopped
-/// being a single file this manifest was written against. `[rom]` became an
-/// array with an `id`, so a hand-authored hack can live beside the base ROM it
-/// patches; `[[stage]]` gained a required `rom`, because an entry state is bound
-/// to one piece of content's bytes; and `[[challenge]]` may now carry the
-/// `patch_slot` table `content-gen` rolls from. The first two are a breaking
-/// change to every manifest — twelve stages, one line each — which is why this
-/// is a version rather than an addition.
-pub const SCHEMA_VERSION: u32 = 3;
+// One manifest, one version, one fact vocabulary: all three are the challenge
+// half's, and re-exported so that nothing here can drift from them.
+pub use challenge_library::{Challenge, Emit, SCHEMA_VERSION};
 
 // ------------------------------------------------------------- raw documents
 
+/// Every top-level table, so that an unknown one is still refused here. The
+/// ones `challenge-library` owns are skipped rather than read twice.
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 struct Doc {
-    schema_version: u32,
-    game: GameDoc,
+    #[serde(rename = "schema_version")]
+    _schema_version: IgnoredAny,
+    #[serde(rename = "game")]
+    _game: IgnoredAny,
     /// One or more. Exactly one omits `from` and is the base; the rest are
     /// derivations from it (ADR 0020).
     rom: Vec<RomDoc>,
@@ -66,18 +67,7 @@ struct Doc {
     #[serde(default)]
     stage: Vec<StageDoc>,
     #[serde(default)]
-    challenge: Vec<ChallengeDoc>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-struct GameDoc {
-    id: String,
-    title: String,
-    console: String,
-    #[serde(default)]
-    region: Option<String>,
-    framerate: f64,
+    challenge: Vec<ChallengeGenDoc>,
 }
 
 /// One piece of content this game runs on: the base ROM, or a hack derived from
@@ -286,9 +276,11 @@ struct TriggerDoc {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 struct StageDoc {
-    id: String,
-    #[serde(default)]
-    name: Option<String>,
+    #[serde(rename = "id")]
+    _id: IgnoredAny,
+    /// Read by `challenge-library`, which owns what a stage is called.
+    #[serde(default, rename = "name")]
+    _name: Option<IgnoredAny>,
     /// Which `[[rom]]` this stage runs on. Required in every manifest,
     /// including one that declares a single ROM: nothing about a stage is
     /// inferred, for the same reason nothing about a challenge is (ADR 0017,
@@ -311,54 +303,20 @@ struct EntryDoc {
     named: Option<String>,
 }
 
-/// What a player is actually dealt: one stage, one kind, and the criteria that
-/// complete it. Contributors author every one they want to exist; nothing is
-/// inferred from a stage (ADR 0017).
+/// The one part of a `[[challenge]]` this loader reads: ADR 0015's patch table.
+/// Everything else in the table, and whether these keys appear together, is
+/// `challenge-library`'s — which is also why this is not `deny_unknown_fields`.
+///
+/// The shapes are `content-gen`'s own, deserialized straight into its types.
+/// The engine that reads a slot owns what a slot looks like; the challenge
+/// half only decides where in a manifest one may appear.
 #[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-struct ChallengeDoc {
+struct ChallengeGenDoc {
     id: String,
-    #[serde(default)]
-    name: Option<String>,
-    stage: String,
-    kind: String,
-    complete_when: CompleteWhenDoc,
-    #[serde(default)]
-    note: Option<String>,
-
-    // ADR 0015's generated-challenge keys, read by `content-gen` and by nothing
-    // else. The three go together: a table with no version cannot be bumped
-    // without silently invalidating every artifact derived from it, and a
-    // version with no table describes a generator that does nothing.
-    //
-    // The shapes are `content-gen`'s own, deserialized straight into its types.
-    // The engine that reads a slot owns what a slot looks like; this loader only
-    // decides where in a manifest one may appear.
     #[serde(default)]
     patch_slot: Vec<PatchSlotDoc>,
     #[serde(default)]
     group: BTreeMap<String, GroupDoc>,
-    #[serde(default)]
-    generator_version: Option<i64>,
-}
-
-/// A conjunction over the facts this manifest's own rules emit. Every criterion
-/// present must hold; there is no `any`, no negation, no arithmetic.
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-struct CompleteWhenDoc {
-    #[serde(default)]
-    cleared: Option<bool>,
-    /// Authored in seconds, converted to frames at load. Seconds never leave
-    /// this module.
-    #[serde(default)]
-    survive_seconds: Option<f64>,
-    #[serde(default)]
-    enemies_defeated: Option<i64>,
-    #[serde(default)]
-    items_collected: BTreeMap<String, i64>,
-    #[serde(default)]
-    objectives: Vec<String>,
 }
 
 // -------------------------------------------------------------- loaded shape
@@ -404,24 +362,6 @@ pub enum Edge {
     BitsSet,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Emit {
-    StageCleared,
-    StageExited(session_api::ExitReason),
-    Died,
-    Damaged,
-    EnemyDefeated,
-    Item(String),
-    /// A named milestone the game announced — a boss dying, a gate opening.
-    /// Still a fact: whether reaching it completes anything is a challenge's
-    /// `complete_when`, not this rule's business.
-    Objective(String),
-    /// Logged, and nothing more. For a signal worth watching during a playtest
-    /// that is not yet known to mean anything — a powerup change, a pipe
-    /// transit — where inventing a `SessionEvent` for it would be a guess.
-    Note,
-}
-
 #[derive(Clone, Debug)]
 pub struct Rule {
     pub name: Option<String>,
@@ -464,28 +404,6 @@ pub struct Stage {
     pub rom: String,
     pub entry: EntryPoint,
     pub note: Option<String>,
-}
-
-/// One challenge this game offers. Several may share a `stage`: the same place
-/// with different criteria is different challenges, and that is the normal case.
-#[derive(Clone, Debug)]
-pub struct Challenge {
-    pub id: ChallengeId,
-    pub name: String,
-    pub stage: StageId,
-    pub kind: ChallengeKind,
-    /// Already in frames wherever a duration is involved. A manifest may author
-    /// seconds; the conversion happens at load so that seconds never reach a
-    /// `SessionEvent` or the wire.
-    pub complete_when: Completion,
-    pub note: Option<String>,
-    /// How this challenge's ROM is derived from the one its stage names, if it
-    /// is derived at all (ADR 0013, ADR 0015). Validated at load; rolled by
-    /// `content-gen` when a stage is prepared, from a seed the session issues.
-    ///
-    /// A vanilla challenge has `None` here, and that is the ordinary case: the
-    /// stage's ROM is what runs.
-    pub patch_table: Option<PatchTable>,
 }
 
 /// Everything the libretro adapter needs about a game that is not an address
@@ -609,7 +527,13 @@ pub struct Manifest {
     pub rules: Vec<Rule>,
     pub reset_on: Vec<Trigger>,
     pub stages: Vec<Stage>,
+    /// As `challenge-library` read them: the same values a server deals from.
     pub challenges: Vec<Challenge>,
+    /// How each generated challenge's ROM is derived from the one its stage
+    /// names (ADR 0013, ADR 0015), by challenge. Validated at load; rolled by
+    /// `content-gen` when a stage is prepared, from a seed the session issues.
+    /// A vanilla challenge has no entry, and that is the ordinary case.
+    patch_tables: BTreeMap<ChallengeId, PatchTable>,
     /// Where it was read from, for messages and for resolving relative paths.
     pub source: PathBuf,
 }
@@ -622,9 +546,13 @@ impl Manifest {
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// The challenge half first, then the runner half on top of it. The
+    /// version, `[game]`, stage names and every criterion are checked once, by
+    /// the crate the server also uses.
     pub fn parse(text: &str, source: &Path) -> Result<Manifest, String> {
+        let library = Library::parse(text)?;
         let doc: Doc = toml::from_str(text).map_err(|e| e.to_string())?;
-        doc.into_manifest(source)
+        doc.into_manifest(source, library)
     }
 
     pub fn watch(&self, name: &str) -> Option<&WatchDef> {
@@ -672,6 +600,11 @@ impl Manifest {
         stage: &'a StageId,
     ) -> impl Iterator<Item = &'a Challenge> {
         self.challenges.iter().filter(move |c| &c.stage == stage)
+    }
+
+    /// The table a generated challenge rolls from, or `None` for a vanilla one.
+    pub fn patch_table(&self, challenge: &ChallengeId) -> Option<&PatchTable> {
+        self.patch_tables.get(challenge)
     }
 
     /// Applies one `--addr name=ADDR[:width]` override, or unsets the field.
@@ -734,17 +667,10 @@ impl Manifest {
         StageSpec { game: self.id.clone(), stage: stage.id.clone(), content, entry }
     }
 
-    /// The challenge as `challenge-core` will see it. Nothing adapter-shaped
-    /// crosses: a spec names a stage, never the state file behind it.
+    /// The challenge as `challenge-core` will see it — built by
+    /// `challenge-library`, so it is the spec a server would build too.
     pub fn challenge_spec(&self, challenge: &Challenge) -> ChallengeSpec {
-        ChallengeSpec {
-            id: challenge.id.clone(),
-            name: challenge.name.clone(),
-            game: self.id.clone(),
-            stage: challenge.stage.clone(),
-            kind: challenge.kind,
-            complete_when: challenge.complete_when.clone(),
-        }
+        challenge.spec(&self.id)
     }
 
     /// Resolves a path a manifest names.
@@ -906,17 +832,6 @@ fn as_u32(v: i64, what: &str) -> Result<u32, String> {
     u32::try_from(v).map_err(|_| format!("{what} is out of range, got {v}"))
 }
 
-/// For the tail of a "you named X, this manifest has Y" error. An empty set is
-/// the interesting case — it means the rule was never written, not that the
-/// name was misspelled — so it says so rather than trailing off after a colon.
-fn list_or_none(names: &BTreeSet<String>) -> String {
-    if names.is_empty() {
-        "none at all".to_string()
-    } else {
-        names.iter().cloned().collect::<Vec<_>>().join(", ")
-    }
-}
-
 fn edge(
     kind: &str,
     value: Option<i64>,
@@ -985,13 +900,9 @@ fn test(d: &TestDoc, what: &str) -> Result<Test, String> {
 }
 
 impl Doc {
-    fn into_manifest(self, source: &Path) -> Result<Manifest, String> {
-        if self.schema_version != SCHEMA_VERSION {
-            return Err(format!(
-                "schema_version {} is not {SCHEMA_VERSION}, which is what this build reads",
-                self.schema_version
-            ));
-        }
+    /// `library` is the challenge half of the same text, already validated —
+    /// including the schema version.
+    fn into_manifest(self, source: &Path, library: Library) -> Result<Manifest, String> {
         if self.runner.kind != "libretro" {
             return Err(format!(
                 "runner.kind is `{}`; this crate only runs `libretro` games",
@@ -1138,46 +1049,16 @@ impl Doc {
                 None => format!("rule #{} (on `{}`)", i + 1, r.field),
             };
             known(&r.field, &what)?;
-            let emit = match r.emit.as_str() {
-                "stage_cleared" => Emit::StageCleared,
-                "stage_exited" => Emit::StageExited(match r.reason.as_deref() {
-                    Some("death") => session_api::ExitReason::Death,
-                    Some("quit") => session_api::ExitReason::Quit,
-                    None | Some("unknown") => session_api::ExitReason::Unknown,
-                    Some(other) => {
-                        return Err(format!(
-                            "{what}: reason `{other}`; try death, quit or unknown"
-                        ))
-                    }
-                }),
-                "died" => Emit::Died,
-                "damaged" => Emit::Damaged,
-                "enemy_defeated" => Emit::EnemyDefeated,
-                "item" => Emit::Item(
-                    r.item
-                        .clone()
-                        .ok_or_else(|| format!("{what}: emit `item` needs an `item` name"))?,
-                ),
-                "objective" => Emit::Objective(r.objective.clone().ok_or_else(|| {
-                    format!("{what}: emit `objective` needs an `objective` name")
-                })?),
-                "note" => Emit::Note,
-                other => {
-                    return Err(format!(
-                        "{what}: unknown emit `{other}`; try stage_cleared, stage_exited, \
-                         died, damaged, enemy_defeated, item, objective, note"
-                    ))
-                }
-            };
-            if r.reason.is_some() && !matches!(emit, Emit::StageExited(_)) {
-                return Err(format!("{what}: only `stage_exited` takes a `reason`"));
-            }
-            if r.item.is_some() && !matches!(emit, Emit::Item(_)) {
-                return Err(format!("{what}: only `item` takes an `item` name"));
-            }
-            if r.objective.is_some() && !matches!(emit, Emit::Objective(_)) {
-                return Err(format!("{what}: only `objective` takes an `objective` name"));
-            }
+            // Parsed by the same function `challenge-library` already ran over
+            // this rule, so it cannot fail here; it is called again rather than
+            // carried across so that the challenge half holds no rule state.
+            let emit = Emit::parse(
+                &r.emit,
+                r.reason.as_deref(),
+                r.item.as_deref(),
+                r.objective.as_deref(),
+                &what,
+            )?;
             let guard = match &r.guard {
                 Some(g) => {
                     known(&g.field, &format!("{what} guard"))?;
@@ -1227,13 +1108,8 @@ impl Doc {
             });
         }
 
-        let framerate = Framerate(self.game.framerate);
-        if !(1.0..=1000.0).contains(&self.game.framerate) {
-            return Err(format!(
-                "game.framerate {} is not a plausible rate",
-                self.game.framerate
-            ));
-        }
+        let game = library.game;
+        let framerate: Framerate = game.framerate;
         let boot_frames = match lr.boot_seconds {
             None => 0,
             Some(secs) if secs.is_finite() && secs >= 0.0 => framerate.frames(secs),
@@ -1245,11 +1121,14 @@ impl Doc {
             }
         };
 
-        let roms = build_roms(&self.rom, &self.game.console)?;
+        let roms = build_roms(&self.rom, &game.console)?;
 
+        // The same `[[stage]]` array, read twice: `challenge-library` has the
+        // ids and names, in order and without duplicates, and this has where
+        // each one runs and how it is entered.
         let mut stages = Vec::new();
-        for s in &self.stage {
-            let what = format!("stage `{}`", s.id);
+        for (named, s) in library.stages.into_iter().zip(&self.stage) {
+            let what = format!("stage `{}`", named.id.0);
             let entry = match (&s.entry.state, &s.entry.named) {
                 (Some(p), None) => EntryPoint::State(AssetKey(p.clone())),
                 (None, Some(n)) => EntryPoint::Named(n.clone()),
@@ -1264,215 +1143,38 @@ impl Doc {
                     roms.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
                 ));
             }
-            if stages.iter().any(|x: &Stage| x.id.0 == s.id) {
-                return Err(format!("{what}: declared twice"));
-            }
             stages.push(Stage {
-                id: StageId(s.id.clone()),
-                name: s.name.clone().unwrap_or_else(|| s.id.clone()),
+                id: named.id,
+                name: named.name,
                 rom: s.rom.clone(),
                 entry,
                 note: s.note.clone(),
             });
         }
 
-        // What this manifest's rules can actually announce. A `complete_when`
-        // is checked against these, because a criterion naming a fact nothing
-        // emits is a challenge nobody can ever complete — which looks exactly
-        // like a wrong address, and is the same failure `deny_unknown_fields`
-        // exists to prevent, one level up.
-        let mut emits_cleared = false;
-        let mut emits_enemy = false;
-        let mut item_names: BTreeSet<String> = BTreeSet::new();
-        let mut objective_names: BTreeSet<String> = BTreeSet::new();
-        for r in &rules {
-            match &r.emit {
-                Emit::StageCleared => emits_cleared = true,
-                Emit::EnemyDefeated => emits_enemy = true,
-                Emit::Objective(n) => {
-                    objective_names.insert(n.clone());
-                }
-                Emit::Item(name) => {
-                    // A per-bit rule names one item per bit — `kong_letter`
-                    // becomes `kong_letter:K` — so those are the names a
-                    // criterion has to use. Without labels the watcher falls
-                    // back to the bit number, and there are only ever 32.
-                    if r.edge == Edge::BitsSet {
-                        if r.bit_labels.is_empty() {
-                            item_names.extend((0..32).map(|b| format!("{name}:{b}")));
-                        } else {
-                            item_names
-                                .extend(r.bit_labels.iter().map(|l| format!("{name}:{l}")));
-                        }
-                    } else {
-                        item_names.insert(name.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut challenges: Vec<Challenge> = Vec::new();
-        for c in &self.challenge {
-            let what = format!("challenge `{}`", c.id);
-            if challenges.iter().any(|x| x.id.0 == c.id) {
-                return Err(format!("{what}: declared twice"));
-            }
-            let kind = match c.kind.as_str() {
-                "time_trial" => ChallengeKind::TimeTrial,
-                "survival" => ChallengeKind::Survival,
-                other => {
-                    return Err(format!("{what}: kind `{other}`; try time_trial or survival"))
-                }
-            };
-            let stage = stages.iter().find(|s| s.id.0 == c.stage).ok_or_else(|| {
-                format!("{what}: stage `{}` is not declared by this manifest", c.stage)
-            })?;
-
-            let w = &c.complete_when;
-            let mut complete_when = Completion {
-                cleared: w.cleared.unwrap_or(false),
-                survive_frames: None,
-                enemies_defeated: None,
-                items_collected: BTreeMap::new(),
-                objectives: w.objectives.clone(),
-            };
-
-            if w.cleared == Some(false) {
-                // `cleared = false` reads as a criterion and is not one. Saying
-                // so beats silently dropping it.
-                return Err(format!(
-                    "{what}: `cleared = false` is not a criterion; remove the key instead"
-                ));
-            }
-            if complete_when.cleared && !emits_cleared {
-                return Err(format!(
-                    "{what}: complete_when.cleared, but no [[rule]] emits `stage_cleared`"
-                ));
-            }
-
-            if let Some(secs) = w.survive_seconds {
-                if kind != ChallengeKind::Survival {
-                    return Err(format!(
-                        "{what}: survive_seconds is a survival criterion; \"survive {secs} \
-                         seconds fastest\" is not something a time trial can be won at"
-                    ));
-                }
-                // Infinity and NaN both reach `Framerate::frames`, where the
-                // cast saturates instead of failing, so they are caught here.
-                if !secs.is_finite() || secs <= 0.0 {
-                    return Err(format!(
-                        "{what}: survive_seconds must be a positive number of seconds, got {secs}"
-                    ));
-                }
-                // Seconds in, frames out, once, here.
-                complete_when.survive_frames = Some(framerate.frames(secs));
-            }
-
-            if let Some(n) = w.enemies_defeated {
-                let n = as_u32(n, &format!("{what}: enemies_defeated"))?;
-                if n == 0 {
-                    return Err(format!("{what}: enemies_defeated must be at least 1"));
-                }
-                if !emits_enemy {
-                    return Err(format!(
-                        "{what}: complete_when.enemies_defeated, but no [[rule]] emits \
-                         `enemy_defeated`"
-                    ));
-                }
-                complete_when.enemies_defeated = Some(n);
-            }
-
-            for (item, count) in &w.items_collected {
-                let n = as_u32(*count, &format!("{what}: items_collected.{item}"))?;
-                if n == 0 {
-                    return Err(format!("{what}: items_collected.{item} must be at least 1"));
-                }
-                if !item_names.contains(item) {
-                    return Err(format!(
-                        "{what}: no [[rule]] emits item `{item}`; this manifest emits {}",
-                        list_or_none(&item_names)
-                    ));
-                }
-                complete_when.items_collected.insert(item.clone(), n);
-            }
-
-            for objective in &complete_when.objectives {
-                if !objective_names.contains(objective) {
-                    return Err(format!(
-                        "{what}: no [[rule]] emits objective `{objective}`; this manifest \
-                         emits {}",
-                        list_or_none(&objective_names)
-                    ));
-                }
-            }
-
-            if complete_when.is_empty() {
-                return Err(format!(
-                    "{what}: complete_when has no criteria, so nothing can ever complete it"
-                ));
-            }
-
-            // A generated challenge, if this is one. The three keys go together
-            // or not at all: a table with no version cannot be corrected without
-            // silently invalidating every artifact ever derived from it (ADR
-            // 0013), and a version with no table describes a generator that does
-            // nothing.
-            let patch_table = match (c.patch_slot.is_empty(), c.generator_version) {
-                (true, None) => {
-                    if !c.group.is_empty() {
-                        return Err(format!(
-                            "{what}: declares [challenge.group.*] and no patch_slot; a group \
-                             is a pool that slots draw from"
-                        ));
-                    }
-                    None
-                }
-                (false, None) => {
-                    return Err(format!(
-                        "{what}: declares patch_slot and no generator_version. A generated \
-                         challenge is identified by (base rom, generator, version, seed), so \
-                         the version is what a correction to the table bumps rather than \
-                         editing it in place (ADR 0013)"
-                    ))
-                }
-                (true, Some(_)) => {
-                    return Err(format!(
-                        "{what}: declares generator_version and no patch_slot, so nothing is \
-                         generated. Remove it, or say what rolls"
-                    ))
-                }
-                (false, Some(v)) => {
-                    // The console decides the header a slot's offset is counted
-                    // from and the checksum a substitution has to repair — and
-                    // for a DOS bundle it decides that there is no such thing.
-                    let console = Console::parse(&self.game.console)
-                        .map_err(|e| format!("{what}: {e}"))?;
-                    console.is_derivable().map_err(|e| format!("{what}: {e}"))?;
-                    let version = as_u32(v, &format!("{what}: generator_version"))?;
-                    Some(
-                        PatchTable::build(&c.id, version, &c.patch_slot, &c.group)
-                            .map_err(|e| format!("{what}: {e}"))?,
-                    )
-                }
-            };
-
-            challenges.push(Challenge {
-                id: ChallengeId(c.id.clone()),
-                name: c.name.clone().unwrap_or_else(|| stage.name.clone()),
-                stage: stage.id.clone(),
-                kind,
-                complete_when,
-                note: c.note.clone(),
-                patch_table,
-            });
+        // The one part of a challenge that is the adapter's: how a generated
+        // one's ROM is derived. `challenge-library` has already checked that a
+        // table and a version come together; building the table needs
+        // `content-gen`, which the challenge half must never link.
+        let mut patch_tables = BTreeMap::new();
+        for (c, g) in library.challenges.iter().zip(&self.challenge) {
+            let Some(version) = c.generator_version else { continue };
+            let what = format!("challenge `{}`", c.id.0);
+            // The console decides the header a slot's offset is counted from
+            // and the checksum a substitution has to repair — and for a DOS
+            // bundle it decides that there is no such thing.
+            let console = Console::parse(&game.console).map_err(|e| format!("{what}: {e}"))?;
+            console.is_derivable().map_err(|e| format!("{what}: {e}"))?;
+            let table = PatchTable::build(&g.id, version, &g.patch_slot, &g.group)
+                .map_err(|e| format!("{what}: {e}"))?;
+            patch_tables.insert(c.id.clone(), table);
         }
 
         Ok(Manifest {
-            id: GameId(self.game.id),
-            title: self.game.title,
-            console: self.game.console,
-            region: self.game.region,
+            id: game.id,
+            title: game.title,
+            console: game.console,
+            region: game.region,
             framerate,
             roms,
             libretro: LibretroConfig {
@@ -1495,7 +1197,8 @@ impl Doc {
             rules,
             reset_on,
             stages,
-            challenges,
+            challenges: library.challenges,
+            patch_tables,
             source: source.to_path_buf(),
         })
     }
@@ -1704,26 +1407,6 @@ entry = { state = "a.state" }
     }
 
     #[test]
-    fn durations_authored_in_seconds_are_stored_as_frames() {
-        let m = with_challenge(
-            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { survive_seconds = 30 }\n",
-        )
-        .unwrap();
-        assert_eq!(m.challenge("c").unwrap().complete_when.survive_frames, Some(1800));
-    }
-
-    /// "Survive 30 seconds fastest" is not something anyone can win, so the
-    /// criterion belongs to survival alone.
-    #[test]
-    fn survive_seconds_on_a_time_trial_is_refused() {
-        let e = with_challenge(
-            "id = \"c\"\nkind = \"time_trial\"\ncomplete_when = { survive_seconds = 30 }\n",
-        )
-        .unwrap_err();
-        assert!(e.contains("survival criterion"), "{e}");
-    }
-
-    #[test]
     fn an_entry_needs_exactly_one_kind() {
         let text =
             format!("{MINIMAL}\n[[stage]]\nid = \"s\"\nrom = \"base\"\nentry = {{ }}\n");
@@ -1732,132 +1415,40 @@ entry = { state = "a.state" }
 
     // ------------------------------------------------------------ challenges
 
+    /// The challenge half is `challenge-library`'s and is tested there. What
+    /// matters here is that its refusals still stop this loader, and that what
+    /// it returns is what the manifest carries.
     #[test]
-    fn a_challenge_defaults_its_name_to_the_stages() {
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}name = \"The Stage\"\n\
-             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
-             complete_when = {{ cleared = true }}\n"
-        );
-        let m = parse(&text).unwrap();
-        assert_eq!(m.challenge("c").unwrap().name, "The Stage");
-        assert_eq!(m.challenge("c").unwrap().kind, ChallengeKind::Survival);
-    }
+    fn the_challenge_half_is_read_by_challenge_library() {
+        let ok = with_challenge(
+            "id = \"c\"
+kind = \"survival\"
+complete_when = { survive_seconds = 30 }
+",
+        )
+        .unwrap();
+        assert_eq!(ok.challenge("c").unwrap().complete_when.survive_frames, Some(1800));
+        assert_eq!(ok.challenge("c").unwrap().name, "s");
 
-    /// Several challenges on one stage is the normal case, not an edge case.
-    #[test]
-    fn one_stage_can_carry_several_challenges() {
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}\
-             [[challenge]]\nid = \"tt\"\nstage = \"s\"\nkind = \"time_trial\"\n\
-             complete_when = {{ cleared = true }}\n\
-             [[challenge]]\nid = \"sv\"\nstage = \"s\"\nkind = \"survival\"\n\
-             complete_when = {{ cleared = true }}\n"
-        );
-        let m = parse(&text).unwrap();
-        let s = StageId("s".into());
-        let on: Vec<&str> = m.challenges_on(&s).map(|c| c.id.0.as_str()).collect();
-        assert_eq!(on, vec!["tt", "sv"]);
-    }
-
-    #[test]
-    fn a_challenge_naming_an_undeclared_stage_is_refused() {
-        let e = with_challenge(
-            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n",
-        );
-        assert!(e.is_ok(), "the control case must pass: {e:?}");
-
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}\
-             [[challenge]]\nid = \"c\"\nstage = \"nope\"\nkind = \"survival\"\n\
-             complete_when = {{ cleared = true }}\n"
-        );
-        assert!(parse(&text).unwrap_err().contains("is not declared"));
-    }
-
-    #[test]
-    fn two_challenges_cannot_share_an_id() {
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}\
-             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
-             complete_when = {{ cleared = true }}\n\
-             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"time_trial\"\n\
-             complete_when = {{ cleared = true }}\n"
-        );
-        assert!(parse(&text).unwrap_err().contains("declared twice"));
-    }
-
-    #[test]
-    fn a_challenge_with_no_criteria_is_refused() {
-        let e = with_challenge("id = \"c\"\nkind = \"survival\"\ncomplete_when = { }\n")
+        let e = with_challenge("id = \"c\"
+kind = \"survival\"
+complete_when = { }
+")
             .unwrap_err();
         assert!(e.contains("no criteria"), "{e}");
     }
 
-    /// The point of validating criteria at load: a criterion naming a fact this
-    /// manifest never emits is a challenge nobody can ever complete, and it
-    /// looks exactly like a wrong address.
+    /// Both halves read one `[[stage]]` array; the names come from one and the
+    /// entry points from the other, and they must not come apart.
     #[test]
-    fn a_criterion_over_a_fact_nothing_emits_is_refused() {
-        let text = format!(
-            "{MINIMAL}\n[[stage]]\nid = \"s\"\nrom = \"base\"\nentry = {{ state = \"a.state\" }}\n\
-             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
-             complete_when = {{ cleared = true }}\n"
-        );
-        let e = parse(&text).unwrap_err();
-        assert!(e.contains("no [[rule]] emits `stage_cleared`"), "{e}");
-
-        let e = with_challenge(
-            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { enemies_defeated = 3 }\n",
-        )
-        .unwrap_err();
-        assert!(e.contains("`enemy_defeated`"), "{e}");
-
-        let e = with_challenge(
-            "id = \"c\"\nkind = \"survival\"\ncomplete_when = { objectives = [\"boss\"] }\n",
-        )
-        .unwrap_err();
-        assert!(e.contains("none at all"), "{e}");
-    }
-
-    /// A per-bit item rule names one item per bit, so `kong_letter:K` is the
-    /// name a criterion has to use — and the bare `kong_letter` is not one.
-    #[test]
-    fn per_bit_items_are_known_by_their_labelled_names() {
-        let rule = "[[rule]]\nfield = \"lives\"\nedge = \"bits_set\"\n\
-                    bit_labels = [\"K\", \"O\"]\nemit = \"item\"\nitem = \"letter\"\n";
-        let ok = format!(
-            "{MINIMAL}{CLEARABLE}{rule}\
-             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
-             [challenge.complete_when]\nitems_collected = {{ \"letter:K\" = 1 }}\n"
-        );
-        let m = parse(&ok).unwrap();
-        assert_eq!(m.challenge("c").unwrap().complete_when.items_collected["letter:K"], 1);
-
-        let bad = ok.replace("\"letter:K\"", "\"letter\"");
-        let e = parse(&bad).unwrap_err();
-        assert!(e.contains("letter:K, letter:O"), "{e}");
-    }
-
-    #[test]
-    fn an_objective_rule_makes_an_objective_criterion_legal() {
-        let rule = "[[rule]]\nfield = \"lives\"\nedge = \"enters\"\nvalue = 0\n\
-                    emit = \"objective\"\nobjective = \"boss-defeated\"\n";
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}{rule}\
-             [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"time_trial\"\n\
-             complete_when = {{ objectives = [\"boss-defeated\"] }}\n"
-        );
+    fn a_stage_keeps_its_name_and_its_entry() {
+        let text = format!("{MINIMAL}{CLEARABLE}name = \"The Stage\"
+");
         let m = parse(&text).unwrap();
-        assert_eq!(m.challenge("c").unwrap().complete_when.objectives, vec!["boss-defeated"]);
-    }
-
-    #[test]
-    fn an_objective_emit_needs_a_name() {
-        let text = format!(
-            "{MINIMAL}\n[[rule]]\nfield = \"lives\"\nedge = \"decreases\"\nemit = \"objective\"\n"
-        );
-        assert!(parse(&text).unwrap_err().contains("needs an `objective` name"));
+        let s = m.stage("s").unwrap();
+        assert_eq!(s.name, "The Stage");
+        assert_eq!(s.entry, EntryPoint::State(AssetKey("a.state".into())));
+        assert_eq!(s.rom, "base");
     }
 
     // -------------------------------------------------- generated challenges
@@ -1875,7 +1466,7 @@ entry = { state = "a.state" }
              values = {{ pool = [0x72, 0x72, 0x81] }}\n"
         );
         let m = parse(&text).unwrap();
-        let t = m.challenge("reroll").unwrap().patch_table.as_ref().unwrap();
+        let t = m.patch_table(&ChallengeId("reroll".into())).unwrap();
         assert_eq!(t.generator_id, "reroll");
         assert_eq!(t.generator_version, 2);
         assert_eq!(t.slots.len(), 1);
@@ -1891,34 +1482,7 @@ entry = { state = "a.state" }
     fn a_vanilla_challenge_has_no_patch_table() {
         let m = with_challenge("id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n")
             .unwrap();
-        assert!(m.challenge("c").unwrap().patch_table.is_none());
-    }
-
-    /// The version is what a correction to a table bumps, so a table without one
-    /// is a generator whose output cannot be told apart from its predecessor's
-    /// (ADR 0013).
-    #[test]
-    fn patch_slots_without_a_generator_version_are_refused() {
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}\
-             [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
-             complete_when = {{ cleared = true }}\n\
-             [[challenge.patch_slot]]\noffset = 0x10\nwidth = \"u8\"\n\
-             values = {{ pool = [1] }}\n"
-        );
-        let e = parse(&text).unwrap_err();
-        assert!(e.contains("generator_version"), "{e}");
-    }
-
-    #[test]
-    fn a_generator_version_with_nothing_to_roll_is_refused() {
-        let text = format!(
-            "{MINIMAL}{CLEARABLE}\
-             [[challenge]]\nid = \"reroll\"\nstage = \"s\"\nkind = \"time_trial\"\n\
-             complete_when = {{ cleared = true }}\ngenerator_version = 1\n"
-        );
-        let e = parse(&text).unwrap_err();
-        assert!(e.contains("nothing is generated"), "{e}");
+        assert!(m.patch_table(&ChallengeId("c".into())).is_none());
     }
 
     /// The engine's own validation is reached rather than duplicated here: a

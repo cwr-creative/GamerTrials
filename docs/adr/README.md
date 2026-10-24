@@ -127,5 +127,12 @@ was caught, and a scripted-input language (`--script "right:44 shift+up:400"`)
 for driving a game without a human. Neither is needed to author a manifest and
 both would have to be rebuilt.
 
+**The crate split 0017 owes is done.** `challenge-library` reads the
+challenge half of a manifest — `[game]`, stage names, `[[challenge]]`, and what
+each rule emits — with no emulator and no `content-gen`, and
+`session-libretro`'s loader parses through it before reading the runner half.
+0017, 0009 and 0024 still describe the split as owed; they are left as written
+because ADRs are append-only.
+
 **0012** — Records *when* to abstract, not *what*. Included because the reasoning
 generalises: build the second implementation before extracting the interface.

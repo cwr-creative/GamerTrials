@@ -128,6 +128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "challenge-library"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "session-api",
+ "toml",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1009,6 +1018,7 @@ name = "session-libretro"
 version = "0.1.0"
 dependencies = [
  "challenge-core",
+ "challenge-library",
  "content-gen",
  "cpal",
  "gilrs",

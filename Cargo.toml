@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/challenge-core",
+    "crates/challenge-library",
     "crates/content-gen",
     "crates/session-api",
     "crates/session-libretro",

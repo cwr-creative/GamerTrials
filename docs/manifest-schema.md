@@ -9,8 +9,15 @@ A manifest is everything the platform knows about one game: the content it runs
 on, how to read it, and every challenge a player can be dealt in it. Adding a
 libretro game is adding one of these files and nothing else — no Rust, no
 rebuild (invariant 5), and that now covers a ROM hack and a generated challenge
-as well. The loader (`crates/session-libretro/src/manifest.rs`) is the authority
-on what parses; this document is the authority on what the fields *mean*.
+as well. Two loaders read it, and between them they are the authority on what
+parses; this document is the authority on what the fields *mean*.
+`crates/challenge-library` reads the challenge half — `schema_version`,
+`[game]`, every `[[challenge]]`, each `[[stage]]`'s `id` and `name`, and what
+each `[[rule]]` emits — and is what the server deals and judges from (ADR 0009).
+`crates/session-libretro/src/manifest.rs` parses through it first and reads the
+runner half itself: `[[rom]]`, `[runner]`, `[watch]`, the rest of `[[stage]]`
+and `[[rule]]`, and a challenge's `patch_slot` table. One file, one version:
+the split is in who reads what, not in what a contributor writes.
 
 One manifest per **base ROM**, and a manifest may carry ROMs *derived* from that
 base — hand-authored hacks, each declared as a BPS patch against it — with every

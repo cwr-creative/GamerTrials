@@ -12,6 +12,10 @@ publish = false
 
 [dependencies]
 session-api = { path = "../session-api" }
+# The challenge half of a manifest — `[game]`, stage names, `[[challenge]]` and
+# the emit vocabulary — which the server reads too (ADR 0009, ADR 0024). The
+# loader here parses through it first and reads only the runner half itself.
+challenge-library = { path = "../challenge-library" }
 # Stage prep applies a contributor's BPS patch and rolls a generated
 # challenge's patch slots before a runner ever sees the bytes (ADR 0015,
 # ADR 0020). The dependency goes this way and never the other: `content-gen`

@@ -87,6 +87,7 @@ These are settled. Do not violate them without writing a superseding ADR.
 | Crate | Role |
 |---|---|
 | `challenge-core` | Stage sequencing, scoring, rules. Pure. |
+| `challenge-library` | The challenge half of a manifest: `[game]`, stage names, every `[[challenge]]`, and the emit vocabulary its criteria are checked against. What the server deals and judges from (ADR 0009/0024). No emulator, no `content-gen`, no I/O; `session-libretro` parses through it. |
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
 | `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
@@ -99,7 +100,9 @@ These are settled. Do not violate them without writing a superseding ADR.
 
 - Manifests are TOML, one per *base* ROM hash, versioned with a `schema_version`
   field, and live in `manifests/`. The schema is `docs/manifest-schema.md`;
-  `session-libretro` is the authority on what parses. Generated artifacts get no
+  `challenge-library` is the authority on what parses in the challenge half
+  (`schema_version`, `[game]`, `[[challenge]]`, stage names, what a rule emits)
+  and `session-libretro` on the runner half. Generated artifacts get no
   manifest of their own; they are identified by their derivation key (ADR 0013).
   A hand-authored hack gets no manifest of its own either — it is a `[[rom]]`
   beside the base it patches, and every stage names which ROM it runs on (ADR
@@ -201,11 +204,11 @@ What is *not* done, and the next things to settle:
   compares `SessionEvent`s against `complete_when`, re-enters a time trial on
   death, deals a session's challenges from a seed, and places the players of
   one challenge — and the harness drives it (`--challenge`, `--limit`). The
-  rules it judges by are ADR 0023, still `Proposed`. Still owed:
+  rules it judges by are ADR 0023, still `Proposed`. `challenge-library` reads
+  the challenge half of every manifest without an emulator, so the server that
+  will deal and judge has what it needs to read (ADR 0009/0024). Still owed:
   - *the bound's policy.* A run takes a frame limit and a forfeit; how long,
     and whether per challenge or per round, is the session's to decide.
-  - *the crate split.* `[[challenge]]` is still parsed by `session-libretro`,
-    which is backwards under invariant 2 (ADR 0017).
   - *scoring across challenges.* Ranking within one challenge is all the
     documented rules say; points and totals are undecided.
   - *`session-fake`*, now that there is a driver loop worth exercising without

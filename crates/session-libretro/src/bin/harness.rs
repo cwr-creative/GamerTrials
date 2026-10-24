@@ -797,7 +797,7 @@ fn print_challenges(m: &Manifest) {
             c.stage.0,
             describe(&c.complete_when)
         );
-        if let Some(t) = &c.patch_table {
+        if let Some(t) = m.patch_table(&c.id) {
             // A generated challenge is a challenge that additionally says how
             // its ROM is derived (ADR 0015). Worth printing: it is the
             // difference between playing a level and playing a roll of one.

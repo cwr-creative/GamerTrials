@@ -24,7 +24,7 @@ in [`docs/games/`](../../docs/games).
 |---|---|
 | `libretro` | raw FFI plus a `Core` that loads a core DLL directly (ADR 0001) |
 | `memory` | an address in a manifest → a byte, per the console's routing rules |
-| `manifest` | TOML in, validated `Manifest` out. The authority on what parses |
+| `manifest` | TOML in, validated `Manifest` out. The authority on the runner half; the challenge half is read through `challenge-library` |
 | `prep` | manifest → bytes: the player's dump, a hack applied to it, a seeded roll |
 | `watch` | the interpreter: markers, rules, edges, attempts |
 | `runner` | `LibretroRunner`: `StageRunner` + `Presentable` |

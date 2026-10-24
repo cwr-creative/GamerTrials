@@ -125,7 +125,7 @@ pub fn content_for(
     let mut rebindable = false;
 
     // Step 3: the roll, if this challenge is a generated one.
-    let table = challenge.and_then(|c| c.patch_table.as_ref());
+    let table = challenge.and_then(|c| manifest.patch_table(&c.id));
     if table.is_none() && seed.is_some() {
         // A seed that decides nothing is someone expecting content to vary. Say
         // so rather than running the same ROM for every seed they try.

@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use session_api::{ChallengeKind, EntryPoint, ExitReason, SessionEvent, StageId};
+use session_api::{ChallengeId, ChallengeKind, EntryPoint, ExitReason, SessionEvent, StageId};
 
 use crate::manifest::{Controller, Manifest};
 use crate::memory::{Endian, Prefer, Width};
@@ -147,7 +147,7 @@ fn the_smb3_custom_challenges_carry_the_tables_the_docs_record() {
     // Sun Storm: three slots, the last of them fixed so the roll is one to three
     // suns rather than zero to three.
     for id in ["sun-storm-survival", "sun-storm-time-trial"] {
-        let t = m.challenge(id).unwrap().patch_table.as_ref().expect("generated");
+        let t = m.patch_table(&ChallengeId(id.into())).expect("generated");
         let offsets: Vec<usize> = t.slots.iter().map(|s| s.offset).collect();
         assert_eq!(offsets, vec![0xC6BD, 0xC6C0, 0xC6C3], "{id}");
         assert_eq!(
@@ -160,7 +160,7 @@ fn the_smb3_custom_challenges_carry_the_tables_the_docs_record() {
     // Bro Roulette: four independent slots over a multiset, so the roll is a coin
     // flip and then an even choice among four bros.
     for id in ["bro-roulette-time-trial", "bro-roulette-survival"] {
-        let t = m.challenge(id).unwrap().patch_table.as_ref().expect("generated");
+        let t = m.patch_table(&ChallengeId(id.into())).expect("generated");
         let offsets: Vec<usize> = t.slots.iter().map(|s| s.offset).collect();
         assert_eq!(offsets, vec![0xC6CB, 0xC6CE, 0xC6D1, 0xC6D4], "{id}");
         for slot in &t.slots {
