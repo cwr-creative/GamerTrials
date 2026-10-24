@@ -92,8 +92,8 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. |
-| `app-client` | Tauri shell, overlay, wiring. |
-| `server` | Lobby, clock sync, telemetry aggregation. Never runs a game. |
+| `app-client` | Tauri shell, overlay, wiring. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). |
+| `server` | Rust (ADR 0024). Lobby, clock sync, telemetry aggregation, and the authority on a session: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 
 ## Conventions
@@ -226,8 +226,8 @@ What is *not* done, and the next things to settle:
   `manifests/smb3.toml`. Nobody has yet *played* one to its criteria, and the
   entry states were captured on the map for a reason worth confirming
   (`docs/games/smb3.md`). The seed also has nowhere to come from: ADR 0013 has
-  the server issuing it and the clients comparing artifact hashes, and neither
-  exists — today it is a `--seed` flag on the harness.
+  the server issuing it and comparing the artifact hashes clients report, and
+  neither exists — today it is a `--seed` flag on the harness.
 - **A rolled quantity still cannot reach `complete_when`.** It is static TOML
   with no arithmetic and nothing that can name the seed, so a generator cannot
   roll a count a criterion then refers to. Both SMB3 challenges avoid it by

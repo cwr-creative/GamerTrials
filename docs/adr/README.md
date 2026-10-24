@@ -50,9 +50,9 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0006 | Adopt ports and adapters with a pure challenge core | Accepted |
 | 0007 | Reject the nested "frankenstein ROM" approach | Accepted |
 | 0008 | Treat decomp/recomp PC ports as external-process adapters | Superseded by 0018 |
-| 0009 | Server owns challenge sequencing; run it in-process for solo play | Accepted |
+| 0009 | Server owns challenge sequencing and judging; run it in-process for solo play | Accepted |
 | 0010 | Game manifests are TOML data in git, not code | Accepted |
-| 0011 | Client in Rust + Tauri; server in Go or TypeScript; SQLite storage | Accepted |
+| 0011 | Client in Rust + Tauri; server in Go or TypeScript; SQLite storage | Superseded by 0024 |
 | 0012 | Extract the StageRunner interface in Phase 2, not Phase 1 | Accepted |
 | 0013 | Generate stage content on each client from a server-issued seed | Proposed |
 | 0014 | Detect stage completion and death by watching emulator RAM | Accepted |
@@ -65,8 +65,9 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0021 | Savestates are generated based on instructions from manifests, superseding 0019 | Rejected |
 | 0022 | Instead of 0021, savestates are rebound based on instructions from manifests | Rejected |
 | 0023 | Judge a run per attempt, end an attempt at a death, and let the session bound it | Proposed |
+| 0024 | Write the server in Rust, superseding 0011 | Accepted |
 
-0003, 0013, 0014, 0015, 0016, 0017, 0018, 0019, 0020 and 0023 are written up; 0003 is
+0003, 0009, 0013, 0014, 0015, 0016, 0017, 0018, 0019, 0020, 0023 and 0024 are written up; 0003 is
 the exemplar. Fill in the rest as you implement each area; an unwritten ADR is
 fine, a wrong one is not.
 
@@ -126,6 +127,17 @@ about if either is ever wanted again: PNG screenshots on a headless run
 was caught, and a scripted-input language (`--script "right:44 shift+up:400"`)
 for driving a game without a human. Neither is needed to author a manifest and
 both would have to be rebuilt.
+
+**0009 was written up late, and its title grew.** The index entry named
+sequencing only; building `challenge-core` showed that judging and ranking had
+the same question of *where* hanging over them, and the written ADR answers
+both. Nothing that had been decided under the old title changed.
+
+**0011** — *Superseded by 0024, and never written.* What it held: a Rust +
+Tauri client, a Go or TypeScript server, SQLite storage. 0024 keeps the client
+and the storage and moves the server to Rust, because the server judges with
+`challenge-core` (0009) and a second implementation of the judge in another
+language would drift from the first.
 
 **The crate split 0017 owes is done.** `challenge-library` reads the
 challenge half of a manifest — `[game]`, stage names, `[[challenge]]`, and what
