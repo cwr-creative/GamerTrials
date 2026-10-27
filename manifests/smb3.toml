@@ -92,6 +92,23 @@ note = "Data Crystal: stomp kills only - fireball/shell/star do not touch it"
 at = 0x7D9C
 note = "verified: card count, in cartridge WRAM. Needs the core's memory map"
 
+# Player_Score is three bytes, most significant first, holding the displayed
+# score / 10 — the trailing zero on screen is not stored. A watch cannot read
+# it as one number: there is no 3-byte width, and byte order belongs to the
+# address space, which is little-endian. Nothing here needs the number itself.
+# The rule below needs only to see the low byte move.
+[watch.score_hi]
+at = 0x0715
+note = "disassembly: Player_Score, high byte"
+
+[watch.score_mid]
+at = 0x0716
+note = "disassembly: Player_Score, middle byte"
+
+[watch.score_lo]
+at = 0x0717
+note = "verified: Player_Score, low byte. A 100-point stomp took it 00 -> 0A"
+
 # $0727 holds world - 1, and a manifest does no arithmetic on purpose — a rule
 # language that could add one to a byte would be a rule language that could do
 # anything. A label says what the byte means instead, which is the same
@@ -160,6 +177,23 @@ field = "stomp_counter"
 edge = "increases"
 emit = "enemy_defeated"
 log = "stomps only; a fireball or shell kill does not count here"
+
+# One event per award of points, whatever earned it. `changes` rather than
+# `increases`, for two reasons. `increases` counts the delta, so a 100-point
+# stomp would count ten. And this byte wraps every 2,560 points, and an award
+# that carries reads as a decrease, which `increases` would miss. Every award
+# SMB3 makes (10, 50, 100 ... 8000) moves the low byte, since none is a
+# multiple of 2,560, and the score never falls during a stage.
+#
+# Points are not kills. A coin is 50, a broken brick 10, and the time bonus
+# counts down into the score after the card. A criterion may read this as
+# "an enemy was defeated" only on a stage where nothing else awards points.
+# The time bonus never counts, because the card has already ended the attempt.
+[[rule]]
+field = "score_lo"
+edge = "changes"
+emit = "count"
+counter = "score_award"
 
 [[rule]]
 field = "powerup"
@@ -388,15 +422,23 @@ values = { pool = [0xAF] }
 # slot that was not replaced rolled to nothing, and the four stomps the criteria
 # need were unreachable unless every slot rolled a bro. Playtested to its
 # criteria on version 2.
+#
+# A kill is four awards of points, not four stomps. $05F4 counts stomps only,
+# and a bro is as likely to die some other way. Points stand in for kills here
+# on the claim that nothing else on this stage awards them: no powerups and no
+# items. A coin or a broken brick added to the level would count as a kill.
+# Changing the criteria rolls nothing differently, so generator_version does
+# not move. Playtested on seed 9: three goombas stomped, and the hammer bro
+# killed from below with a block, which $05F4 never saw.
 
 [[challenge]]
 id = "bro-roulette-time-trial"
 name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "time_trial"
-complete_when = { enemies_defeated = 4 }
+complete_when = { counts = { score_award = 4 } }
 generator_version = 2
-note = "the clock stops on the fourth stomp; reaching the card is not required"
+note = "the clock stops on the fourth kill, by any means; reaching the card is not required"
 
 [[challenge.patch_slot]]
 offset = 0xC6CB                        # goomba 1, column $02
@@ -423,7 +465,7 @@ id = "bro-roulette-survival"
 name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "survival"
-complete_when = { enemies_defeated = 4 }
+complete_when = { counts = { score_award = 4 } }
 generator_version = 2
 
 [[challenge.patch_slot]]

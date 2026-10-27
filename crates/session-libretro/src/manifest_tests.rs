@@ -483,6 +483,32 @@ fn smb3_now_reports_damage_and_stomps_as_events() {
     assert!(g.tick(4).contains(&SessionEvent::EnemyDefeated { frame: 4, count: 2 }));
 }
 
+/// One award of points is one count, however many points it was and whether
+/// or not the low byte wrapped. Bro Roulette's criteria count kills this way.
+#[test]
+fn smb3_counts_each_award_of_points_once() {
+    let award = |frame| SessionEvent::Counted { frame, counter: "score_award".into(), count: 1 };
+    let mut g = mario();
+    g.put("score_lo", 0xF0);
+    g.tick(1);
+    // 100 points is ten in the byte, and still one award.
+    g.put("score_lo", 0xFA);
+    assert!(g.tick(2).contains(&award(2)));
+    // 200 more carries into the middle byte, so the low byte falls.
+    g.put("score_lo", 0x0E);
+    g.put("score_mid", 0x01);
+    assert!(g.tick(3).contains(&award(3)));
+    // Nothing awarded, nothing counted.
+    assert!(!g.tick(4).iter().any(|e| matches!(e, SessionEvent::Counted { .. })));
+
+    let m = smb3();
+    for id in ["bro-roulette-time-trial", "bro-roulette-survival"] {
+        let c = &m.challenge(id).unwrap().complete_when;
+        assert_eq!(c.counts.get("score_award"), Some(&4), "{id}");
+        assert_eq!(c.counts.get(session_api::ENEMY_DEFEATED), None, "{id}: not stomps");
+    }
+}
+
 // ===================================================================== DKC
 
 const SNES_WRAM: usize = 0x2_0000;

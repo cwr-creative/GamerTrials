@@ -80,6 +80,7 @@ the `note` beside it.
 | `$0510` | pipe transit countdown; rising from 0 means entering/exiting a pipe | documented (Data Crystal), not yet playtested |
 | `$05F4` | stomp counter; increments on a stomp kill only — fireball/shell/star kills don't touch it | documented (Data Crystal), not yet playtested |
 | `$7D9C` | card count; increments when Mario is awarded a card at a level's end | verified (playtested) |
+| `$0715`-`$0717` | `Player_Score`, most significant byte first, holding the displayed score ÷ 10 | disassembly (`smb3.asm`); the low byte playtested: a 100-point stomp took `$0717` from `00` to `0A`, six frames after `$05F4` moved |
 
 Any of them can be retargeted or switched off without a rebuild:
 
@@ -368,9 +369,24 @@ Two things have not changed and should not be silently revisited:
   Here the enemy *count* is fixed by the level and only the *types* roll, so the
   question does not arise — but it is still the first real boundary a generator
   hits, and the next challenge that wants a rolled count will hit it.
-- **"Kill all four" means "stomp all four."** `enemy_defeated` comes from `$05F4`,
-  which counts stomps only; a fireball, shell or star kill does not advance it.
-  Accepted for now, and better SMB3 detectors are owed anyway (ADR 0014).
+- **A kill is an award of points, not a stomp.** This used to be
+  `enemies_defeated = 4`, read from `$05F4`, and `$05F4` counts stomps only. It
+  is now `counts = { score_award = 4 }`: one count each time `$0717`, the low
+  byte of the score, changes. Every way of killing a bro pays points, and on
+  this stage nothing else does. That is the stage's property, not the rule's.
+  A coin pays 50, a broken brick 10, and the time bonus counts down into the
+  score after the card (by which point the card has already ended the attempt).
+  So `score_award` is a kill count here and nowhere else.
+
+  `changes` is load-bearing. `increases` reports the delta, so a 100-point
+  stomp would count ten. The low byte also wraps every 2,560 points, and an
+  award that carries into `$0716` reads as a fall. No award SMB3 makes is a
+  multiple of 2,560 and the score never falls mid-stage, so one award is
+  exactly one change. Two kills paid on the same frame would be one change.
+  Playtested on seed 9 (three goombas, one hammer bro): three stomps and one
+  bro killed from below with a block, completed in 2,791 frames over three
+  attempts. `$05F4` did not move for the block kill. The old criteria would
+  have left that run one kill short.
 
 Two notes on the level as authored. Neither is the patch table's business, and
 both are worth knowing when playing it:
@@ -519,9 +535,9 @@ id = "bro-roulette-time-trial"
 name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "time_trial"
-complete_when = { enemies_defeated = 4 }
+complete_when = { counts = { score_award = 4 } }
 generator_version = 2
-note = "the clock stops on the fourth stomp; reaching the card is not required"
+note = "the clock stops on the fourth kill, by any means; reaching the card is not required"
 
 [[challenge.patch_slot]]
 offset = 0xC6CB                      # goomba 1, column $02
@@ -548,7 +564,7 @@ id = "bro-roulette-survival"
 name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "survival"
-complete_when = { enemies_defeated = 4 }
+complete_when = { counts = { score_award = 4 } }
 generator_version = 2
 
 # ... the same four patch_slot entries again.
@@ -556,7 +572,7 @@ generator_version = 2
 
 Both levels award an end-level card, so `cleared = true` is available on either —
 which the base-ROM tables could not offer, and which is why neither challenge
-needs `survive_seconds` any more. `enemies_defeated = 4` is on Bro Roulette
+needs `survive_seconds` any more. Four score awards are on Bro Roulette
 because that is what the challenge is about; swap in `cleared = true` if it should
 be a race to the card instead.
 
