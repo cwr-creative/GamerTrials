@@ -1,0 +1,24 @@
+[package]
+name = "session-fake"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Scripted telemetry: a `StageRunner` that reports the facts a test wrote down
+# instead of the ones an emulator's RAM produced. Every integration test runs
+# on it; a test that needs a ROM is a manual test.
+#
+# An adapter like `session-libretro`, and held to the same rules: it depends on
+# the shared vocabulary and nothing else (invariant 2), and it never judges —
+# it reports facts, and `challenge-core` decides what they were worth.
+
+[dependencies]
+session-api = { path = "../session-api" }
+
+# For the session tests only, which play the part of the driver: deal from the
+# real manifests, judge every player's run, place them. The library half of
+# this crate must never use either.
+[dev-dependencies]
+challenge-core = { path = "../challenge-core" }
+challenge-library = { path = "../challenge-library" }

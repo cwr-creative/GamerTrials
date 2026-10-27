@@ -221,8 +221,15 @@ What is *not* done, and the next things to settle:
     and whether per challenge or per round, is the session's to decide.
   - *scoring across challenges.* Ranking within one challenge is all the
     documented rules say; points and totals are undecided.
-  - *`session-fake`*, now that there is a driver loop worth exercising without
-    a ROM.
+  - *the driver loop itself.* `session-fake` exists: a `StageRunner` that plays
+    a list of scripted attempts, one per entry, keeping the real runner's
+    contract (frame 1 first, `StageEntered` never seen, other content
+    refused). `crates/session-fake/tests/session.rs` deals sessions from the
+    real manifests and plays several players in lockstep, so the rules above
+    are tested end to end without a ROM. But the loop those tests drive with
+    — enter, advance, observe, re-enter — is test code, and so is what it
+    does when a runner fails (forfeit). It belongs to `app-client`, and moves
+    there when that crate exists.
 - **`asset-store` will need to hash a bundle's members, not the container.** A
   DOS game is a zip, and its hash depends on how it was zipped (ADR 0018). That
   work also gates DOS hacks: a BPS patch against a zip is meaningless, so a PWAD

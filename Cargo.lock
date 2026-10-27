@@ -1014,6 +1014,15 @@ name = "session-api"
 version = "0.1.0"
 
 [[package]]
+name = "session-fake"
+version = "0.1.0"
+dependencies = [
+ "challenge-core",
+ "challenge-library",
+ "session-api",
+]
+
+[[package]]
 name = "session-libretro"
 version = "0.1.0"
 dependencies = [

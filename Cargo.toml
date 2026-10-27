@@ -5,6 +5,7 @@ members = [
     "crates/challenge-library",
     "crates/content-gen",
     "crates/session-api",
+    "crates/session-fake",
     "crates/session-libretro",
 ]
 

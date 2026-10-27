@@ -69,7 +69,9 @@ the way it is — start with `docs/adr/README.md`.
 `challenge-core` compares the facts a manifest reports against the criteria it
 declares: it judges a run, re-enters a time trial on death, deals a session's
 challenges, and places the players of one challenge. The harness drives it with
-`--challenge`.
+`--challenge`, and `session-fake` drives it without a ROM: a `StageRunner` that
+reports scripted facts instead of RAM, which the integration tests use to play
+whole multiplayer sessions dealt from the real manifests.
 
 What is not done: there is no session yet — nothing deals a real one, scores
 across challenges, or decides how long a run may take — and no head-to-head.
