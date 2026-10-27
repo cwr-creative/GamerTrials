@@ -194,6 +194,9 @@ describe. Confirmed byte-identical across three cold boots.
 | `gamemap` | `0x0038A3E8` | current map number | **`IDCLEV12` diff: the only 1→2 in 16 MB** |
 | `gameepisode` | `0x0038A3F8` | current episode | `1` throughout episode 1 |
 | `gamestate` | `0x0038A3F4` | 0 level, **1 intermission**, 3 demoscreen | title↔demo diff, then confirmed by finishing E1M1 |
+| `killcount` | `0x00389F44` | `players[0].killcount` | **predicted from `player_t`, then moved on every kill and nothing else** |
+| `itemcount` | `0x00389F48` | `players[0].itemcount` | predicted; moved on two armor bonuses, not on two ammo clips |
+| `secretcount` | `0x00389F4C` | `players[0].secretcount` | predicted; moved on entering a secret area |
 
 ### Why this is a `player_t` and not a coincidence
 
@@ -238,6 +241,58 @@ intermission draws. That is the frame a time trial's clock should stop on (ADR
 
 `GS_FINALE` (2) is still unseen. It only occurs at the end of an episode and
 nothing depends on it.
+
+### The level statistics: predicted, then played
+
+`killcount`, `itemcount` and `secretcount` are what the tally screen reports,
+and they sit in `player_t` straight after `refire`. With the struct pinned at
+`0x00389E78` by `playerstate` and `armortype`, that puts them at `+0xCC`,
+`+0xD0` and `+0xD4`. They were written down *before* anyone played, and then a
+human played against a watch on exactly those twelve bytes:
+
+| Event | Frame | What moved |
+|---|---|---|
+| armor bonus | 1756 | `itemcount` 0→1, with `armorpoints` 0→1 on the same frame |
+| kill | 6543 | `killcount` 0→1 |
+| *(new session)* kill | 3787 | `killcount` 0→1 |
+| kill | 5449 | `killcount` 1→2 |
+| ammo clip, twice | — | nothing |
+| armor bonus | 14759 | `itemcount` 0→1, with `armorpoints` 0→1 |
+| entered a secret | 18890 | `secretcount` 0→1 |
+
+A prediction that then tracks every event and nothing else is a controlled test,
+and is why no exhaustive search was needed. One was run alongside the kills
+anyway: F3, kill, F7 took 65533 candidates to 1474, F4 to 673, and the second
+kill's F7 to 222. It was reset before it could finish, which is why the evidence
+is the watch rather than the search.
+
+The ammo clips are the negative control, and they agree with Doom's own rules:
+an item counts only if its thing carries `MF_COUNTITEM` — bonuses and
+power-ups — never ammo, weapons, stimpacks or medikits. The manifest names the
+item `tally_item` for that reason; it is not "anything picked up".
+
+Doom zeroes all three when a level loads, so a restored entry state starts them
+at 0 and a death's reload is a decrease, which the `increases` rules ignore.
+`IDDQD` does not touch them, which makes god mode safe for measuring.
+
+With the watches in the manifest and a rule on each, a third session played
+with god mode on saw every rule fire on its event and nothing else:
+`ENEMY DEFEATED` at frame 3504 (a kill), `ITEM tally_item` at 4012 (an armor
+bonus, `armorpoints` 0→1 on the same frame), nothing for an ammo clip,
+`COUNT secret` at 5373, and `ENEMY DEFEATED` again at 5410 — **a monster killed
+by another monster**, not by the player.
+
+That last one is Doom's rule rather than a false positive: in single player,
+every countable monster's death is credited to the player's tally, whoever
+caused it. So on Doom `enemy_defeated` means *a monster died*. A "kill N"
+challenge is "N monsters die", infighting included — the same thing the tally
+screen reports — and anyone wanting "N monsters the player killed" would need a
+different detector, which this game does not obviously offer.
+
+Not yet checked: a frame on which two monsters die together (the rule reports
+the delta, so it should count two), and that the totals on the tally screen
+match the counts. Both are worth a look before a challenge depends on an exact
+number.
 
 ### A false positive worth remembering
 

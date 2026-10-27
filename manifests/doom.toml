@@ -153,6 +153,35 @@ note = """players[0].playerstate: 0 PST_LIVE, 1 PST_DEAD, 2 PST_REBORN. Struct \
 offset from health, then confirmed live — it entered 1 on the exact frame \
 health reached 0, and held 2 for ~30 frames before each demo spawn."""
 
+# The level's own statistics — what the tally screen reports as kills, items and
+# secrets. Predicted from player_t (killcount, itemcount and secretcount follow
+# refire, at +0xCC/+0xD0/+0xD4 from the struct at 0x389E78), then confirmed in
+# play with a watch on exactly these three addresses: each moved on the frame of
+# its event and at no other time, across two sessions. Doom zeroes all three when
+# a level loads, so a restored entry state starts them at 0.
+
+[watch.killcount]
+at = 0x389F44
+note = """players[0].killcount. 0 -> 1 and 1 -> 2 on the frames of two kills, and \
+0 -> 1 on a kill in a second session, and on no other frame. A search run \
+alongside narrowed 65533 candidates to 222 but was reset before it was listed, \
+so the evidence is the watch, not the search. It counts monster *deaths*, not \
+the player's kills: one monster killing another in an infight moved it too, \
+as vanilla single-player Doom intends."""
+
+[watch.itemcount]
+at = 0x389F48
+note = """players[0].itemcount. 0 -> 1 on the frame of an armor bonus pickup, in \
+two sessions, each time on the same frame armorpoints went 0 -> 1. Two ammo \
+clip pickups moved nothing, as Doom's rules say: the tally counts bonuses and \
+power-ups, never ammo, weapons, stimpacks or medikits."""
+
+[watch.secretcount]
+at = 0x389F4C
+note = """players[0].secretcount. 0 -> 1 on the frame the player entered a secret \
+area. Vanilla Doom prints nothing when a secret is found, so this watch is the \
+only way to see one happen."""
+
 [watch.gamemap]
 at = 0x38A3E8
 note = """The g_game.c global. Found by typing IDCLEV12 and diffing: the only \
@@ -188,7 +217,7 @@ unseen; it only happens at the end of an episode and nothing depends on it."""
 3 = "title/demo"
 
 [display]
-fields = ["gamestate", "gamemap", "health", "armorpoints"]
+fields = ["gamestate", "gamemap", "health", "armorpoints", "killcount", "itemcount", "secretcount"]
 
 # ---------------------------------------------------------------------- rules
 
@@ -215,6 +244,34 @@ field = "gamemap"
 edge = "changes"
 emit = "note"
 log = "map changed"
+
+# The tally screen's three statistics, as tallies (ADR 0025). `increases`
+# reports the delta, so a frame on which two monsters die counts two. A level
+# reload zeroes the counters, which is a decrease and reports nothing.
+#
+# `enemy_defeated` here means "a monster died", whoever killed it: Doom credits
+# infighting deaths to the player's tally in single player, and so does this. A
+# "kill N" challenge on Doom is therefore "N monsters die", which is also what
+# the game's own tally screen says. Seen firing for all three rules in play,
+# god mode on, including one infighting death.
+[[rule]]
+field = "killcount"
+edge = "increases"
+emit = "enemy_defeated"
+
+[[rule]]
+field = "itemcount"
+edge = "increases"
+emit = "item"
+item = "tally_item"
+log = "an item the tally counts — not ammo, a weapon, a stimpack or a medikit"
+
+[[rule]]
+field = "secretcount"
+edge = "increases"
+emit = "count"
+counter = "secret"
+log = "entered a secret area"
 
 # The rule everything else waits on. Doom announces a finished level by moving
 # gamestate to GS_INTERMISSION, one frame after the exit switch is thrown —
