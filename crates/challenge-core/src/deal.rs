@@ -126,6 +126,7 @@ mod tests {
             stage: StageId(id.into()),
             kind,
             complete_when: Completion { cleared: true, ..Default::default() },
+            ends_attempt_on: Default::default(),
         }
     }
 

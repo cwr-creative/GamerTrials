@@ -373,6 +373,7 @@ emit = "died"
 | `emit` | what happened — see below |
 | `reason` | `stage_exited` only: `death`, `quit` or `unknown` |
 | `item` | `item` only: the item's name |
+| `counter` | `count` only: the counter's name |
 | `objective` | `objective` only: the milestone's name |
 | `log` | a sentence appended to this rule's console line |
 
@@ -385,6 +386,7 @@ emit = "died"
 | `changes` | `cur != prev` | — |
 | `enters` | `prev != v && cur == v` | `value` |
 | `leaves` | `prev == v && cur != v` | `value` |
+| `reaches` | `prev < v && cur >= v` | `value` |
 | `bit_set` | that bit went 0 → 1 | `bit` |
 | `bit_cleared` | that bit went 1 → 0 | `bit` |
 | `bits_set` | one event per bit newly set | `bit_labels` |
@@ -394,8 +396,32 @@ not one per frame. `leaves` with `value = 0` is how "rose from zero" is spelled,
 which is what a hit timer or a transit countdown needs — a timer still counting
 down from an earlier hit is not a second hit.
 
+`reaches` is a threshold crossed upward, however far past it the value jumped.
+It is what `enters` cannot say when a count can skip a value: a note counter
+that goes 18 → 23 in one paste never *enters* 20, but it does *reach* it. A
+value that was already past the threshold does not fire again until it has
+dropped below and climbed back (ADR 0025).
+
 A `value` or `bit` on an edge that does not read one is an error, not something
 ignored, because it means the author meant a different edge.
+
+### Tests
+
+What a `guard` or a marker `capture` checks: one field's **current** value, not
+a transition.
+
+| `test` | Holds when | Argument |
+|---|---|---|
+| `eq` | `cur == v` | `value` |
+| `ne` | `cur != v` | `value` |
+| `ge` | `cur >= v` | `value` |
+| `le` | `cur <= v` | `value` |
+| `bit_set` | that bit is 1 | `bit` |
+| `bit_cleared` | that bit is 0 | `bit` |
+
+Comparisons are unsigned, at the watch's width. `ge` and `le` are ADR 0025's:
+with them, "the count rose while the composer is open and the tempo is at most
+3" is two lines rather than a new edge.
 
 ### Emits
 
@@ -407,6 +433,7 @@ ignored, because it means the author meant a different edge.
 | `damaged` | `Damaged` | no |
 | `enemy_defeated` | `EnemyDefeated { count }` | no |
 | `item` | `ItemCollected { item, count }` | no |
+| `count` | `Counted { counter, count }` | no |
 | `objective` | `ObjectiveReached { objective }` | no |
 | `note` | nothing — logged only | no |
 
@@ -429,6 +456,26 @@ value = 0
 emit = "objective"
 objective = "boss-defeated"
 ```
+
+`count` is a **named tally that is not an item**: notes placed in a composer,
+laps completed, points scored. It is counted exactly as an item is — an
+`increases` rule reports the delta, a `bits_set` rule one per bit — and differs
+only in what it is called, so that a game with no items does not have to
+pretend it has some (ADR 0025).
+
+```toml
+[[rule]]
+field = "notes_placed"
+edge = "increases"
+emit = "count"
+counter = "note"
+```
+
+**Tallies share one namespace.** `damaged` and `enemy_defeated` are built-in
+tally names, items and counters add their own, and a challenge's `counts` and
+`ends_attempt_on` look names up there. An item and a counter with the same name,
+an item called `damaged`, or an objective sharing a tally's name is a load error:
+a name a criterion uses has to mean one thing.
 
 `note` is for a signal worth watching during a playtest that is not yet known to
 mean anything. SMB3's pipe-transit countdown is one: inventing a `SessionEvent`
@@ -522,6 +569,7 @@ name = "Mine Cart Carnage"     # optional; defaults to the stage's name
 stage = "mine-cart-carnage"    # a [[stage]] id
 kind = "survival"              # "time_trial" | "survival"
 complete_when = { cleared = true }
+ends_attempt_on = []           # optional; facts that cost what a death costs
 note = "optional, for whatever the id and the criteria do not say"
 ```
 
@@ -571,8 +619,9 @@ nesting, no arithmetic. At least one is required.
 |---|---|---|
 | `cleared = true` | a rule emitting `stage_cleared` fired | some `emit = "stage_cleared"` rule |
 | `survive_seconds = 45.0` | the run reached that many frames. **Survival only** | — |
-| `enemies_defeated = 20` | the `EnemyDefeated` counts sum to at least 20 | some `emit = "enemy_defeated"` rule |
-| `items_collected = { banana = 50 }` | each named item's counts sum to at least its number | a rule emitting each item |
+| `counts = { note = 20 }` | each named tally's counts sum to at least its number | a rule advancing each tally |
+| `enemies_defeated = 20` | the same as `counts = { enemy_defeated = 20 }` | some `emit = "enemy_defeated"` rule |
+| `items_collected = { banana = 50 }` | the same as `counts`, restricted to items | a rule emitting each item |
 | `objectives = ["boss-defeated"]` | every named objective was reached | a rule emitting each objective |
 
 ```toml
@@ -589,7 +638,16 @@ enemies_defeated = 5
 # no need to reach the end of anything.
 [challenge.complete_when]
 objectives = ["boss-defeated"]
+
+# Place twenty notes in the composer, as fast as possible. A contributor's own
+# counter, in a game where nobody dies and nothing is collected.
+[challenge.complete_when]
+counts = { note = 20 }
 ```
+
+`counts` is the general form; `enemies_defeated` and `items_collected` are older
+spellings of it and read into the same place. Naming one tally twice across
+them is a load error rather than a guess at which number was meant.
 
 `survive_seconds` is **converted to frames at load**, at `game.framerate`.
 Seconds never reach a `SessionEvent` or a wire message. It is refused on a time
@@ -600,6 +658,51 @@ An `items_collected` naming an item nothing emits, an objective nothing
 announces, or `cleared` in a manifest with no `stage_cleared` rule is a load
 error, not a challenge that quietly cannot be completed — the same argument that
 makes every table reject unknown keys.
+
+Every criterion is a **goal**: once it holds within an attempt it keeps
+holding, which is what lets a run complete on the first frame they all do (ADR
+0023). A fact that must *not* happen is not a criterion. It is
+`ends_attempt_on`.
+
+### `ends_attempt_on`
+
+Facts that **cost what a death costs**. When one arrives the attempt ends
+exactly as a death would end it: a time trial re-enters at the entry point with
+the clock running, and a survival run is over. Like a death, it never completes
+a run on the frame it arrives — a stage cleared on the frame of a hit was not
+cleared without one (ADR 0025).
+
+```toml
+# No-hit: reach the end, and a hit sends you back to the start.
+[[challenge]]
+id = "1-1-no-hit"
+stage = "1-1"
+kind = "time_trial"
+complete_when = { cleared = true }
+ends_attempt_on = ["damaged"]
+
+# Pacifist: reach the end without defeating anything.
+ends_attempt_on = ["enemy_defeated"]
+
+# Don't trip the alarm: an objective can end an attempt too.
+ends_attempt_on = ["alarm-raised"]
+```
+
+Each name is a tally (`damaged`, `enemy_defeated`, an item, a counter) or an
+objective, and is checked against the manifest's rules like any criterion. Three
+things are refused at load: a name nothing emits; `died`, `stage_exited` or
+`stage_cleared`, which end an attempt already; and a name that is also in
+`complete_when`, because a fact that ends the attempt on its frame can never
+complete the run on it.
+
+**This fails quietly where criteria fail loudly, and that is the price.** A
+criterion over a broken detector is a challenge nobody can complete, and
+somebody notices. A fact in `ends_attempt_on` over a broken detector is a
+challenge that never ends an attempt — every no-hit run passes, and nothing
+looks wrong. The load check proves a rule exists, not that it catches every
+hit. Before a challenge uses a fact here, playtest that fact's rule *for missed
+detections*, not only for false ones. `damaged` in particular was emitted by
+all three slice games long before anything read it.
 
 ### What is deliberately missing: a failure bound
 
@@ -866,6 +969,13 @@ a 230-entry table and a list of special-case rooms, and the reason it does not
 any more is that `$7E0527` answers the question directly. A *challenge* that
 needs different completion criteria is a different matter, and is what
 `complete_when` is for.
+
+**Upper bounds on a count.** There is no `at_most`: "at most three hits" is
+not expressible, only "no hits" via `ends_attempt_on`. An upper bound is a
+constraint rather than a goal, holds trivially at frame 0, and would need its
+own rules for when a run may complete and what breaking it costs. ADR 0025
+defers it until a challenge needs it and the detectors it would read have been
+playtested for misses.
 
 **Scoring.** `[[challenge]]` says what completes a run. Nothing here says what a
 completed run was *worth* — no points, no ranking, no comparison between

@@ -247,6 +247,8 @@ struct RuleDoc {
     #[serde(default)]
     item: Option<String>,
     #[serde(default)]
+    counter: Option<String>,
+    #[serde(default)]
     objective: Option<String>,
     #[serde(default)]
     log: Option<String>,
@@ -342,6 +344,10 @@ pub struct Test {
 pub enum TestKind {
     Eq(u32),
     Ne(u32),
+    /// At least. Compared unsigned, at the watch's width.
+    Ge(u32),
+    /// At most. Compared unsigned, at the watch's width.
+    Le(u32),
     BitSet(u32),
     BitCleared(u32),
 }
@@ -356,6 +362,9 @@ pub enum Edge {
     Enters(u32),
     /// `prev == v && cur != v`. `leaves 0` is how "rose from zero" is spelled.
     Leaves(u32),
+    /// `prev < v && cur >= v`: a threshold crossed upward, however far past it
+    /// the value jumped. What `enters` cannot say when a count can skip a value.
+    Reaches(u32),
     BitSet(u32),
     BitCleared(u32),
     /// Every bit newly set this frame, reported one at a time.
@@ -851,19 +860,20 @@ fn edge(
         "changes" => Edge::Changes,
         "enters" => Edge::Enters(need_value()?),
         "leaves" => Edge::Leaves(need_value()?),
+        "reaches" => Edge::Reaches(need_value()?),
         "bit_set" => Edge::BitSet(need_bit()?),
         "bit_cleared" => Edge::BitCleared(need_bit()?),
         "bits_set" => Edge::BitsSet,
         other => {
             return Err(format!(
                 "{what}: unknown edge `{other}`; try increases, decreases, changes, \
-                 enters, leaves, bit_set, bit_cleared, bits_set"
+                 enters, leaves, reaches, bit_set, bit_cleared, bits_set"
             ))
         }
     };
     // A value or a bit that the edge does not read is a sign the author meant a
     // different edge, so it is refused rather than ignored.
-    let uses_value = matches!(e, Edge::Enters(_) | Edge::Leaves(_));
+    let uses_value = matches!(e, Edge::Enters(_) | Edge::Leaves(_) | Edge::Reaches(_));
     let uses_bit = matches!(e, Edge::BitSet(_) | Edge::BitCleared(_));
     if value.is_some() && !uses_value {
         return Err(format!("{what}: edge `{kind}` does not take a `value`"));
@@ -884,6 +894,14 @@ fn test(d: &TestDoc, what: &str) -> Result<Test, String> {
             d.value.ok_or_else(|| format!("{what}: test `ne` needs a `value`"))?,
             "value",
         )?),
+        "ge" => TestKind::Ge(as_u32(
+            d.value.ok_or_else(|| format!("{what}: test `ge` needs a `value`"))?,
+            "value",
+        )?),
+        "le" => TestKind::Le(as_u32(
+            d.value.ok_or_else(|| format!("{what}: test `le` needs a `value`"))?,
+            "value",
+        )?),
         "bit_set" => TestKind::BitSet(
             d.bit.ok_or_else(|| format!("{what}: test `bit_set` needs a `bit`"))?,
         ),
@@ -892,7 +910,7 @@ fn test(d: &TestDoc, what: &str) -> Result<Test, String> {
         ),
         other => {
             return Err(format!(
-                "{what}: unknown test `{other}`; try eq, ne, bit_set, bit_cleared"
+                "{what}: unknown test `{other}`; try eq, ne, ge, le, bit_set, bit_cleared"
             ))
         }
     };
@@ -1056,6 +1074,7 @@ impl Doc {
                 &r.emit,
                 r.reason.as_deref(),
                 r.item.as_deref(),
+                r.counter.as_deref(),
                 r.objective.as_deref(),
                 &what,
             )?;
@@ -1385,6 +1404,40 @@ entry = { state = "a.state" }
             "{MINIMAL}\n[[rule]]\nfield = \"lives\"\nedge = \"enters\"\nemit = \"died\"\n"
         );
         assert!(parse(&text).unwrap_err().contains("needs a `value`"));
+    }
+
+    /// The threshold edge and the comparison tests (ADR 0025): "the note count
+    /// crossed 20, while the composer is open".
+    #[test]
+    fn reaches_and_comparison_guards_parse() {
+        let text = format!(
+            "{MINIMAL}\n[[rule]]\nfield = \"lives\"\nedge = \"reaches\"\nvalue = 20\n\
+             guard = {{ field = \"lives\", test = \"le\", value = 99 }}\n\
+             emit = \"objective\"\nobjective = \"twenty\"\n"
+        );
+        let m = parse(&text).unwrap();
+        assert_eq!(m.rules[0].edge, Edge::Reaches(20));
+        assert_eq!(m.rules[0].guard.as_ref().unwrap().kind, TestKind::Le(99));
+
+        let no_value = text.replace("value = 20\n", "");
+        assert!(parse(&no_value).unwrap_err().contains("needs a `value`"));
+        let ge = text.replace("test = \"le\", value = 99", "test = \"ge\"");
+        assert!(parse(&ge).unwrap_err().contains("test `ge` needs a `value`"));
+    }
+
+    /// A counter rule passes the strict runner-half parse, and its event names
+    /// the counter (ADR 0025).
+    #[test]
+    fn a_count_rule_parses_and_a_stray_counter_key_is_refused() {
+        let rule = "[[rule]]\nfield = \"lives\"\nedge = \"increases\"\n\
+                    emit = \"count\"\ncounter = \"note\"\n";
+        let m = parse(&format!("{MINIMAL}\n{rule}")).unwrap();
+        assert_eq!(m.rules[0].emit, Emit::Count("note".into()));
+
+        let stray = rule.replace("emit = \"count\"", "emit = \"died\"");
+        assert!(parse(&format!("{MINIMAL}\n{stray}"))
+            .unwrap_err()
+            .contains("only `count` takes a `counter` name"));
     }
 
     /// A `value` on an edge that never reads one is a sign the author meant a

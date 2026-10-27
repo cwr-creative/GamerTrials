@@ -311,7 +311,7 @@ fn a_stage_can_carry_more_than_one_challenge() {
 #[test]
 fn shipped_challenges_use_criteria_other_than_cleared() {
     let stomps = smb3().challenge("1-1-stomp-rush").unwrap().complete_when.clone();
-    assert_eq!(stomps.enemies_defeated, Some(5));
+    assert_eq!(stomps.counts.get(session_api::ENEMY_DEFEATED), Some(&5));
     assert!(!stomps.cleared, "the clock stops on the fifth stomp, not at the flagpole");
 
     // All four letters *and* the exit. The per-bit rule is what makes
@@ -319,10 +319,10 @@ fn shipped_challenges_use_criteria_other_than_cleared() {
     let kong = dkc().challenge("jungle-hijinx-kong").unwrap().complete_when.clone();
     assert!(kong.cleared);
     assert_eq!(
-        kong.items_collected.keys().cloned().collect::<Vec<_>>(),
+        kong.counts.keys().cloned().collect::<Vec<_>>(),
         ["kong_letter:G", "kong_letter:K", "kong_letter:N", "kong_letter:O"]
     );
-    assert!(kong.items_collected.values().all(|&n| n == 1));
+    assert!(kong.counts.values().all(|&n| n == 1));
 }
 
 /// The spec that crosses into `challenge-core`. It names a stage and never the

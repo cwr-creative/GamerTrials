@@ -32,7 +32,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ------------------------------------------------------------------ identity
@@ -185,6 +185,11 @@ impl fmt::Display for ChallengeKind {
 ///
 /// Nothing here is evaluated in this crate. These are the criteria;
 /// `challenge-core` is what compares [`SessionEvent`]s against them.
+///
+/// Every criterion is something that, once true within an attempt, stays true
+/// — a goal, never a constraint. That is what lets a run complete on the first
+/// frame its criteria hold (ADR 0023). A fact that must *not* happen is
+/// expressed by [`ChallengeSpec::ends_attempt_on`] instead (ADR 0025).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Completion {
     /// A [`SessionEvent::StageCleared`] was seen — the game itself signalled
@@ -196,10 +201,11 @@ pub struct Completion {
     /// Meaningful only for [`ChallengeKind::Survival`] — "survive 30 seconds
     /// fastest" is not something that can be won.
     pub survive_frames: Option<u64>,
-    /// The [`SessionEvent::EnemyDefeated`] counts sum to at least this.
-    pub enemies_defeated: Option<u32>,
-    /// Per item name, the [`SessionEvent::ItemCollected`] counts that must sum.
-    pub items_collected: BTreeMap<String, u32>,
+    /// Per tally name, the count that must be reached: every event whose
+    /// [`SessionEvent::tally`] names it adds to it, and the sum must be at
+    /// least this. One namespace for defeated enemies, hits taken, collected
+    /// items and a contributor's own counters (ADR 0025).
+    pub counts: BTreeMap<String, u32>,
     /// Every one of these must arrive as a [`SessionEvent::ObjectiveReached`].
     pub objectives: Vec<String>,
 }
@@ -210,8 +216,7 @@ impl Completion {
     pub fn is_empty(&self) -> bool {
         !self.cleared
             && self.survive_frames.is_none()
-            && self.enemies_defeated.is_none()
-            && self.items_collected.is_empty()
+            && self.counts.is_empty()
             && self.objectives.is_empty()
     }
 }
@@ -230,6 +235,12 @@ pub struct ChallengeSpec {
     pub stage: StageId,
     pub kind: ChallengeKind,
     pub complete_when: Completion,
+    /// Facts that end an attempt the way a death does: a time trial re-enters
+    /// with the clock running, and a survival run is over. Each is a tally name
+    /// or an objective name, never one of the stage-ending facts — those end
+    /// an attempt already. Empty for most challenges; `["damaged"]` is a no-hit
+    /// run (ADR 0025).
+    pub ends_attempt_on: BTreeSet<String>,
 }
 
 // --------------------------------------------------------------------- events
@@ -257,6 +268,11 @@ impl fmt::Display for ExitReason {
     }
 }
 
+/// The tally a [`SessionEvent::Damaged`] adds one to.
+pub const DAMAGED: &str = "damaged";
+/// The tally a [`SessionEvent::EnemyDefeated`] adds its count to.
+pub const ENEMY_DEFEATED: &str = "enemy_defeated";
+
 /// Something a runner observed, and the emulated frame it happened on.
 ///
 /// `frame` counts from stage entry, not from process start (ADR 0005): that is
@@ -274,6 +290,10 @@ pub enum SessionEvent {
     Damaged { frame: u64 },
     EnemyDefeated { frame: u64, count: u32 },
     ItemCollected { frame: u64, item: String, count: u32 },
+    /// A named tally the game advanced that is not an item: notes placed,
+    /// laps completed, points scored. The manifest names the counter; whether
+    /// any number of them completes anything is the challenge's question.
+    Counted { frame: u64, counter: String, count: u32 },
     /// A named milestone the game announced: a boss's health reaching zero, a
     /// gate opening, a progress counter crossing a threshold.
     ///
@@ -293,7 +313,23 @@ impl SessionEvent {
             | SessionEvent::Damaged { frame }
             | SessionEvent::EnemyDefeated { frame, .. }
             | SessionEvent::ItemCollected { frame, .. }
+            | SessionEvent::Counted { frame, .. }
             | SessionEvent::ObjectiveReached { frame, .. } => frame,
+        }
+    }
+
+    /// The tally this event adds to, and by how much — or `None` for an event
+    /// that is not counted. The one place a fact's tally name is decided, so
+    /// a loader validating `counts` and a judge summing them cannot disagree.
+    /// Items and counters are named by the manifest; the two built-in tallies
+    /// are [`DAMAGED`] and [`ENEMY_DEFEATED`].
+    pub fn tally(&self) -> Option<(&str, u32)> {
+        match self {
+            SessionEvent::Damaged { .. } => Some((DAMAGED, 1)),
+            SessionEvent::EnemyDefeated { count, .. } => Some((ENEMY_DEFEATED, *count)),
+            SessionEvent::ItemCollected { item, count, .. } => Some((item, *count)),
+            SessionEvent::Counted { counter, count, .. } => Some((counter, *count)),
+            _ => None,
         }
     }
 
@@ -325,6 +361,9 @@ impl fmt::Display for SessionEvent {
             }
             SessionEvent::ItemCollected { frame, item, count } => {
                 write!(f, "frame {frame}  collected {count} x {item}")
+            }
+            SessionEvent::Counted { frame, counter, count } => {
+                write!(f, "frame {frame}  counted {count} x {counter}")
             }
             SessionEvent::ObjectiveReached { frame, objective } => {
                 write!(f, "frame {frame}  reached {objective}")
@@ -447,11 +486,29 @@ mod tests {
 
     /// A challenge nobody can ever complete is a manifest bug, and the loader
     /// leans on this to say so.
+    /// Every countable fact names its tally here, built-in or not.
+    #[test]
+    fn countable_events_name_their_tally() {
+        assert_eq!(SessionEvent::Damaged { frame: 1 }.tally(), Some((DAMAGED, 1)));
+        assert_eq!(
+            SessionEvent::EnemyDefeated { frame: 1, count: 2 }.tally(),
+            Some((ENEMY_DEFEATED, 2))
+        );
+        let note = SessionEvent::Counted { frame: 1, counter: "note".into(), count: 1 };
+        assert_eq!(note.tally(), Some(("note", 1)));
+        assert_eq!(SessionEvent::Died { frame: 1 }.tally(), None);
+    }
+
     #[test]
     fn a_completion_with_no_criteria_is_empty() {
         assert!(Completion::default().is_empty());
         assert!(!Completion { cleared: true, ..Default::default() }.is_empty());
         assert!(!Completion { survive_frames: Some(1800), ..Default::default() }.is_empty());
+        assert!(!Completion {
+            counts: [("note".to_string(), 20)].into(),
+            ..Default::default()
+        }
+        .is_empty());
         assert!(!Completion {
             objectives: vec!["boss-defeated".to_string()],
             ..Default::default()

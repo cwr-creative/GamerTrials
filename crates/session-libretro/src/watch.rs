@@ -376,6 +376,14 @@ impl Watcher {
                     },
                     count,
                 }),
+                Emit::Count(counter) => Some(SessionEvent::Counted {
+                    frame: at,
+                    counter: match &label {
+                        Some(l) => format!("{counter}:{l}"),
+                        None => counter.clone(),
+                    },
+                    count,
+                }),
                 Emit::Objective(name) => {
                     Some(SessionEvent::ObjectiveReached { frame: at, objective: name.clone() })
                 }
@@ -411,6 +419,10 @@ impl Watcher {
             Emit::Item(item) => match label {
                 Some(l) => format!("ITEM {item}:{l}"),
                 None => format!("ITEM {item}"),
+            },
+            Emit::Count(counter) => match label {
+                Some(l) => format!("COUNT {counter}:{l}"),
+                None => format!("COUNT {counter}"),
             },
             Emit::Objective(name) => format!("OBJECTIVE {name}"),
             Emit::Note => "NOTE".to_string(),
@@ -531,6 +543,7 @@ fn edge_fires(edge: &Edge, prev: Option<u32>, cur: Option<u32>) -> bool {
         Edge::Changes => c != p,
         Edge::Enters(v) => p != v && c == v,
         Edge::Leaves(v) => p == v && c != v,
+        Edge::Reaches(v) => p < v && c >= v,
         Edge::BitSet(b) => p & (1 << b) == 0 && c & (1 << b) != 0,
         Edge::BitCleared(b) => p & (1 << b) != 0 && c & (1 << b) == 0,
         Edge::BitsSet => c & !p != 0,
@@ -548,6 +561,8 @@ fn holds(test: TestKind, value: Option<u32>) -> bool {
     match test {
         TestKind::Eq(x) => v == x,
         TestKind::Ne(x) => v != x,
+        TestKind::Ge(x) => v >= x,
+        TestKind::Le(x) => v <= x,
         TestKind::BitSet(b) => v & (1 << b) != 0,
         TestKind::BitCleared(b) => v & (1 << b) == 0,
     }
@@ -577,6 +592,18 @@ mod tests {
         assert!(!edge_fires(&Edge::Enters(0x82), Some(0x82), Some(0x82)));
     }
 
+    /// `reaches` is a threshold crossed upward, so a count that jumps past the
+    /// value still fires — the case `enters` misses — and one already past it
+    /// does not fire again.
+    #[test]
+    fn reaches_fires_on_crossing_however_far_the_jump() {
+        assert!(edge_fires(&Edge::Reaches(20), Some(19), Some(20)));
+        assert!(edge_fires(&Edge::Reaches(20), Some(18), Some(23)));
+        assert!(!edge_fires(&Edge::Reaches(20), Some(20), Some(21)));
+        assert!(!edge_fires(&Edge::Reaches(20), Some(21), Some(19)));
+        assert!(!edge_fires(&Edge::Enters(20), Some(18), Some(23)));
+    }
+
     #[test]
     fn bit_edges_are_edges() {
         assert!(edge_fires(&Edge::BitCleared(0), Some(0b01), Some(0b00)));
@@ -597,5 +624,15 @@ mod tests {
         assert!(!holds(TestKind::Ne(0), Some(0)));
         assert!(holds(TestKind::BitSet(6), Some(0b0100_0000)));
         assert!(!holds(TestKind::BitSet(6), None));
+    }
+
+    #[test]
+    fn ge_and_le_include_their_bound() {
+        assert!(holds(TestKind::Ge(20), Some(20)));
+        assert!(holds(TestKind::Ge(20), Some(21)));
+        assert!(!holds(TestKind::Ge(20), Some(19)));
+        assert!(holds(TestKind::Le(5), Some(5)));
+        assert!(!holds(TestKind::Le(5), Some(6)));
+        assert!(!holds(TestKind::Le(5), None));
     }
 }

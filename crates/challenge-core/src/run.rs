@@ -32,6 +32,10 @@
 //! * **A run completes the moment its criteria hold**, not at the end of the
 //!   stage. "Stomp four enemies" stops the clock on the fourth stomp; reaching
 //!   the goal is only required when `cleared` says so.
+//! * **A challenge may name facts that cost what a death costs.** A hit in a
+//!   no-hit run ends the attempt exactly as dying would — a time trial
+//!   re-enters, a survival run is over — and, like a death, never completes a
+//!   run on the frame it arrives (ADR 0025).
 //! * **The bound is the caller's.** ADR 0017 owes a failure bound and does not
 //!   say where it comes from. A run takes a frame limit and a forfeit, which
 //!   serves a per-challenge limit, a per-round cap and a give-up button
@@ -64,9 +68,12 @@ impl fmt::Display for RunError {
 impl std::error::Error for RunError {}
 
 /// How an attempt ended without completing the run.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum AttemptEnd {
     Died,
+    /// A fact the challenge's `ends_attempt_on` names arrived — the hit in a
+    /// no-hit run. Costs exactly what a death costs (ADR 0025).
+    EndedOn(String),
     /// The game said the stage was finished, but the criteria did not hold —
     /// the player reached the goal without the four stomps.
     Cleared,
@@ -79,6 +86,7 @@ impl fmt::Display for AttemptEnd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AttemptEnd::Died => f.write_str("died"),
+            AttemptEnd::EndedOn(fact) => write!(f, "{fact}, which ends the attempt"),
             AttemptEnd::Cleared => f.write_str("cleared the stage without meeting the criteria"),
             AttemptEnd::Exited(reason) => write!(f, "left the stage ({reason})"),
         }
@@ -86,7 +94,7 @@ impl fmt::Display for AttemptEnd {
 }
 
 /// How a run ended.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ending {
     /// Every criterion held within one attempt.
     Completed,
@@ -166,8 +174,9 @@ enum State {
 #[derive(Default, Debug)]
 struct Progress {
     cleared: bool,
-    enemies: u32,
-    items: BTreeMap<String, u32>,
+    /// Every tally an event advanced this attempt, by the name
+    /// [`SessionEvent::tally`] gives it.
+    counts: BTreeMap<String, u32>,
     objectives: BTreeSet<String>,
 }
 
@@ -178,10 +187,9 @@ impl Progress {
     fn meets(&self, c: &Completion, frame: u64) -> bool {
         (!c.cleared || self.cleared)
             && c.survive_frames.map_or(true, |n| frame >= n)
-            && c.enemies_defeated.map_or(true, |n| self.enemies >= n)
-            && c.items_collected
+            && c.counts
                 .iter()
-                .all(|(item, n)| self.items.get(item).copied().unwrap_or(0) >= *n)
+                .all(|(name, n)| self.counts.get(name).copied().unwrap_or(0) >= *n)
             && c.objectives.iter().all(|o| self.objectives.contains(o))
     }
 }
@@ -292,33 +300,29 @@ impl Run {
         self.frame = frame;
 
         for event in events {
+            if let Some((name, count)) = event.tally() {
+                let held = self.progress.counts.entry(name.to_string()).or_default();
+                *held = held.saturating_add(count);
+            }
             let end = match event {
-                SessionEvent::StageEntered { .. } | SessionEvent::Damaged { .. } => None,
                 SessionEvent::Died { .. } => Some(AttemptEnd::Died),
                 SessionEvent::StageExited { reason, .. } => Some(AttemptEnd::Exited(*reason)),
                 SessionEvent::StageCleared { .. } => {
                     self.progress.cleared = true;
                     Some(AttemptEnd::Cleared)
                 }
-                SessionEvent::EnemyDefeated { count, .. } => {
-                    self.progress.enemies = self.progress.enemies.saturating_add(*count);
-                    None
-                }
-                SessionEvent::ItemCollected { item, count, .. } => {
-                    let held = self.progress.items.entry(item.clone()).or_default();
-                    *held = held.saturating_add(*count);
-                    None
-                }
                 SessionEvent::ObjectiveReached { objective, .. } => {
                     self.progress.objectives.insert(objective.clone());
-                    None
+                    self.ends_attempt(objective)
                 }
+                _ => event.tally().and_then(|(name, _)| self.ends_attempt(name)),
             };
             // A death is never what completes a run, even when the criteria
             // would otherwise hold on its frame: surviving a frame means being
-            // alive at the end of it.
-            if end != Some(AttemptEnd::Died) && self.progress.meets(&self.spec.complete_when, frame)
-            {
+            // alive at the end of it. A fact that ends the attempt the way a
+            // death does is held to the same rule.
+            let costs_a_life = matches!(end, Some(AttemptEnd::Died | AttemptEnd::EndedOn(_)));
+            if !costs_a_life && self.progress.meets(&self.spec.complete_when, frame) {
                 return self.finish(Ending::Completed, event.frame());
             }
             if let Some(end) = end {
@@ -347,6 +351,14 @@ impl Run {
             Next::Finished(r) => r,
             _ => unreachable!("finish always finishes"),
         }
+    }
+
+    /// `Some` if the challenge says this fact ends the attempt.
+    fn ends_attempt(&self, fact: &str) -> Option<AttemptEnd> {
+        self.spec
+            .ends_attempt_on
+            .contains(fact)
+            .then(|| AttemptEnd::EndedOn(fact.to_string()))
     }
 
     fn end_attempt(&mut self, end: AttemptEnd, frame: u64) -> Next {
@@ -399,6 +411,7 @@ mod tests {
             stage: StageId("s".into()),
             kind,
             complete_when,
+            ends_attempt_on: Default::default(),
         }
     }
 
@@ -407,7 +420,10 @@ mod tests {
     }
 
     fn stomps(n: u32) -> Completion {
-        Completion { enemies_defeated: Some(n), ..Default::default() }
+        Completion {
+            counts: BTreeMap::from([(session_api::ENEMY_DEFEATED.to_string(), n)]),
+            ..Default::default()
+        }
     }
 
     fn survive(frames: u64) -> Completion {
@@ -565,7 +581,7 @@ mod tests {
     fn every_criterion_must_hold_together() {
         let c = Completion {
             cleared: true,
-            items_collected: BTreeMap::from([("banana".to_string(), 50)]),
+            counts: BTreeMap::from([("banana".to_string(), 50)]),
             objectives: vec!["boss-defeated".into()],
             ..Default::default()
         };
@@ -691,6 +707,83 @@ mod tests {
         let mut run = Run::new(spec(ChallengeKind::Survival, reach_the_end())).unwrap();
         run.enter();
         assert_eq!(run.observe(1, &[SessionEvent::Damaged { frame: 1 }]), Next::Continue);
+    }
+
+    // ------------------------------------------------ ends_attempt_on (0025)
+
+    fn no_hit(kind: ChallengeKind) -> Run {
+        let mut s = spec(kind, reach_the_end());
+        s.ends_attempt_on.insert(session_api::DAMAGED.to_string());
+        Run::new(s).unwrap()
+    }
+    fn hit(frame: u64) -> SessionEvent {
+        SessionEvent::Damaged { frame }
+    }
+
+    /// A hit in a no-hit time trial costs what a death costs: back to the
+    /// entry point, clock still running.
+    #[test]
+    fn a_hit_in_a_no_hit_time_trial_reenters_with_the_clock_running() {
+        let r = play(no_hit(ChallengeKind::TimeTrial), &[&[(40, vec![hit(40)])], &[(100, vec![cleared(100)])]]);
+        assert_eq!(r.ending, Ending::Completed);
+        assert_eq!(r.frames, 140);
+        assert_eq!(r.attempts, 2);
+    }
+
+    #[test]
+    fn a_hit_in_a_no_hit_survival_run_ends_it() {
+        let r = play(no_hit(ChallengeKind::Survival), &[&[(40, vec![hit(40)])]]);
+        assert_eq!(r.ending, Ending::Failed(AttemptEnd::EndedOn("damaged".into())));
+    }
+
+    /// The same rule as a death on the clearing frame: the hit was taken, so
+    /// the stage was not cleared without one.
+    #[test]
+    fn a_hit_on_the_clearing_frame_does_not_complete_a_no_hit_run() {
+        let r = play(no_hit(ChallengeKind::Survival), &[&[(50, vec![hit(50), cleared(50)])]]);
+        assert_eq!(r.ending, Ending::Failed(AttemptEnd::EndedOn("damaged".into())));
+    }
+
+    /// Only the named fact ends anything; a challenge without the list is
+    /// unaffected by the same event.
+    #[test]
+    fn ends_attempt_on_names_one_fact_and_no_other() {
+        let mut s = spec(ChallengeKind::Survival, reach_the_end());
+        s.ends_attempt_on.insert("alarm".to_string());
+        let alarm = SessionEvent::ObjectiveReached { frame: 3, objective: "alarm".into() };
+        let r = play(Run::new(s).unwrap(), &[&[(2, vec![hit(2)]), (3, vec![alarm])]]);
+        assert_eq!(r.ending, Ending::Failed(AttemptEnd::EndedOn("alarm".into())));
+    }
+
+    // ------------------------------------------------------- counters (0025)
+
+    /// A contributor's own tally completes a run exactly as an item does, and
+    /// the clock stops on the frame it gets there.
+    #[test]
+    fn a_named_counter_completes_a_run() {
+        let notes = Completion { counts: BTreeMap::from([("note".to_string(), 3)]), ..Default::default() };
+        let note = |frame| SessionEvent::Counted { frame, counter: "note".into(), count: 1 };
+        let r = play(
+            Run::new(spec(ChallengeKind::TimeTrial, notes)).unwrap(),
+            &[&[(10, vec![note(10)]), (20, vec![note(20)]), (35, vec![note(35)])]],
+        );
+        assert_eq!(r.ending, Ending::Completed);
+        assert_eq!(r.frames, 35);
+    }
+
+    /// Hits are a tally like any other, so "take three hits" is expressible —
+    /// odd, but a goal, and the vocabulary does not special-case it.
+    #[test]
+    fn damage_is_counted_under_its_built_in_name() {
+        let three_hits = Completion {
+            counts: BTreeMap::from([(session_api::DAMAGED.to_string(), 3)]),
+            ..Default::default()
+        };
+        let r = play(
+            Run::new(spec(ChallengeKind::Survival, three_hits)).unwrap(),
+            &[&[(1, vec![hit(1)]), (2, vec![hit(2)]), (3, vec![hit(3)])]],
+        );
+        assert_eq!(r.ending, Ending::Completed);
     }
 
     #[test]

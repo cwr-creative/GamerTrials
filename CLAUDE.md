@@ -112,10 +112,14 @@ These are settled. Do not violate them without writing a superseding ADR.
   A hack ships as a patch, and a generated ROM never leaves the machine that
   derived it (ADR 0013/0020). A field holding a path to a hacked ROM is that rule
   being broken.
-- A manifest reports *facts* — cleared, exited, died, damaged, item, objective —
-  and declares *criteria* (`[[challenge]].complete_when`). It never produces a
-  verdict: an adapter must never decide a run was won, and there is no
-  `stage_failed`. `challenge-core` compares the facts against the criteria.
+- A manifest reports *facts* — cleared, exited, died, damaged, enemy defeated,
+  item, count, objective — and declares *criteria* (`[[challenge]].complete_when`).
+  It never produces a verdict: an adapter must never decide a run was won, and
+  there is no `stage_failed`. `challenge-core` compares the facts against the
+  criteria. Every criterion is a goal ("at least"); a fact that must *not* happen
+  goes in `ends_attempt_on`, where it costs what a death costs (ADR 0025). A
+  contributor's own counters and objectives are open-ended names, so a game
+  unlike the slice still needs no Rust.
 - Manifests may author durations in seconds. They convert to frames at the game's
   framerate on load — seconds never reach a `SessionEvent` or a wire message.
 - Wire protocol messages carry a version field. Never remove a field; deprecate it.

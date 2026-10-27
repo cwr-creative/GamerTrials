@@ -199,7 +199,7 @@ fn per_bit_items_are_known_by_their_labelled_names() {
          [challenge.complete_when]\nitems_collected = {{ \"letter:K\" = 1 }}\n"
     );
     let lib = Library::parse(&ok).unwrap();
-    assert_eq!(lib.challenge("c").unwrap().complete_when.items_collected["letter:K"], 1);
+    assert_eq!(lib.challenge("c").unwrap().complete_when.counts["letter:K"], 1);
 
     let bad = ok.replace("\"letter:K\"", "\"letter\"");
     let e = Library::parse(&bad).unwrap_err();
@@ -228,12 +228,129 @@ fn an_objective_emit_needs_a_name() {
 
 #[test]
 fn a_reason_on_anything_but_an_exit_is_refused() {
-    let e = Emit::parse("died", Some("death"), None, None, "rule `x`").unwrap_err();
+    let e = Emit::parse("died", Some("death"), None, None, None, "rule `x`").unwrap_err();
     assert!(e.contains("only `stage_exited` takes a `reason`"), "{e}");
     assert_eq!(
-        Emit::parse("stage_exited", Some("death"), None, None, "rule `x`").unwrap(),
+        Emit::parse("stage_exited", Some("death"), None, None, None, "rule `x`").unwrap(),
         Emit::StageExited(ExitReason::Death)
     );
+}
+
+// -------------------------------------------------- counters and tallies (0025)
+
+/// A note-placing counter, as a Mario Paint manifest would declare one.
+const NOTES: &str = "[[rule]]\nfield = \"notes\"\nedge = \"increases\"\n\
+                     emit = \"count\"\ncounter = \"note\"\n";
+
+/// A contributor's own counter is a criterion like any item.
+#[test]
+fn a_named_counter_can_complete_a_challenge() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{NOTES}\
+         [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+         complete_when = {{ counts = {{ note = 20 }} }}\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    assert_eq!(lib.challenge("c").unwrap().complete_when.counts["note"], 20);
+}
+
+#[test]
+fn a_count_emit_needs_a_counter_name() {
+    let text = format!(
+        "{MINIMAL}\n[[rule]]\nfield = \"notes\"\nedge = \"increases\"\nemit = \"count\"\n"
+    );
+    assert!(Library::parse(&text).unwrap_err().contains("needs a `counter` name"));
+}
+
+/// The older spellings feed the same tallies, so they are still accepted and
+/// read into `counts`.
+#[test]
+fn enemies_defeated_and_items_collected_are_spellings_of_counts() {
+    let rules = "[[rule]]\nfield = \"x\"\nedge = \"increases\"\nemit = \"enemy_defeated\"\n\
+                 [[rule]]\nfield = \"y\"\nedge = \"increases\"\nemit = \"item\"\nitem = \"coin\"\n";
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{rules}\
+         [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+         [challenge.complete_when]\nenemies_defeated = 3\nitems_collected = {{ coin = 10 }}\n"
+    );
+    let c = Library::parse(&text).unwrap().challenge("c").unwrap().clone();
+    assert_eq!(c.complete_when.counts[ENEMY_DEFEATED], 3);
+    assert_eq!(c.complete_when.counts["coin"], 10);
+
+    let twice = text.replace("items_collected = { coin = 10 }", "counts = { enemy_defeated = 4 }");
+    assert!(Library::parse(&twice).unwrap_err().contains("counted twice"));
+}
+
+/// One name, one meaning: an item and a counter cannot share a name, and
+/// neither can claim a built-in one.
+#[test]
+fn a_tally_name_means_one_kind_of_fact() {
+    let clash = "[[rule]]\nfield = \"y\"\nedge = \"increases\"\nemit = \"item\"\nitem = \"note\"\n";
+    let e = Library::parse(&format!("{MINIMAL}{NOTES}{clash}")).unwrap_err();
+    assert!(e.contains("same name"), "{e}");
+
+    let built_in =
+        "[[rule]]\nfield = \"y\"\nedge = \"increases\"\nemit = \"count\"\ncounter = \"damaged\"\n";
+    let rule = "[[rule]]\nfield = \"hp\"\nedge = \"decreases\"\nemit = \"damaged\"\n";
+    let e = Library::parse(&format!("{MINIMAL}{rule}{built_in}")).unwrap_err();
+    assert!(e.contains("same name"), "{e}");
+}
+
+#[test]
+fn a_count_of_a_tally_nothing_advances_is_refused() {
+    let e = with_challenge("id = \"c\"\nkind = \"survival\"\ncomplete_when = { counts = { note = 1 } }\n")
+        .unwrap_err();
+    assert!(e.contains("no [[rule]] advances a tally named `note`"), "{e}");
+}
+
+// ---------------------------------------------------- ends_attempt_on (0025)
+
+const HITS: &str = "[[rule]]\nfield = \"hp\"\nedge = \"decreases\"\nemit = \"damaged\"\n";
+
+/// A no-hit run: reach the end, and a hit costs what a death costs.
+#[test]
+fn ends_attempt_on_names_facts_that_cost_a_life() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{HITS}\
+         [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+         complete_when = {{ cleared = true }}\nends_attempt_on = [\"damaged\"]\n"
+    );
+    let c = Library::parse(&text).unwrap().challenge("c").unwrap().clone();
+    assert!(c.ends_attempt_on.contains(DAMAGED));
+    assert!(c.spec(&GameId("t".into())).ends_attempt_on.contains(DAMAGED));
+}
+
+/// The same check criteria get: a fact nothing emits would make a no-hit run
+/// one that every run passes, silently.
+#[test]
+fn ends_attempt_on_must_name_something_emitted() {
+    let e = with_challenge(
+        "id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n\
+         ends_attempt_on = [\"damaged\"]\n",
+    )
+    .unwrap_err();
+    assert!(e.contains("no [[rule]] emits it"), "{e}");
+}
+
+#[test]
+fn ends_attempt_on_refuses_what_already_ends_an_attempt() {
+    let e = with_challenge(
+        "id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n\
+         ends_attempt_on = [\"died\"]\n",
+    )
+    .unwrap_err();
+    assert!(e.contains("already ends an attempt"), "{e}");
+}
+
+/// A fact that ends the attempt on its frame can never complete the run on it.
+#[test]
+fn a_fact_cannot_both_complete_and_end_an_attempt() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{HITS}\
+         [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+         complete_when = {{ counts = {{ damaged = 1 }} }}\nends_attempt_on = [\"damaged\"]\n"
+    );
+    assert!(Library::parse(&text).unwrap_err().contains("can never complete"));
 }
 
 // ------------------------------------------------------ generated challenges

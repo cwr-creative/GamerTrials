@@ -241,6 +241,10 @@ fn run() -> Result<(), String> {
                 c.kind,
                 describe(&c.complete_when)
             );
+            if !c.ends_attempt_on.is_empty() {
+                let facts: Vec<&str> = c.ends_attempt_on.iter().map(String::as_str).collect();
+                println!("[challenge] an attempt also ends on: {}", facts.join(", "));
+            }
             let stage =
                 manifest.stage(&c.stage.0).expect("validation proved the stage exists").clone();
             (stage, Some(c))
@@ -797,6 +801,12 @@ fn print_challenges(m: &Manifest) {
             c.stage.0,
             describe(&c.complete_when)
         );
+        if !c.ends_attempt_on.is_empty() {
+            // Worth its own line: it changes what the run costs, not what
+            // completes it (ADR 0025).
+            let facts: Vec<&str> = c.ends_attempt_on.iter().map(String::as_str).collect();
+            println!("        {:<34} an attempt ends on: {}", "", facts.join(", "));
+        }
         if let Some(t) = m.patch_table(&c.id) {
             // A generated challenge is a challenge that additionally says how
             // its ROM is derived (ADR 0015). Worth printing: it is the
@@ -824,11 +834,12 @@ fn describe(c: &session_api::Completion) -> String {
     if let Some(f) = c.survive_frames {
         parts.push(format!("survive {f} frames"));
     }
-    if let Some(n) = c.enemies_defeated {
-        parts.push(format!("defeat {n} enemies"));
-    }
-    for (item, n) in &c.items_collected {
-        parts.push(format!("collect {n} x {item}"));
+    for (name, n) in &c.counts {
+        parts.push(match name.as_str() {
+            session_api::ENEMY_DEFEATED => format!("defeat {n} enemies"),
+            session_api::DAMAGED => format!("take {n} hits"),
+            _ => format!("{n} x {name}"),
+        });
     }
     for o in &c.objectives {
         parts.push(format!("reach {o}"));

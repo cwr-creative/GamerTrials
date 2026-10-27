@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use session_api::{
     ChallengeId, ChallengeKind, ChallengeSpec, Completion, ExitReason, Framerate, GameId, StageId,
+    DAMAGED, ENEMY_DEFEATED,
 };
 
 /// The only schema version this build understands. A manifest states its own,
@@ -107,6 +108,8 @@ struct RuleDoc {
     #[serde(default)]
     item: Option<String>,
     #[serde(default)]
+    counter: Option<String>,
+    #[serde(default)]
     objective: Option<String>,
 }
 
@@ -131,6 +134,9 @@ struct ChallengeDoc {
     stage: String,
     kind: String,
     complete_when: CompleteWhenDoc,
+    /// Facts that end an attempt as a death does (ADR 0025).
+    #[serde(default)]
+    ends_attempt_on: Vec<String>,
     #[serde(default)]
     note: Option<String>,
 
@@ -158,10 +164,16 @@ struct CompleteWhenDoc {
     /// this crate.
     #[serde(default)]
     survive_seconds: Option<f64>,
+    /// Spelling for `counts.enemy_defeated`.
     #[serde(default)]
     enemies_defeated: Option<i64>,
+    /// Spelling for `counts` restricted to items, kept because it reads well
+    /// and because its errors can list the items a manifest has.
     #[serde(default)]
     items_collected: BTreeMap<String, i64>,
+    /// Any tally: an item, a counter, `damaged` or `enemy_defeated` (ADR 0025).
+    #[serde(default)]
+    counts: BTreeMap<String, i64>,
     #[serde(default)]
     objectives: Vec<String>,
 }
@@ -180,6 +192,10 @@ pub enum Emit {
     Damaged,
     EnemyDefeated,
     Item(String),
+    /// A named tally that is not an item — notes placed, laps, points. Counted
+    /// exactly like an item; the difference is only what it is called
+    /// (ADR 0025).
+    Count(String),
     /// A named milestone the game announced — a boss dying, a gate opening.
     /// Still a fact: whether reaching it completes anything is a challenge's
     /// `complete_when`, not this rule's business.
@@ -199,6 +215,7 @@ impl Emit {
         emit: &str,
         reason: Option<&str>,
         item: Option<&str>,
+        counter: Option<&str>,
         objective: Option<&str>,
         what: &str,
     ) -> Result<Emit, String> {
@@ -219,6 +236,11 @@ impl Emit {
                 item.ok_or_else(|| format!("{what}: emit `item` needs an `item` name"))?
                     .to_string(),
             ),
+            "count" => Emit::Count(
+                counter
+                    .ok_or_else(|| format!("{what}: emit `count` needs a `counter` name"))?
+                    .to_string(),
+            ),
             "objective" => Emit::Objective(
                 objective
                     .ok_or_else(|| format!("{what}: emit `objective` needs an `objective` name"))?
@@ -228,10 +250,13 @@ impl Emit {
             other => {
                 return Err(format!(
                     "{what}: unknown emit `{other}`; try stage_cleared, stage_exited, \
-                     died, damaged, enemy_defeated, item, objective, note"
+                     died, damaged, enemy_defeated, item, count, objective, note"
                 ))
             }
         };
+        if counter.is_some() && !matches!(e, Emit::Count(_)) {
+            return Err(format!("{what}: only `count` takes a `counter` name"));
+        }
         if reason.is_some() && !matches!(e, Emit::StageExited(_)) {
             return Err(format!("{what}: only `stage_exited` takes a `reason`"));
         }
@@ -277,6 +302,9 @@ pub struct Challenge {
     /// seconds; the conversion happens at load so that seconds never reach a
     /// `SessionEvent` or the wire.
     pub complete_when: Completion,
+    /// Facts that end an attempt the way a death does — tally or objective
+    /// names, validated against what the manifest emits (ADR 0025).
+    pub ends_attempt_on: BTreeSet<String>,
     pub note: Option<String>,
     /// `Some` when this challenge's content is rolled per attempt from a seed
     /// (ADR 0013, ADR 0015), and the version of the table that rolls it. A
@@ -301,6 +329,7 @@ impl Challenge {
             stage: self.stage.clone(),
             kind: self.kind,
             complete_when: self.complete_when.clone(),
+            ends_attempt_on: self.ends_attempt_on.clone(),
         }
     }
 }
@@ -362,9 +391,29 @@ impl Library {
 #[derive(Default)]
 struct Facts {
     cleared: bool,
-    enemy: bool,
-    items: BTreeSet<String>,
+    /// Every tally name a rule can advance, and what kind of fact advances it.
+    /// One namespace (ADR 0025): `counts` and `ends_attempt_on` look names up
+    /// here, so two kinds of fact sharing a name would make both ambiguous.
+    tallies: BTreeMap<String, Tally>,
     objectives: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tally {
+    /// `damaged` or `enemy_defeated`: named by `session-api`, not the manifest.
+    BuiltIn,
+    Item,
+    Counter,
+}
+
+impl Tally {
+    fn word(self) -> &'static str {
+        match self {
+            Tally::BuiltIn => "built-in tally",
+            Tally::Item => "item",
+            Tally::Counter => "counter",
+        }
+    }
 }
 
 impl Facts {
@@ -379,36 +428,87 @@ impl Facts {
                 &r.emit,
                 r.reason.as_deref(),
                 r.item.as_deref(),
+                r.counter.as_deref(),
                 r.objective.as_deref(),
                 &what,
             )?;
-            match emit {
-                Emit::StageCleared => f.cleared = true,
-                Emit::EnemyDefeated => f.enemy = true,
+            let (name, kind) = match emit {
+                Emit::StageCleared => {
+                    f.cleared = true;
+                    continue;
+                }
+                Emit::EnemyDefeated => {
+                    f.tally(ENEMY_DEFEATED.into(), Tally::BuiltIn, &what)?;
+                    continue;
+                }
+                Emit::Damaged => {
+                    f.tally(DAMAGED.into(), Tally::BuiltIn, &what)?;
+                    continue;
+                }
                 Emit::Objective(n) => {
-                    f.objectives.insert(n);
-                }
-                Emit::Item(name) => {
-                    // A per-bit rule names one item per bit — `kong_letter`
-                    // becomes `kong_letter:K` — so those are the names a
-                    // criterion has to use. Without labels the watcher falls
-                    // back to the bit number, and there are only ever 32.
-                    // `bits_set` is the runner's edge vocabulary; it is read
-                    // here for this and nothing else.
-                    if r.edge == "bits_set" {
-                        if r.bit_labels.is_empty() {
-                            f.items.extend((0..32).map(|b| format!("{name}:{b}")));
-                        } else {
-                            f.items.extend(r.bit_labels.iter().map(|l| format!("{name}:{l}")));
-                        }
-                    } else {
-                        f.items.insert(name);
+                    if let Some(t) = f.tallies.get(&n) {
+                        return Err(format!(
+                            "{what}: objective `{n}` has the same name as a {}",
+                            t.word()
+                        ));
                     }
+                    f.objectives.insert(n);
+                    continue;
                 }
-                _ => {}
+                Emit::Item(name) => (name, Tally::Item),
+                Emit::Count(name) => (name, Tally::Counter),
+                Emit::StageExited(_) | Emit::Died | Emit::Note => continue,
+            };
+            // A per-bit rule names one tally per bit — `kong_letter` becomes
+            // `kong_letter:K` — so those are the names a criterion has to use.
+            // Without labels the watcher falls back to the bit number, and
+            // there are only ever 32. `bits_set` is the runner's edge
+            // vocabulary; it is read here for this and nothing else.
+            let names: Vec<String> = if r.edge == "bits_set" {
+                if r.bit_labels.is_empty() {
+                    (0..32).map(|b| format!("{name}:{b}")).collect()
+                } else {
+                    r.bit_labels.iter().map(|l| format!("{name}:{l}")).collect()
+                }
+            } else {
+                vec![name]
+            };
+            for n in names {
+                f.tally(n, kind, &what)?;
             }
         }
         Ok(f)
+    }
+
+    /// Records a tally name, refusing one that another kind of fact already
+    /// uses — an item called `damaged`, or an item and a counter both called
+    /// `note`. Several rules advancing one tally is fine and normal.
+    fn tally(&mut self, name: String, kind: Tally, what: &str) -> Result<(), String> {
+        if self.objectives.contains(&name) {
+            return Err(format!(
+                "{what}: {} `{name}` has the same name as an objective",
+                kind.word()
+            ));
+        }
+        match self.tallies.get(&name) {
+            Some(&k) if k != kind => Err(format!(
+                "{what}: {} `{name}` has the same name as a {}; a tally name means one thing",
+                kind.word(),
+                k.word()
+            )),
+            _ => {
+                self.tallies.insert(name, kind);
+                Ok(())
+            }
+        }
+    }
+
+    fn names(&self, kind: Option<Tally>) -> BTreeSet<String> {
+        self.tallies
+            .iter()
+            .filter(|(_, k)| kind.map_or(true, |want| **k == want))
+            .map(|(n, _)| n.clone())
+            .collect()
     }
 }
 
@@ -453,6 +553,7 @@ impl Doc {
             })?;
 
             let complete_when = completion(&c.complete_when, kind, framerate, &facts, &what)?;
+            let ends_attempt_on = ends_attempt_on(&c.ends_attempt_on, &complete_when, &facts, &what)?;
 
             let generator_version = match (c.patch_slot.is_empty(), c.generator_version) {
                 (true, None) => {
@@ -487,6 +588,7 @@ impl Doc {
                 stage: stage.id.clone(),
                 kind,
                 complete_when,
+                ends_attempt_on,
                 note: c.note.clone(),
                 generator_version,
             });
@@ -518,9 +620,18 @@ fn completion(
     let mut out = Completion {
         cleared: w.cleared.unwrap_or(false),
         survive_frames: None,
-        enemies_defeated: None,
-        items_collected: BTreeMap::new(),
+        counts: BTreeMap::new(),
         objectives: w.objectives.clone(),
+    };
+    // Three spellings feed one `counts`; a name given twice is two numbers for
+    // one criterion, and neither is obviously the one meant.
+    let mut count = |name: &str, n: u32, key: &str| -> Result<(), String> {
+        if out.counts.insert(name.to_string(), n).is_some() {
+            return Err(format!(
+                "{what}: `{name}` is counted twice — {key} and another key name the same tally"
+            ));
+        }
+        Ok(())
     };
 
     if w.cleared == Some(false) {
@@ -530,10 +641,52 @@ fn completion(
             "{what}: `cleared = false` is not a criterion; remove the key instead"
         ));
     }
-    if out.cleared && !facts.cleared {
+    if w.cleared == Some(true) && !facts.cleared {
         return Err(format!(
             "{what}: complete_when.cleared, but no [[rule]] emits `stage_cleared`"
         ));
+    }
+
+    if let Some(n) = w.enemies_defeated {
+        let n = as_u32(n, &format!("{what}: enemies_defeated"))?;
+        if n == 0 {
+            return Err(format!("{what}: enemies_defeated must be at least 1"));
+        }
+        if !facts.tallies.contains_key(ENEMY_DEFEATED) {
+            return Err(format!(
+                "{what}: complete_when.enemies_defeated, but no [[rule]] emits \
+                 `enemy_defeated`"
+            ));
+        }
+        count(ENEMY_DEFEATED, n, "enemies_defeated")?;
+    }
+
+    for (item, n) in &w.items_collected {
+        let n = as_u32(*n, &format!("{what}: items_collected.{item}"))?;
+        if n == 0 {
+            return Err(format!("{what}: items_collected.{item} must be at least 1"));
+        }
+        if facts.tallies.get(item) != Some(&Tally::Item) {
+            return Err(format!(
+                "{what}: no [[rule]] emits item `{item}`; this manifest emits {}",
+                list_or_none(&facts.names(Some(Tally::Item)))
+            ));
+        }
+        count(item, n, "items_collected")?;
+    }
+
+    for (name, n) in &w.counts {
+        let n = as_u32(*n, &format!("{what}: counts.{name}"))?;
+        if n == 0 {
+            return Err(format!("{what}: counts.{name} must be at least 1"));
+        }
+        if !facts.tallies.contains_key(name) {
+            return Err(format!(
+                "{what}: no [[rule]] advances a tally named `{name}`; this manifest counts {}",
+                list_or_none(&facts.names(None))
+            ));
+        }
+        count(name, n, "counts")?;
     }
 
     if let Some(secs) = w.survive_seconds {
@@ -554,34 +707,6 @@ fn completion(
         out.survive_frames = Some(framerate.frames(secs));
     }
 
-    if let Some(n) = w.enemies_defeated {
-        let n = as_u32(n, &format!("{what}: enemies_defeated"))?;
-        if n == 0 {
-            return Err(format!("{what}: enemies_defeated must be at least 1"));
-        }
-        if !facts.enemy {
-            return Err(format!(
-                "{what}: complete_when.enemies_defeated, but no [[rule]] emits \
-                 `enemy_defeated`"
-            ));
-        }
-        out.enemies_defeated = Some(n);
-    }
-
-    for (item, count) in &w.items_collected {
-        let n = as_u32(*count, &format!("{what}: items_collected.{item}"))?;
-        if n == 0 {
-            return Err(format!("{what}: items_collected.{item} must be at least 1"));
-        }
-        if !facts.items.contains(item) {
-            return Err(format!(
-                "{what}: no [[rule]] emits item `{item}`; this manifest emits {}",
-                list_or_none(&facts.items)
-            ));
-        }
-        out.items_collected.insert(item.clone(), n);
-    }
-
     for objective in &out.objectives {
         if !facts.objectives.contains(objective) {
             return Err(format!(
@@ -595,6 +720,49 @@ fn completion(
         return Err(format!(
             "{what}: complete_when has no criteria, so nothing can ever complete it"
         ));
+    }
+    Ok(out)
+}
+
+/// The facts that end an attempt as a death does. Each must be something this
+/// manifest emits, and none may be something the criteria need: a fact that
+/// ends the attempt on the frame it arrives can never also complete the run on
+/// it, for the same reason a death cannot (ADR 0023, ADR 0025).
+fn ends_attempt_on(
+    names: &[String],
+    complete_when: &Completion,
+    facts: &Facts,
+    what: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut out = BTreeSet::new();
+    for name in names {
+        match name.as_str() {
+            "died" | "stage_exited" | "stage_cleared" => {
+                return Err(format!(
+                    "{what}: ends_attempt_on `{name}` — that already ends an attempt; \
+                     list facts that otherwise would not"
+                ))
+            }
+            _ => {}
+        }
+        if !facts.tallies.contains_key(name) && !facts.objectives.contains(name) {
+            let mut known = facts.names(None);
+            known.extend(facts.objectives.iter().cloned());
+            return Err(format!(
+                "{what}: ends_attempt_on `{name}`, but no [[rule]] emits it; this manifest \
+                 emits {}",
+                list_or_none(&known)
+            ));
+        }
+        if complete_when.counts.contains_key(name) || complete_when.objectives.contains(name) {
+            return Err(format!(
+                "{what}: `{name}` both completes the run and ends the attempt, so the run \
+                 can never complete"
+            ));
+        }
+        if !out.insert(name.clone()) {
+            return Err(format!("{what}: ends_attempt_on lists `{name}` twice"));
+        }
     }
     Ok(out)
 }
