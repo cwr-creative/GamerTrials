@@ -172,7 +172,10 @@ boot_seconds = 16.0            # optional; required by a `named` entry point
   DOS game maps its own keys, Doom's controls are configured inside Doom, and a
   manifest that remapped them would be overriding a choice the player has
   already made. Declaring `pad_layout` alongside it is an error rather than
-  ignored.
+  ignored. A PC has a mouse beside its keyboard, so this shape carries one
+  too: relative motion and buttons, answered as `RETRO_DEVICE_MOUSE` to a core
+  that asks. There is nothing to declare for it — a game that reads the mouse
+  gets it, and one that does not is never told.
 
 `boot_seconds` is how long a cold boot takes to reach the game — DOS starting,
 the bundle's `[autoexec]` running. It converts to frames at `game.framerate` at
@@ -183,8 +186,8 @@ point. A console manifest omits it.
 
 ```toml
 [runner.libretro.options]
-dosbox_pure_cycles = "26800"
-dosbox_pure_force60fps = "true"
+dosbox_pure_cycles = "77000"
+dosbox_pure_force60fps = "false"
 ```
 
 Core options this game is pinned to, checked at startup against what the core

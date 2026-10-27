@@ -212,10 +212,11 @@ fn the_dos_game_differs_from_the_consoles_only_in_its_runner_block() {
 #[test]
 fn the_dos_game_pins_the_options_that_decide_what_a_frame_means() {
     let m = doom();
-    assert_eq!(m.libretro.options.get("dosbox_pure_cycles").map(String::as_str), Some("26800"));
-    assert_eq!(m.libretro.options.get("dosbox_pure_force60fps").map(String::as_str), Some("true"));
-    // ...and the declared framerate is only true because of the second of those.
-    assert_eq!(m.framerate.0, 60.0);
+    assert_eq!(m.libretro.options.get("dosbox_pure_cycles").map(String::as_str), Some("77000"));
+    assert_eq!(m.libretro.options.get("dosbox_pure_force60fps").map(String::as_str), Some("false"));
+    // ...and the declared framerate is VGA's own refresh, which is what the
+    // core reports once the second of those stops forcing 60.
+    assert_eq!(m.framerate.0, 70.0866);
 }
 
 /// A `named` entry is how a state gets captured in the first place (ADR 0002),

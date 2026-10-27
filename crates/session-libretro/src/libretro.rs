@@ -34,7 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_char, c_uint, c_void, CString};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use libloading::{Library, Symbol};
@@ -42,6 +42,10 @@ use libloading::{Library, Symbol};
 // ---------------------------------------------------------------- constants
 
 pub const RETRO_DEVICE_JOYPAD: u32 = 1;
+/// A relative mouse. Not a port device of its own here: a DOS core reads it
+/// alongside the keyboard, the way a PC has both, so it is answered whatever
+/// port 0 is set to and a core that never asks is never told.
+pub const RETRO_DEVICE_MOUSE: u32 = 2;
 /// Keyboard, as a controller device. A DOS game is driven through this rather
 /// than through the pad (ADR 0018), and a core reads it out of `input_state`
 /// exactly the way it reads a button.
@@ -89,6 +93,19 @@ pub const JOY_L: u32 = 10;
 pub const JOY_R: u32 = 11;
 /// Cores that negotiated GET_INPUT_BITMASKS ask for every button at once.
 const JOY_MASK: u32 = 256;
+/// A core may ask for a subclass of a device (`RETRO_DEVICE_SUBCLASS`); the
+/// base device is the low byte.
+const RETRO_DEVICE_MASK: u32 = 0xFF;
+
+// Mouse ids, in libretro order. X and Y are motion since the last poll, not
+// buttons; every other id is a button and is a bit in `MOUSE_BUTTONS`.
+const MOUSE_X: u32 = 0;
+const MOUSE_Y: u32 = 1;
+pub const MOUSE_LEFT: u32 = 2;
+pub const MOUSE_RIGHT: u32 = 3;
+pub const MOUSE_WHEELUP: u32 = 4;
+pub const MOUSE_WHEELDOWN: u32 = 5;
+pub const MOUSE_MIDDLE: u32 = 6;
 
 const PIXEL_FORMAT_0RGB1555: u32 = 0;
 const PIXEL_FORMAT_XRGB8888: u32 = 1;
@@ -364,6 +381,14 @@ pub static AUDIO_ENABLED: AtomicU32 = AtomicU32::new(0);
 /// Current joypad state as a bitmask indexed by the `JOY_*` ids.
 pub static JOYPAD: AtomicU32 = AtomicU32::new(0);
 
+/// This frame's mouse motion, in host pixels, and its held buttons as a bitmask
+/// indexed by the `MOUSE_*` ids. Latched once per frame by [`set_mouse`], so a
+/// core that asks for X twice in one frame gets the same answer twice rather
+/// than the motion counted twice.
+static MOUSE_DX: AtomicI32 = AtomicI32::new(0);
+static MOUSE_DY: AtomicI32 = AtomicI32::new(0);
+static MOUSE_BUTTONS: AtomicU32 = AtomicU32::new(0);
+
 /// Keycodes currently held, as `RETROK_*` values. A keyboard-driven core reads
 /// these out of `input_state`; see [`key_down`].
 static KEYS_DOWN: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
@@ -602,12 +627,23 @@ pub fn key_up(code: u32) {
 
 /// Release everything. Used when focus is lost, and before a state is
 /// restored — a key the core thinks is held across an entry is a stage that
-/// starts with the player walking into a wall.
+/// starts with the player walking into a wall. The mouse is released with the
+/// keys, for the same reason: a fire button held across an entry is a shot.
 pub fn keys_clear() {
     let held: Vec<u32> = lock(&KEYS_DOWN).iter().copied().collect();
     for k in held {
         key_up(k);
     }
+    set_mouse(0, 0, 0);
+}
+
+/// Latch the mouse for the next frame: motion since the last frame, and the
+/// held buttons as `1 << MOUSE_*` bits. Call it once per frame, before
+/// `retro_run`; a frame it is not called for repeats the last motion.
+pub fn set_mouse(dx: i32, dy: i32, buttons: u32) {
+    MOUSE_DX.store(dx, Ordering::Relaxed);
+    MOUSE_DY.store(dy, Ordering::Relaxed);
+    MOUSE_BUTTONS.store(buttons, Ordering::Relaxed);
 }
 
 /// Whether the core has asked to be shut down. Running frames past this drives
@@ -815,7 +851,8 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            *(data as *mut u64) = (1 << RETRO_DEVICE_JOYPAD) | (1 << RETRO_DEVICE_KEYBOARD);
+            *(data as *mut u64) =
+                (1 << RETRO_DEVICE_JOYPAD) | (1 << RETRO_DEVICE_MOUSE) | (1 << RETRO_DEVICE_KEYBOARD);
             true
         }
         ENV_GET_AUDIO_VIDEO_ENABLE => {
@@ -1159,6 +1196,10 @@ unsafe extern "C" fn cb_audio_sample_batch(data: *const i16, frames: usize) -> u
     frames
 }
 
+fn clamp_i16(v: i32) -> i16 {
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 unsafe extern "C" fn cb_input_poll() {
     // The main loop polls window and gamepad before calling retro_run.
 }
@@ -1167,7 +1208,7 @@ unsafe extern "C" fn cb_input_state(port: u32, device: u32, _index: u32, id: u32
     if port != 0 {
         return 0;
     }
-    match device {
+    match device & RETRO_DEVICE_MASK {
         RETRO_DEVICE_JOYPAD => {
             let bits = JOYPAD.load(Ordering::Relaxed);
             if id == JOY_MASK {
@@ -1182,6 +1223,12 @@ unsafe extern "C" fn cb_input_state(port: u32, device: u32, _index: u32, id: u32
         // `id` is a RETROK_* code here, not a button index. A core polls this
         // for every key it cares about, every frame.
         RETRO_DEVICE_KEYBOARD => i16::from(lock(&KEYS_DOWN).contains(&id)),
+        RETRO_DEVICE_MOUSE => match id {
+            MOUSE_X => clamp_i16(MOUSE_DX.load(Ordering::Relaxed)),
+            MOUSE_Y => clamp_i16(MOUSE_DY.load(Ordering::Relaxed)),
+            _ if id < 32 => i16::from(MOUSE_BUTTONS.load(Ordering::Relaxed) & (1 << id) != 0),
+            _ => 0,
+        },
         _ => 0,
     }
 }
@@ -1539,4 +1586,31 @@ fn cpath(p: &Path) -> Result<CString, String> {
     let text = abs.to_string_lossy();
     let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
     CString::new(text).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mouse(id: u32) -> i16 {
+        unsafe { cb_input_state(0, RETRO_DEVICE_MOUSE, 0, id) }
+    }
+
+    /// The mouse is latched once per frame, so a core that asks twice gets the
+    /// same motion twice; and it is released with the keys, so a held fire
+    /// button does not survive a stage entry.
+    #[test]
+    fn the_mouse_is_latched_per_frame_and_released_with_the_keys() {
+        set_mouse(5, -40_000, (1 << MOUSE_LEFT) | (1 << MOUSE_WHEELUP));
+        assert_eq!((mouse(MOUSE_X), mouse(MOUSE_X)), (5, 5));
+        assert_eq!(mouse(MOUSE_Y), i16::MIN, "motion saturates rather than wrapping");
+        assert_eq!((mouse(MOUSE_LEFT), mouse(MOUSE_RIGHT), mouse(MOUSE_WHEELUP)), (1, 0, 1));
+        // A subclassed device is still a mouse.
+        assert_eq!(unsafe { cb_input_state(0, RETRO_DEVICE_MOUSE | (1 << 8), 0, MOUSE_X) }, 5);
+        // Only port 0 has a player behind it.
+        assert_eq!(unsafe { cb_input_state(1, RETRO_DEVICE_MOUSE, 0, MOUSE_X) }, 0);
+
+        keys_clear();
+        assert_eq!((mouse(MOUSE_X), mouse(MOUSE_Y), mouse(MOUSE_LEFT)), (0, 0, 0));
+    }
 }

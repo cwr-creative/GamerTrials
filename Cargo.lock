@@ -1027,6 +1027,7 @@ dependencies = [
  "serde",
  "session-api",
  "toml",
+ "winapi",
 ]
 
 [[package]]

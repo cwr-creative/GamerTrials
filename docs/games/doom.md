@@ -104,22 +104,28 @@ That is not special to sound; it is what "the state is the whole machine" costs.
 
 ## What is different about a DOS game
 
-Four things, all in `[runner.libretro]`, and nothing below that line — plus the
-bundle carrying configuration of its own, which is [Sound](#sound) above:
+Five things, all in `[game]` and `[runner.libretro]`, and nothing below that
+line — plus the bundle carrying configuration of its own, which is
+[Sound](#sound) above:
 
 1. **No system-RAM slice.** `retro_get_memory_data` answers nothing for every
    id, `SYSTEM_RAM` included. `dosbox-pure` publishes three `SET_MEMORY_MAPS`
    descriptors instead — conventional memory, the HMA, and 15.4 MiB of extended
    memory at `0x200000` where a DOS/4GW program lives. So `prefer =
    "memory_map"` is the route that works, which is the route SMB3 already uses.
-2. **A keyboard, not a pad.** `controller = "keyboard"`, and every host key
-   passes through unchanged. Doom maps its own keys.
+2. **A keyboard and a mouse, not a pad.** `controller = "keyboard"`, and
+   every host key passes through unchanged. Doom maps its own keys. The mouse
+   comes with it, as relative motion (`RETRO_DEVICE_MOUSE`): click the harness
+   window to capture it, Alt-Tab to release it.
 3. **Pinned core options.** See below. This is the load-bearing one — eight of
    them now: six that decide what machine is built, and two
    (`dosbox_pure_sblaster_conf`, `dosbox_pure_midi`) that the bundle's
    `DEFAULT.CFG` is written against.
 4. **Four-byte fields.** Doom's globals are C `int`s, so `default_width =
    "u32"`.
+5. **No fixed framerate.** A PC's refresh is whatever video mode the program
+   chose. `framerate = 70.0866` is VGA's, in the mode DOOM draws in; see
+   [70 Hz, not a forced 60](#70-hz-not-a-forced-60).
 
 ## The cycles setting is part of the score
 
@@ -141,41 +147,91 @@ part of the game's identity rather than a preference, which is why
 machine under matched load. It is repeatable here and not portable, which is the
 worst combination — it would pass a single-machine test and diverge in a race.
 
-### 26800 is not a performance ceiling, so do not raise it to fix a feel
+### What the cycles value limits, and why it is 77000
 
-Doom felt laggy long before anyone measured it, and `dosbox_pure_cycles` is the
-obvious suspect: it is the setting that says how fast the machine is. It is the
-wrong one, and raising it costs a real thing — every frame count in the library
-becomes incomparable with every previous one — in exchange for nothing.
+`dosbox_pure_cycles` was 26800 — a 486DX2-66 in dosbox-pure's own table — and
+this section used to argue it was no ceiling, because the *host* spent under
+1 ms of each frame emulating it. That measured the wrong machine. The host's
+headroom says nothing about how fast the *emulated* CPU is, and the emulated
+CPU is what decides how many pictures DOOM can draw. DOOM's game logic runs at
+35 tics a second off the emulated timer whatever the CPU, so a slow CPU does not
+slow the game down: it draws fewer of those tics.
 
-Measured per 16.67 ms frame, release build, entering at `e1m1-hangar`:
+Measured by counting frames whose picture changed, from the `e1m1-hangar` state
+with a turn key held, so that every tic redraws:
+
+| cycles | pictures a second (35 is DOOM's ceiling) | host ms per frame |
+|---|---|---|
+| 13400 | 19.6 | 0.29 |
+| 26800 | 33.6 | 0.51 |
+| 77000 | 35.0, flat | 1.4 |
+
+In the busier attract demos 26800 averaged ~30 and dipped to 26. 77000 — a
+Pentium 100 — is the slowest value in the core's list at which E1M1 holds 35,
+and the host cost is still under a tenth of a frame. Changing it made every
+frame count recorded at 26800 incomparable with every later one, which was
+affordable only because nothing stores scores yet. Do not move it again without
+the same reckoning.
+
+### 70 Hz, not a forced 60
+
+`dosbox_pure_force60fps` was on, so that `framerate = 60.0` was true. It cost
+more than it looked. DOOM draws at most 35 pictures a second, and VGA scans out
+at 70.0866 Hz, so each picture is on the emulated screen for exactly two
+refreshes. Forced to 60, the core has to drop VGA frames, and 35 does not
+divide into 60: pictures alternate between one output frame and two (16.7 ms
+and 33.3 ms) — a judder that made the same game, running at the same speed,
+look slower and laggier than in RetroArch, which leaves the option off. At
+70 Hz every picture holds for two frames, measured as a flat 35 a second.
+
+So the option is now off and `framerate = 70.0866`, which is what the core
+reports — the runner warns at startup whenever those two disagree. It is true
+because DOOM never leaves mode 13h, and the text mode DOS boots in is 70 Hz as
+well. A DOS game that switched to a 60 Hz mode would make it false, which is
+why the number is a manifest field and not a constant.
+
+**Every frame number on this page measured before that change is at 60 Hz** —
+the address evidence, the stage clear at 1149, the attract-demo deaths. They
+are records of what was seen, not predictions; scale by 70.0866/60 to compare
+one with a run today, and expect anything measured from a cold boot to differ by
+more than that, because the CPU got faster at the same time.
+
+`assets/states/doom_e1m1.state` was recaptured under the new options, by the
+command under [Running it](#running-it). It restores into E1M1 with health 100.
+
+### What it was not
+
+Before any of that was found, the RAM tools were the suspect. They are not.
+Per frame, release build:
 
 | | ms |
 |---|---|
-| `retro_run` plus the watcher (`--no-probe`) | 0.53 |
-| `scan_window`, the probe's 64 KB read | 0.33 |
+| `retro_run` plus the watcher | 0.22–0.53 |
+| `scan_window`, the probe's 64 KB read | 0.31 |
 | `Probe::tick` | 0.01 |
+| presenting through minifb, up to 2560×1600 | 0.4–1.4 |
 
-Under 0.9 ms of 16.67 — the emulated machine has roughly eighteen times the
-headroom it needs, at 26800, on the probe's default settings.
-`dosbox_pure_perfstats = "simple"` shows the same thing on screen if you want to
-watch it rather than take this table's word.
+And the loop keeps exactly real time: paced by its own audio queue, it ran
+60.00 emulated frames per wall second with the probe on. A debug build is a
+different story for the RAM tools — `scan_window` takes 3.2 ms there and
+`Probe::tick` 1.2 ms — which still fits in a frame, but is a reason to run the
+harness with `--release`.
 
-What the lag actually was is latency rather than throughput, all of it in the
-harness's own loop, and it is fixed there: the loop used to read the keyboard
-*before* waiting for the frame's turn, so a whole frame of pacing sat between a
-keypress and the frame it reached; minifb only refreshes what `is_key_down`
-reports when the window is pumped, which used to happen only at the bottom of
-the loop; the audio queue that paces the loop was three frames (~50 ms) deep and
-is now two; and minifb's own 250 fps limiter was still on underneath ours,
-sleeping out the remainder of 4 ms inside every update. See the comments around
-the loop in `src/bin/harness.rs` and `TARGET_QUEUED_FRAMES` in `src/audio.rs`.
+Earlier latency in the harness's own loop was real, and was fixed there: the
+loop used to read the keyboard *before* waiting for the frame's turn, so a whole
+frame of pacing sat between a keypress and the frame it reached; minifb only
+refreshes what `is_key_down` reports when the window is pumped, which used to
+happen only at the bottom of the loop; the audio queue that paces the loop was
+three frames (~50 ms) deep and is now two; and minifb's own 250 fps limiter was
+still on underneath ours, sleeping out the remainder of 4 ms inside every
+update. See the comments around the loop in `src/bin/harness.rs` and
+`TARGET_QUEUED_FRAMES` in `src/audio.rs`.
 
 One thing there is worth watching rather than fixing yet. `scan_window` reads
 its window a byte at a time through `AddressSpace::read_u8`, and for a core with
 no system-RAM slice every one of those bytes takes the `MEMORY_MAP` mutex and
 walks the descriptor list — 65,536 lock/scan pairs per frame for the 64 KB
-window below. That is the 0.33 ms, which is affordable. It is also linear in the
+window below. That is the 0.31 ms, which is affordable. It is also linear in the
 window, and the advice below is to *widen* the window when hunting for a new
 address, so it is the first thing to hoist if a search ever feels slow.
 `--no-probe` removes it entirely.
@@ -335,6 +391,11 @@ cargo run --release -p session-libretro --bin harness -- --game doom --stage e1m
 Every key goes to the game, Escape included — Doom's menu needs it. **F12
 quits**, and F1-F11 stay with the harness (F1 captures a state, F2 re-enters,
 F3-F8/F10 are the RAM search, F11 the probe).
+
+The mouse goes to the game too, once you click the window: the cursor is hidden
+and held in the window, and that first click is swallowed rather than fired.
+Alt-Tab releases it. DOOM's defaults apply — left fires, right strafes, middle
+moves forward — and its sensitivity is DOOM's own, in its options menu.
 
 The RAM tools work over `[runner.libretro.memory.scan]` — 64 KB around the
 player struct and the `g_game.c` globals. Widen it in the manifest when hunting

@@ -11,7 +11,8 @@
 //!   ([`keyboard_passthrough`]). There is nothing to lay out, because a DOS
 //!   game maps its own keys — Doom's controls are configured inside Doom, and a
 //!   manifest that remapped them would be overriding a choice the player has
-//!   already made.
+//!   already made. A PC has a mouse beside its keyboard, so this shape carries
+//!   one too ([`Mouse`]), and a game that ignores it is not bothered by it.
 //!
 //! The libretro joypad layout *is* the SNES pad, so all twelve ids are always
 //! mapped and a NES core simply ignores the four it does not have. The one
@@ -22,7 +23,7 @@
 //! game cannot have that, because every position is already taken.
 
 use gilrs::{Axis, Button, Gilrs};
-use minifb::{Key, Window};
+use minifb::{Key, MouseButton, MouseMode, Window};
 
 use crate::libretro;
 
@@ -217,4 +218,164 @@ pub fn keyboard_passthrough(window: &Window) {
             libretro::key_up(*code);
         }
     }
+}
+
+/// The host mouse, as the relative motion a DOS game reads.
+///
+/// A mouse that turns a player has to be captured: an absolute cursor stops
+/// producing motion at the edge of the screen, which is a player who can no
+/// longer turn left. So a click in the window captures it — the cursor is
+/// hidden, held to the window, and put back in the middle after every frame so
+/// that motion is measured from there — and losing focus (Alt-Tab) releases
+/// it. The click that captures is swallowed rather than passed on, because in
+/// Doom it would be a shot.
+///
+/// Motion is in host pixels after Windows' own pointer acceleration, which is
+/// what a cursor-warping frontend gets; raw input would need the window's
+/// message loop, and minifb owns that.
+pub struct Mouse {
+    captured: bool,
+    /// Held from the capturing click until it is released, so the game never
+    /// sees the second half of a press it did not see start.
+    swallow_left: bool,
+}
+
+impl Mouse {
+    pub fn new() -> Self {
+        Mouse { captured: false, swallow_left: false }
+    }
+
+    /// Latch this frame's motion and buttons into the core. Once per frame,
+    /// after the window has been pumped and before the frame runs.
+    pub fn pump(&mut self, window: &mut Window) {
+        if !window.is_active() {
+            self.release(window);
+            libretro::set_mouse(0, 0, 0);
+            return;
+        }
+        let left = window.get_mouse_down(MouseButton::Left);
+        if !self.captured {
+            if left && window.get_mouse_pos(MouseMode::Discard).is_some() && cursor::capture(window) {
+                window.set_cursor_visibility(false);
+                self.captured = true;
+                self.swallow_left = true;
+            }
+            libretro::set_mouse(0, 0, 0);
+            return;
+        }
+        let Some((dx, dy)) = cursor::recentre(window) else {
+            self.release(window);
+            libretro::set_mouse(0, 0, 0);
+            return;
+        };
+        if !left {
+            self.swallow_left = false;
+        }
+        let mut buttons = 0u32;
+        set(&mut buttons, libretro::MOUSE_LEFT, left && !self.swallow_left);
+        set(&mut buttons, libretro::MOUSE_RIGHT, window.get_mouse_down(MouseButton::Right));
+        set(&mut buttons, libretro::MOUSE_MIDDLE, window.get_mouse_down(MouseButton::Middle));
+        // Best effort: minifb clears the wheel at the start of every pump and
+        // this loop pumps twice a frame, so a notch that lands during the
+        // presenting pump is lost. Nothing in the library uses the wheel yet.
+        if let Some((_, wheel)) = window.get_scroll_wheel() {
+            set(&mut buttons, libretro::MOUSE_WHEELUP, wheel > 0.0);
+            set(&mut buttons, libretro::MOUSE_WHEELDOWN, wheel < 0.0);
+        }
+        libretro::set_mouse(dx, dy, buttons);
+    }
+
+    fn release(&mut self, window: &mut Window) {
+        if self.captured {
+            cursor::release();
+            // `set_cursor_visibility` is a counter on Windows, not a flag, so
+            // it is called once per change and never per frame.
+            window.set_cursor_visibility(true);
+            self.captured = false;
+        }
+        self.swallow_left = false;
+    }
+}
+
+impl Default for Mouse {
+    fn default() -> Self {
+        Mouse::new()
+    }
+}
+
+/// Holding the cursor in the window and measuring it from the centre.
+#[cfg(windows)]
+mod cursor {
+    use minifb::Window;
+    use winapi::shared::windef::{HWND, POINT, RECT};
+    use winapi::um::winuser::{ClientToScreen, ClipCursor, GetClientRect, GetCursorPos, SetCursorPos};
+
+    /// The window's client area and its centre, in screen coordinates.
+    fn client(window: &Window) -> Option<(RECT, POINT)> {
+        let hwnd = window.get_window_handle() as HWND;
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        unsafe {
+            if GetClientRect(hwnd, &mut rect) == 0 || rect.right <= 0 || rect.bottom <= 0 {
+                return None;
+            }
+            let mut tl = POINT { x: 0, y: 0 };
+            let mut br = POINT { x: rect.right, y: rect.bottom };
+            if ClientToScreen(hwnd, &mut tl) == 0 || ClientToScreen(hwnd, &mut br) == 0 {
+                return None;
+            }
+            let screen = RECT { left: tl.x, top: tl.y, right: br.x, bottom: br.y };
+            let centre = POINT { x: (tl.x + br.x) / 2, y: (tl.y + br.y) / 2 };
+            Some((screen, centre))
+        }
+    }
+
+    pub fn capture(window: &Window) -> bool {
+        let Some((rect, centre)) = client(window) else {
+            return false;
+        };
+        unsafe {
+            ClipCursor(&rect);
+            SetCursorPos(centre.x, centre.y);
+        }
+        true
+    }
+
+    /// Motion since the last call, then the cursor back to the centre. The
+    /// clip is re-applied every frame because the window may have moved, and
+    /// Windows drops a clip on its own whenever another window takes focus.
+    pub fn recentre(window: &Window) -> Option<(i32, i32)> {
+        let (rect, centre) = client(window)?;
+        let mut at = POINT { x: 0, y: 0 };
+        unsafe {
+            if GetCursorPos(&mut at) == 0 {
+                return None;
+            }
+            ClipCursor(&rect);
+            SetCursorPos(centre.x, centre.y);
+        }
+        Some((at.x - centre.x, at.y - centre.y))
+    }
+
+    pub fn release() {
+        unsafe {
+            ClipCursor(std::ptr::null());
+        }
+    }
+}
+
+/// Elsewhere there is no capture, and so no motion: the buttons still work.
+/// The project targets Windows; this is only here so the crate still builds.
+#[cfg(not(windows))]
+mod cursor {
+    use minifb::Window;
+
+    pub fn capture(_: &Window) -> bool {
+        true
+    }
+
+    pub fn recentre(_: &Window) -> Option<(i32, i32)> {
+        Some((0, 0))
+    }
+
+    pub fn release() {}
 }

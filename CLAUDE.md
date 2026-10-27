@@ -152,7 +152,7 @@ schema — `controller = "keyboard"`, `boot_seconds`,
 watch width — and nothing in `[watch]`, `[[rule]]`, `[[challenge]]` or
 `SessionEvent` changed. The spike crate is deleted.
 
-Four things learned there are worth not rediscovering:
+Five things learned there are worth not rediscovering:
 
 - **A DOS bundle carries the game's configuration, not just its files.** DOOM
   reads its sound card out of a `DEFAULT.CFG` that `SETUP.EXE` normally writes;
@@ -174,6 +174,12 @@ Four things learned there are worth not rediscovering:
 - **A core options table is part of a game's identity.** `dosbox_pure_cycles`
   changes how many emulated frames a piece of play takes, so two players on
   different values have incomparable scores (invariant 4).
+- **Host headroom is not guest speed, and a PC has no 60 Hz.** The host spent
+  under 1 ms a frame on Doom at 26800 cycles, which proved nothing about how
+  fast the *emulated* CPU draws; and forcing 60 fps put Doom's 35 pictures a
+  second on an uneven 1-2 cadence. Both made it feel slower than RetroArch at
+  the same game speed. It now runs at 77000 and VGA's native 70.0866 Hz
+  (`docs/games/doom.md`).
 
 Then `schema_version = 3` and `content-gen` (ADR 0020/0015/0013): content
 stopped being one file per manifest. `[rom]` became `[[rom]]` with an `id`,

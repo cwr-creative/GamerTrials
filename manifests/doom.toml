@@ -20,10 +20,19 @@ id = "doom"
 title = "DOOM (shareware)"
 console = "dos"
 region = "usa"
-# Not a property of the machine, the way 60.0988 is on the NES: a PC has no
-# fixed framerate. This number is only true because `dosbox_pure_force60fps`
-# below makes it true, which is why the options table is not cosmetic.
-framerate = 60.0
+# VGA's own refresh, which is what the core reports with
+# `dosbox_pure_force60fps` off: 70.0866 Hz in the 320x200 mode DOOM draws in,
+# and in the text mode DOS boots in. Not a constant of the machine the way
+# 60.0988 is of the NES — a DOS program may change video modes, and the refresh
+# with it — so it is only true because DOOM never leaves that mode, and the
+# runner says so on startup if the core ever disagrees.
+#
+# 70 rather than a forced 60 because DOOM draws at most 35 pictures a second.
+# At 70 Hz every picture is on screen for exactly two frames; at 60 the core has
+# to drop VGA frames, and pictures alternate unevenly between one frame and two
+# — a judder that made the same game, at the same speed, look slower and laggier
+# than it does in RetroArch. docs/games/doom.md has the measurements.
+framerate = 70.0866
 
 [[rom]]
 id = "base"
@@ -56,9 +65,10 @@ core_dir = "cores/dos"
 # reaches the game rather than quitting the harness; F12 quits.
 controller = "keyboard"
 # Cold boot: DOS starts, the [autoexec] runs DOOM.EXE -warp 1 1, and the player
-# is in E1M1. Measured at ~900 frames; 16 s leaves headroom without being long
-# enough to matter, because a `state` entry is what a real session uses and
-# this path exists to capture one.
+# is in E1M1. Health first reads 100 on frame 31 (frame 60 at the old 26800 /
+# forced-60 settings), so 16 s is far more headroom than it needs — and costs
+# nothing, because a `state` entry is what a real session uses and this path
+# exists to capture one.
 boot_seconds = 16.0
 
 # The load-bearing table, and a new kind of thing in a manifest: not an address
@@ -72,10 +82,16 @@ boot_seconds = 16.0
 # comparable between players on the same value, which makes it part of the
 # game's identity rather than a preference (ADR 0018, invariant 4).
 #
+# 77000 is a Pentium 100 in dosbox-pure's own table, and the slowest value at
+# which DOOM draws its full 35 pictures a second in E1M1. It was 26800, a
+# 486DX2-66, which held it to ~33 in E1M1 and dipped to 26 in busier scenes.
+# The host is not what limits that — it spends ~1.3 ms of each frame on this —
+# the emulated CPU is.
+#
 # Keep this list short and reviewed. It is not a place to park preferences.
 [runner.libretro.options]
-dosbox_pure_cycles = "26800"          # fixed speed; `auto` tracks the host
-dosbox_pure_force60fps = "true"       # so `framerate = 60.0` above is true
+dosbox_pure_cycles = "77000"          # fixed speed; `auto` tracks the host
+dosbox_pure_force60fps = "false"      # VGA's 70 Hz, so `framerate` above is true
 dosbox_pure_menu_time = "0"           # auto-start: no start menu in a race
 dosbox_pure_conf = "inside"           # honour the bundle's own dosbox.conf
 dosbox_pure_savestate = "on"          # `state` entry points need serialize
@@ -298,7 +314,7 @@ name = "E1M1: Hangar (cold boot)"
 # begin, and press F1 to capture the state the entry below uses.
 rom = "base"
 entry = { named = "E1M1" }
-note = "~900 frames of emulated time from cold; use it to capture a state, not to race"
+note = "16 s of emulated time from cold; use it to capture a state, not to race"
 
 [[stage]]
 id = "e1m1-hangar"
@@ -322,7 +338,7 @@ name = "E1M1: Hangar"
 stage = "e1m1-hangar"
 kind = "time_trial"
 complete_when = { cleared = true }
-note = "a human reached the exit in ~1100 frames without hurrying; par is around 30 s"
+note = "a human reached the exit in ~19 s without hurrying; par is around 30 s"
 
 [[challenge]]
 id = "e1m1-survival"

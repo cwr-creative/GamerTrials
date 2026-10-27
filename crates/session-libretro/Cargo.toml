@@ -35,6 +35,11 @@ gilrs = "0.11"       # gamepad (XInput/DirectInput)
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"         # manifests are TOML data in git (ADR 0010)
 
+# Holding the mouse in the window, which minifb cannot do (`input::Mouse`).
+# Already in the tree through minifb, at the same version.
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["winuser", "windef"] }
+
 # The developer harness: run a manifest's game in a window and watch RAM. Not
 # the client — it prints events and scores nothing.
 [[bin]]

@@ -28,7 +28,7 @@ in [`docs/games/`](../../docs/games).
 | `prep` | manifest → bytes: the player's dump, a hack applied to it, a seeded roll |
 | `watch` | the interpreter: markers, rules, edges, attempts |
 | `runner` | `LibretroRunner`: `StageRunner` + `Presentable` |
-| `input` | host keyboard and pad → a joypad bitmask, or keys passed through |
+| `input` | host keyboard and pad → a joypad bitmask, or keys and a captured mouse passed through |
 | `audio` | resample to the device rate; doubles as the frame clock |
 | `ramsearch` | two ways to find an address nobody wrote down |
 | `bin/harness` | the window, the keys, the flags |

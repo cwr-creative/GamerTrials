@@ -130,6 +130,8 @@ KEYS (pad games - SMB3, DKC):
 KEYS (keyboard games - DOOM):
     Every key goes straight to the game, Esc included, because the game maps
     its own. Close the window to quit; F1-F11 below still belong to the harness.
+    The mouse goes to the game too: click the window to capture it (that click
+    is not passed on), Alt-Tab to release it.
 
 KEYS (both):
     F1  save state      F2  re-enter stage  F5  dump watched RAM
@@ -425,6 +427,13 @@ fn run() -> Result<(), String> {
         // it is what stops a connected controller quietly pressing keys.
         Controller::Keyboard => None,
     };
+    // ...and a PC has a mouse beside its keyboard. A console has neither, and
+    // capturing the cursor for a game that cannot read it would only be in
+    // the way.
+    let mut mouse = matches!(controller, Controller::Keyboard).then(|| {
+        println!("[input] click the window to give the game the mouse; Alt-Tab takes it back");
+        input::Mouse::new()
+    });
     let mut search = Search::new(args.search_width);
     let mut probe = args.probe.then(Probe::new);
     let mut hotkeys = Hotkeys::new();
@@ -579,6 +588,9 @@ fn run() -> Result<(), String> {
                 libretro::JOYPAD.store(input::keyboard(&window) | p.state(), Ordering::Relaxed);
             }
             None => input::keyboard_passthrough(&window),
+        }
+        if let Some(m) = mouse.as_mut() {
+            m.pump(&mut window);
         }
 
         if probe.is_some() {
