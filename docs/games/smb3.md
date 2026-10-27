@@ -211,9 +211,9 @@ derived and verified against the ROM, and all of it is now in
 `manifests/smb3.toml` and runs. ADR 0015 scopes a patch to declarative value
 substitution; ADR 0019 depends on that scope holding.
 
-What is *not* done is playing one: no human has taken either challenge to its
-criteria on a rolled ROM. The mechanism below is measured; the level design on
-top of it is not.
+Both have been playtested: a human has taken each challenge to its criteria on
+a rolled ROM, so the level design on top of the mechanism below has been played
+as well as measured.
 
 Both challenges run on a **hand-authored hack**, not on the base ROM (ADR 0020).
 Their levels were built in a level editor, so every object list is the
@@ -373,7 +373,7 @@ Two things have not changed and should not be silently revisited:
   Accepted for now, and better SMB3 detectors are owed anyway (ADR 0014).
 
 Two notes on the level as authored. Neither is the patch table's business, and
-both are worth knowing before this is playtested:
+both are worth knowing when playing it:
 
 - Goombas 3 and 4 share column `$0D`. Both still spawn: the look-ahead is snapped
   to a 16-pixel boundary and the level-load pass runs the spawn scan twice per

@@ -39,7 +39,7 @@ Either kind may run on **vanilla** content (a stage as it originally shipped), o
 a **hack** (content a contributor authored in a level editor, carried as a BPS
 patch against the base ROM and named by the stage — ADR 0020), or on **generated**
 content (a ROM patched per attempt from a seed — ADR 0013/0015). All three are
-built and run; the last two are not yet playtested, and the seed a generated
+built, run and playtested to their criteria, but the seed a generated
 challenge needs still comes from a harness flag rather than from a session. All
 three feed the same sequencing and scoring, and the last two compose — a
 generated challenge sitting on a hack is the expected shape, not an exotic one: a
@@ -217,21 +217,16 @@ What is *not* done, and the next things to settle:
     documented rules say; points and totals are undecided.
   - *`session-fake`*, now that there is a driver loop worth exercising without
     a ROM.
-- **Doom is measured, not playtested.** Every rule has been seen firing against
-  a real machine, but `stage_cleared` has not been watched through a human
-  finishing E1M1 from the `state` entry. `docs/games/doom.md` lists what would
-  close that gap.
 - **`asset-store` will need to hash a bundle's members, not the container.** A
   DOS game is a zip, and its hash depends on how it was zipped (ADR 0018). That
   work also gates DOS hacks: a BPS patch against a zip is meaningless, so a PWAD
   arrives as a member overlay and ADR 0020 defers it until members are hashable.
-- **Generated content runs but is not playtested.** The pipeline is end to end —
-  dump, patch, roll, rebind, enter — and the two SMB3 custom challenges are in
-  `manifests/smb3.toml`. Nobody has yet *played* one to its criteria, and the
-  entry states were captured on the map for a reason worth confirming
-  (`docs/games/smb3.md`). The seed also has nowhere to come from: ADR 0013 has
-  the server issuing it and comparing the artifact hashes clients report, and
-  neither exists — today it is a `--seed` flag on the harness.
+- **Generated content is playtested, but its seed has nowhere to come from.**
+  The pipeline is end to end — dump, patch, roll, rebind, enter — and the two
+  SMB3 custom challenges in `manifests/smb3.toml` have been played through to
+  their criteria on rolled ROMs. ADR 0013 has the server issuing the seed and
+  comparing the artifact hashes clients report, and neither exists — today it is a
+  `--seed` flag on the harness.
 - **A rolled quantity still cannot reach `complete_when`.** It is static TOML
   with no arithmetic and nothing that can name the seed, so a generator cannot
   roll a count a criterion then refers to. Both SMB3 challenges avoid it by

@@ -9,11 +9,12 @@ The first game in the library whose machine is a PC rather than a console. ADR
 under `dosbox-pure` rather than through an adapter of its own; ADR 0014 is the
 RAM-watching decision it shares with the two consoles.
 
-**The evidence here is better than DKC's and worse than a full playtest.** Every
+**The evidence here is better than DKC's, and it has been playtested.** Every
 address was measured on a running machine rather than transcribed from a wiki —
 several by typing a cheat and diffing 16 MB, which is a controlled write and
-therefore strong evidence. What has *not* happened is a long session of ordinary
-play with the watcher attached looking for false positives.
+therefore strong evidence — and a human finishing E1M1 from the `state` entry
+fires `stage_cleared`. The edge cases still worth watching in a long session are
+listed under [Verifying the addresses](#verifying-the-addresses).
 
 ## The content bundle
 
@@ -299,7 +300,8 @@ cargo run --release -p session-libretro --bin harness -- --game doom \
 A 16 000-frame run of that reported 41 damage events, two deaths (frames 8002
 and 15082) and two map changes (E1M5 -> E1M3 -> E1M7, each ~500 frames after a
 death, which is the next demo starting). That is every rule in the manifest except `stage_cleared`,
-which needs someone to reach an exit.
+which needs someone to reach an exit — and has since been seen firing when a
+human finished E1M1.
 
 Those frame numbers moved by six when `DEFAULT.CFG` was added — the deaths were
 at 7996 and 15079 before it. Nothing about the rules changed; initialising a
@@ -309,17 +311,17 @@ shift like that as a regression.
 
 ## Verifying the addresses
 
-What would move this from "measured" to "playtested":
+Doom is playtested: **finishing E1M1 from the `state` entry fires
+`stage_cleared`.** What follows is the edge cases a long session should still
+keep an eye on:
 
-1. **Finish E1M1 from the `state` entry** and confirm `stage_cleared` fires once,
-   at the exit switch, with the frame count the run actually took.
-2. **Die deliberately, several times**, and confirm `died` fires exactly once per
+1. **Die deliberately, several times**, and confirm `died` fires exactly once per
    death with both fields agreeing, including deaths by falling and by barrel.
-3. **Pick up armour and health** and confirm `damaged` never fires on an
+2. **Pick up armour and health** and confirm `damaged` never fires on an
    increase — the `decreases` edge should make that impossible, which is worth
    proving rather than assuming.
-4. **Leave the tally screen up** for a long time and confirm `stage_cleared` does
+3. **Leave the tally screen up** for a long time and confirm `stage_cleared` does
    not repeat. `enters` should make that impossible; DKC's history says prove it.
-5. **Take the last hit** and confirm the death frame reports `died` and not
+4. **Take the last hit** and confirm the death frame reports `died` and not
    `damaged` — the `unless = ["death"]` guard is what stops both, and it is the
    one rule here whose interaction has not been watched live.
