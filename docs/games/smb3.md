@@ -187,8 +187,8 @@ detector before it could carry a `cleared = true` criterion.
 | `1-2` | `base` | time trial, survival |
 | `1-3` | `base` | time trial, survival |
 | `1-4` | `base` | survival only — forced-scrolling, so everyone finishes in the same number of frames |
-| `sun-storm` | `hack1` | time trial, survival — both generated |
-| `bro-roulette` | `hack1` | time trial, survival — both generated |
+| `sun-storm` | `hack3` | time trial, survival — both generated |
+| `bro-roulette` | `hack3` | time trial, survival — both generated |
 
 Nothing above is declared as a constraint anywhere: a stage with no time trial
 simply has no time-trial `[[challenge]]` naming it (ADR 0017). Read the current
@@ -227,12 +227,30 @@ fifth bro off the end of the level so that only four could be counted, were both
 workarounds for not owning the level. Owning it removes the constraint instead of
 routing around it.
 
-### The two ROMs
+### The ROMs
 
 | | sha1 | |
 |---|---|---|
 | base | `6bd518e85eb46a4252af07910f61036e84b020d1` | `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes` |
-| hack | `11f4851c7b4e8413432eed30b0a3760e5dcac638` | `assets/patches/smb3-rom-hack1.bps` applied to it |
+| hack3 | `0c963c375888d3b94690f703cd4a1b297c2551f6` | `assets/patches/smb3-rom-hack3.bps` applied to it. What the manifest runs |
+| hack1 | `11f4851c7b4e8413432eed30b0a3760e5dcac638` | `assets/patches/smb3-rom-hack1.bps`. Not in the manifest; kept as the golden hashes' input |
+
+hack3 is the third export of the same editor project. Against hack1 it changes
+Bro Roulette and nothing else. Goomba 1 moves from column `$02` row `$12` to
+column `$03` row `$11`. The run of tiles under it, layout object `34 01 14`,
+becomes `34 00 45`, starting a column further left and made of wood. A
+three-byte layout object, `55 0e 08` at column `$0E` row `$15`, is gone. That
+deletion moves every level layout after it in bank 15 back three bytes, and the
+pointers to them in banks 12 and 15-19 with it. That is why ~2,900 bytes differ
+for an edit of a few. Sun Storm's object list and layout are byte-identical
+between the two. Its layout table entry is `$AF9F` in both, and the only bank
+where `$AF9F` differs is bank 15, which is not Sun Storm's. Sun Storm loads at
+object set 3.
+
+No code changed, so hack3 reads every address hack1 did and shares this
+manifest (ADR 0020). Seeds do not carry over between hacks: the derivation key
+names the hack's own hash, so seed 19 on hack1 and seed 19 on hack3 are
+unrelated rolls.
 
 The patch is BPS and carries the base's CRC32, so it refuses a different revision
 at apply time. No derived ROM is in the repo and none should be: the harness
@@ -288,8 +306,10 @@ and a card — and both are confirmed twice over:
   `W1_ByRowType`'s bytes) points entry 0 at `$C6BC` and entry 8 at `$C6CA`. Both
   entries' row types were changed by the hack, which is how the levels became
   enterable.
-* Each entry state carries the pointer the map had already prepared, in cartridge
-  WRAM at `Level_ObjPtrOrig` (`$7EBB`): `$C6BC` in one, `$C6CA` in the other.
+* The original entry states carried the pointer the map had already prepared, in
+  cartridge WRAM at `Level_ObjPtrOrig` (`$7EBB`): `$C6BC` in one, `$C6CA` in the
+  other. A state saved a few frames earlier in the walk onto the tile holds zero
+  there and enters correctly anyway. The game fills the pointer in itself.
 
 ### Sun Storm — `W2_32`, entered from the World 1 map
 
@@ -335,10 +355,13 @@ variants.
 
 | Offset | Byte | Is | Roll |
 |---|---|---|---|
-| `0xC6CB` | goomba 1 id, column `$02` row `$13` | `$72` `OBJ_GOOMBA` | the pool below |
-| `0xC6CE` | goomba 2 id, column `$0A` row `$19` | `$72` `OBJ_GOOMBA` | ″ |
-| `0xC6D1` | goomba 3 id, column `$0D` row `$19` | `$72` `OBJ_GOOMBA` | ″ |
-| `0xC6D4` | goomba 4 id, column `$0D` row `$15` | `$72` `OBJ_GOOMBA` | ″ |
+| `0xC6CB` | goomba 1 id, column `$03` row `$11` | `$72` `OBJ_GOOMBA` | the pool below |
+| `0xC6CE` | goomba 2 id, column `$0A` row `$18` | `$72` `OBJ_GOOMBA` | ″ |
+| `0xC6D1` | goomba 3 id, column `$0D` row `$18` | `$72` `OBJ_GOOMBA` | ″ |
+| `0xC6D4` | goomba 4 id, column `$0D` row `$14` | `$72` `OBJ_GOOMBA` | ″ |
+
+Columns and rows are the list's own bytes on hack3. This table used to say rows
+`$13`, `$19`, `$19` and `$15`, one more than the bytes held on hack1.
 
 The pool is the same for all four and is a **multiset, not a set**:
 
@@ -382,15 +405,24 @@ Two things have not changed and should not be silently revisited:
   stomp would count ten. The low byte also wraps every 2,560 points, and an
   award that carries into `$0716` reads as a fall. No award SMB3 makes is a
   multiple of 2,560 and the score never falls mid-stage, so one award is
-  exactly one change. Two kills paid on the same frame would be one change.
+  exactly one change. Two kills paid on the same frame are one change. Finding 7
+  produced exactly that on hack1, and is why the level is now hack3.
   Playtested on seed 9 (three goombas, one hammer bro): three stomps and one
   bro killed from below with a block, completed in 2,791 frames over three
   attempts. `$05F4` did not move for the block kill. The old criteria would
   have left that run one kill short.
 
-Two notes on the level as authored. Neither is the patch table's business, and
-both are worth knowing when playing it:
+Three notes on the level as authored. None is the patch table's business, and
+all are worth knowing when playing it:
 
+- Goomba 1 stands on **wood blocks**, which cannot be bumped, so it can only be
+  stomped. On hack1 it stood on bumpable blocks, and finding 7 made one bump kill
+  it *and* a Fire or Boomerang Bro rolled into the next slot. Both kills were paid
+  in one 200-point award, so `score_award` counted one. The run was left a kill
+  short with no way to make it up. Moving goomba 1 one tile up and right did not
+  help (hack2, never shipped), because spawn timing has nothing to do with it.
+  Wood blocks did: playtested on hack3, seed 4, where a Fire Bro sits right
+  behind it.
 - Goombas 3 and 4 share column `$0D`. Both still spawn: the look-ahead is snapped
   to a 16-pixel boundary and the level-load pass runs the spawn scan twice per
   step (finding 2), so one column window admits two objects. Mid-level at full
@@ -407,7 +439,9 @@ both are worth knowing when playing it:
 
 Each is the hack with its seven rollable object-list bytes written — four of them
 actually differing in any given roll, since a slot may roll back to what it
-already held. The input is `11f4851c…`, never the base ROM.
+already held. The input is `11f4851c…` (hack1), never the base ROM, and never
+hack3. The manifest moved on to hack3, and the goldens stay pinned to the ROM
+they were recorded against, which is the point of them.
 
 | Roll | Suns | Bros | sha1 |
 |---|---|---|---|
@@ -460,11 +494,11 @@ sha1 = "6bd518e85eb46a4252af07910f61036e84b020d1"
 header = "ines"
 
 [[rom]]
-id = "hack1"
+id = "hack3"
 name = "SMB3: Gamer Trials"
 from = "base"
-patch = "assets/patches/smb3-rom-hack1.bps"
-sha1 = "11f4851c7b4e8413432eed30b0a3760e5dcac638"
+patch = "assets/patches/smb3-rom-hack3.bps"
+sha1 = "0c963c375888d3b94690f703cd4a1b297c2551f6"
 
 # Every existing [[stage]] also gained `rom = "base"` — twelve one-line changes
 # across the three manifests, which is what made this a breaking change.
@@ -477,16 +511,16 @@ sha1 = "11f4851c7b4e8413432eed30b0a3760e5dcac638"
 [[stage]]
 id = "sun-storm"
 name = "Sun Storm"
-rom = "hack1"
-entry = { state = "assets/states/smb3_sun-storm.state" }
-note = "captured on the World 1 map, on the tile that enters W2_32"
+rom = "hack3"
+entry = { state = "assets/states/smb3_sun-storm-hack3.state" }
+note = "captured on hack3, on the World 1 map, on the tile that enters W2_32"
 
 [[stage]]
 id = "bro-roulette"
 name = "Bro Roulette"
-rom = "hack1"
-entry = { state = "assets/states/smb3_bro-roulette.state" }
-note = "captured on the World 1 map, on the tile that enters W1_03"
+rom = "hack3"
+entry = { state = "assets/states/smb3_bro-roulette-hack3.state" }
+note = "captured on hack3, on the World 1 map, on the tile that enters W1_03"
 
 # --- Sun Storm -------------------------------------------------------------
 # One to three Angry Suns. The two kinds duplicate the table rather than share
@@ -576,7 +610,7 @@ needs `survive_seconds` any more. Four score awards are on Bro Roulette
 because that is what the challenge is about; swap in `cleared = true` if it should
 be a race to the card instead.
 
-## Six mechanism findings
+## Seven mechanism findings
 
 All confirmed in the disassembly, none of them guessable from a RAM map. They
 are what makes the two challenges above work, and they generalise to any SMB3
@@ -628,10 +662,24 @@ generator.
    nothing else — a list entry that costs a frame's spawn opportunity and produces
    no object. It is the only way to roll an enemy *out* of a level without
    deleting a list entry, which ADR 0015 forbids.
+7. **A Fire or Boomerang Bro dies when the enemy processed before it is bumped.**
+   An enemy dies from a bump when the tile under its feet reads `$F3`
+   (`TILEA_BLOCKBUMP_CLEAR`), the tile a block becomes while it bounces
+   (`Object_HandleBumpUnderneath`, `prg000.asm`). The tile is read from
+   `Object_TileFeet2`, one global, which each enemy's floor check overwrites.
+   `ObjNorm_FireBro` and `ObjNorm_BoomerangBro` (`prg004.asm`) run the bump check
+   *before* their own `Object_Move`, so they read the previous enemy's tile.
+   Hammer and Heavy Bros check in the right order. Enemies are processed from slot
+   4 down, and a level's enemies take slots in list order at load, so the first
+   enemy in the list is followed by whatever rolled into the second slot. Timing
+   does not matter: the stale read happens on every frame. What matters is a
+   bumpable enemy directly ahead of one of these two bros. That makes it a pool
+   question for any table that can roll `$82` or `$87` behind an enemy standing
+   on a bumpable block.
 
 ## Capturing an entry state for a custom challenge
 
-Both entry states here are captured **on the hack, on the World 1 map**, standing
+Both entry states here are captured **on hack3, on the World 1 map**, standing
 on the tile that enters the level — not inside it. That is the shape to copy, and
 it settles a question the base-ROM version of this document had to leave open.
 
@@ -646,9 +694,32 @@ Nothing is rebound *onto the hack*. ADR 0019's rebind exists for a ROM the seede
 engine derived, which is the same length, mapper and geometry as what it came
 from; a hand-authored hack is none of those, so a state is rebound only onto an
 artifact derived from the ROM its own stage names, never from the base onto a
-hack. These states name the hack's hash (`55C34FE1…`) and load onto the hack
-directly — and then onto a *roll* of the hack, which is a rebind stage prep turns
-on by itself because it knows how those bytes were made.
+hack. These states name hack3's hash (`0C963C37…`) and load onto it directly —
+and then onto a *roll* of it, which is a rebind stage prep turns on by itself
+because it knows how those bytes were made.
+
+**A rebind can hide a state captured on the wrong ROM.** The first two states
+here named `55C34FE1…`. That is `build/rom-hack1.nes`, an earlier export of the
+hack that differs from `hack1.bps` by 3,203 bytes. Neither loaded with `--stage`
+alone. Both loaded with `--seed`, because rolling turns the rebind on, and the
+rebind rewrote the hash it would otherwise have refused. So check a new state
+unrolled first: `--stage <id> --frames 60` with no seed. Mesen keeps the ROM's
+sha1 as text at offset `0x0E` of the state, and the ROM's filename after it.
+
+A hack gets a new state whenever it changes, by a cold boot of that hack rather
+than a rebind of the last one. A scratch copy of the manifest does it, with
+`boot_seconds = 1.0` under `[runner.libretro]` and a stage on the hack whose
+entry is `named = "power-on"`. Paths resolve from the repository root first, so
+the copy can live anywhere:
+
+```sh
+harness --game <scratch>.toml --stage hack3-boot \
+    --capture assets/states/smb3_<stage>-hack3.state
+```
+
+Start a new game, walk to the tile without playing anything else, and press F1.
+The lives on the status bar are whatever the walk left. The Sun Storm state has 3
+and Bro Roulette's has 4, and neither affects a score.
 
 ```sh
 # derive the hack, roll a challenge on it, and enter with its own state

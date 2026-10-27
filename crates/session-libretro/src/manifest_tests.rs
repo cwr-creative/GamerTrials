@@ -115,7 +115,7 @@ fn every_shipped_manifest_loads() {
     assert_eq!(s.stages.len(), 6);
     assert_eq!(s.roms.len(), 2);
     assert_eq!(s.base_rom().id, "base");
-    assert!(s.stages.iter().filter(|st| st.rom == "hack1").count() == 2);
+    assert!(s.stages.iter().filter(|st| st.rom == "hack3").count() == 2);
     let d = dkc();
     assert_eq!(d.id.0, "dkc");
     assert_eq!(d.stages.len(), 6);
@@ -134,11 +134,11 @@ fn every_shipped_manifest_loads() {
 #[test]
 fn the_smb3_custom_challenges_carry_the_tables_the_docs_record() {
     let m = smb3();
-    let hack = m.rom("hack1").expect("the hack is declared");
+    let hack = m.rom("hack3").expect("the hack is declared");
     assert_eq!(hack.from.as_deref(), Some("base"));
     assert_eq!(
         hack.sha1.as_deref(),
-        Some("11f4851c7b4e8413432eed30b0a3760e5dcac638")
+        Some("0c963c375888d3b94690f703cd4a1b297c2551f6")
     );
     // A hack is a patch, never a file (ADR 0020).
     assert!(hack.path.is_none());
@@ -176,7 +176,7 @@ fn the_smb3_custom_challenges_carry_the_tables_the_docs_record() {
     }
 
     // Both stages run on the hack, and neither vanilla stage does.
-    assert_eq!(m.stage("sun-storm").unwrap().rom, "hack1");
+    assert_eq!(m.stage("sun-storm").unwrap().rom, "hack3");
     assert_eq!(m.stage("1-1").unwrap().rom, "base");
     // A hack has its own name, and it is what a player is shown.
     assert_eq!(m.content_title(m.stage("sun-storm").unwrap()), "SMB3: Gamer Trials");

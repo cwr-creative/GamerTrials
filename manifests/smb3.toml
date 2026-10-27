@@ -327,26 +327,35 @@ note = "the clock stops on the fifth stomp; reaching the end of the level is not
 # under which a second ROM may — a hack that moved one would be a second
 # manifest.
 
+# The third export of the editor project. It replaced hack1, which is still in
+# assets/patches because content-gen's golden hashes were recorded against it.
+# The two differ only in Bro Roulette. Goomba 1 starts one tile up and one
+# right. The blocks under it are wood rather than bumpable, so it cannot be
+# killed from below. That matters because a Fire or Boomerang Bro in the next
+# slot runs its bump check on the goomba's floor tile, and died with it
+# (docs/games/smb3.md). The layout also lost one three-byte object, which moved
+# every layout after it back three bytes. That is why ~2,900 bytes differ.
+# Sun Storm's object list and layout are byte-identical.
 [[rom]]
-id = "hack1"
+id = "hack3"
 name = "SMB3: Gamer Trials"
 from = "base"
-patch = "assets/patches/smb3-rom-hack1.bps"
-sha1 = "11f4851c7b4e8413432eed30b0a3760e5dcac638"
+patch = "assets/patches/smb3-rom-hack3.bps"
+sha1 = "0c963c375888d3b94690f703cd4a1b297c2551f6"
 
 [[stage]]
 id = "sun-storm"
 name = "Sun Storm"
-rom = "hack1"
-entry = { state = "assets/states/smb3_sun-storm.state" }
-note = "captured on the World 1 map, on the tile that enters W2_32 — not inside the level, so the object index is built from the rolled list"
+rom = "hack3"
+entry = { state = "assets/states/smb3_sun-storm-hack3.state" }
+note = "captured on hack3, on the World 1 map, on the tile that enters W2_32 — not inside the level, so the object index is built from the rolled list"
 
 [[stage]]
 id = "bro-roulette"
 name = "Bro Roulette"
-rom = "hack1"
-entry = { state = "assets/states/smb3_bro-roulette.state" }
-note = "captured on the World 1 map, on the tile that enters W1_03"
+rom = "hack3"
+entry = { state = "assets/states/smb3_bro-roulette-hack3.state" }
+note = "captured on hack3, on the World 1 map, on the tile that enters W1_03"
 
 # --- Sun Storm --------------------------------------------------------------
 #
@@ -441,7 +450,7 @@ generator_version = 2
 note = "the clock stops on the fourth kill, by any means; reaching the card is not required"
 
 [[challenge.patch_slot]]
-offset = 0xC6CB                        # goomba 1, column $02
+offset = 0xC6CB                        # goomba 1, column $03
 width = "u8"
 values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
 
