@@ -520,7 +520,7 @@ name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "time_trial"
 complete_when = { enemies_defeated = 4 }
-generator_version = 1
+generator_version = 2
 note = "the clock stops on the fourth stomp; reaching the card is not required"
 
 [[challenge.patch_slot]]
@@ -549,7 +549,7 @@ name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "survival"
 complete_when = { enemies_defeated = 4 }
-generator_version = 1
+generator_version = 2
 
 # ... the same four patch_slot entries again.
 ```
