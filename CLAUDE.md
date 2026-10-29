@@ -93,7 +93,7 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. Today: hashes a player's dump against the manifest's `sha1` and says what is missing. |
 | `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. |
-| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu and lobby in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). |
+| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). |
 | `server` | Rust (ADR 0024). Lobby, clock sync, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 
@@ -143,8 +143,12 @@ from a seed, issues the rolled-content seed, judges every run from the `Frame`
 messages the client streams, and ends the match loudly if the client's
 provisional verdict or an artifact hash disagrees with its own.
 `--host <name> --start --mode … --format kind:n --games a,b --limit <s>` plays
-a match from the command line. Hand-tested on all three games; `app-client`
-has no `cargo test` coverage — the server's tests play the client's loop on
+a match from the command line. Settings binds keyboard, mouse and gamepad
+to the RetroPad once, overridable per core and per game, and sets video the
+same way; nothing in it reaches a core option or the frame clock (ADR 0028).
+Hand-tested on all three games before Settings; Settings itself is not yet
+hand-tested in a match. `app-client`'s `cargo test` covers only its pure
+modules (`settings`, `video`) — the server's tests play the client's loop on
 `session-fake` instead.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
@@ -157,10 +161,10 @@ changing that code.
 
 Open, roughly in order:
 
-- **Phase B owes:** a pad binding for give-up and pause (only F9/F10 on the
-  keyboard today); fullscreen (both windows borderless, ADR 0027); a protocol
-  word for "I cannot prepare this round" (a missing dump at deal time ends the
-  match through `EndMatch`). Join game and Settings do nothing yet.
+- **Phase B owes:** a protocol word for "I cannot prepare this round" (a
+  missing dump at deal time ends the match through `EndMatch`. Borderless
+  fullscreen is hand-tested (alt-tab, Win+Down, a monitor move), as is Doom on
+  a pad and on mouse and keyboard. Join game does nothing yet.
 - **ADR 0013 stays Proposed** until a remote server issues seeds and compares
   hashes for several players (Phase C), along with the networked lobby and
   spectating. Head-to-head comes last.

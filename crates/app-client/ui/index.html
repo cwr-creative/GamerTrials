@@ -49,6 +49,52 @@
   #blocking { color: #ffb347; font-size: .9em; min-height: 3em; }
   #start { font-size: 1.4em; margin-top: auto; }
   .keys { color: #888; font-size: .85em; margin-top: .5em; }
+
+  /* Settings: tabs on top, scopes on the left, the scope's settings on the right. */
+  #settings { display: grid; grid-template-columns: 17em 1fr; grid-template-rows: auto 1fr auto;
+              gap: .6em 1em; padding: 1em; box-sizing: border-box; }
+  #settings .top { grid-column: 1 / 3; display: flex; align-items: center; gap: .5em; }
+  #settings .top h2 { margin: 0 1em 0 0; }
+  .tab { border-color: #555; }
+  .tab.on { border-color: #ffb347; background: #3a3a77; }
+  #s-back { margin-left: auto; }
+  #s-scopes { overflow: auto; border-right: 2px solid #333; padding-right: .6em; }
+  #s-scopes.hidden + #s-body { grid-column: 1 / 3; }
+  .scope { padding: .35em .5em; cursor: pointer; border-left: 4px solid transparent; }
+  .scope:hover { background: #22224a; }
+  .scope.on { border-left-color: #ffb347; background: #2a2a55; }
+  .scope.game { padding-left: 1.6em; font-size: .92em; }
+  .sub { color: #888; font-size: .82em; }
+  #s-body { overflow: auto; }
+  #s-status { grid-column: 1 / 3; color: #8f8; font-size: .85em; min-height: 1.2em; }
+  .note { color: #aaa; font-size: .88em; max-width: 52em; }
+  .pad { width: 100%; max-width: 560px; display: block; margin: .3em 0 .6em; }
+  .pad .body { fill: #22224a; stroke: #555; stroke-width: 3; }
+  .pad .btn { fill: #34346a; stroke: #888; stroke-width: 2; cursor: pointer; }
+  .pad .btn:hover { stroke: #ffb347; }
+  .pad .btn.sel { stroke: #ffb347; stroke-width: 4; }
+  .pad .btn.lit { fill: #ffb347; }
+  .pad .btn.dim, .pad .lbl.dim { opacity: .25; }
+  .pad .lbl { fill: #fff; font-size: 14px; text-anchor: middle; pointer-events: none; font-weight: 600; }
+  table.binds, table.remap, table.form { border-collapse: collapse; margin: .3em 0 .8em; }
+  table.binds td, table.binds th, table.remap td, table.form td { padding: .22em .4em; text-align: left; }
+  table.binds th { color: #888; font-weight: 400; font-size: .85em; }
+  table.binds tr.sel { background: #2a2a55; }
+  .bname { font-weight: 700; color: #ffb347; min-width: 4em; }
+  table.binds .fam { padding-left: 1.2em; }
+  .slot { display: inline-block; min-width: 5em; padding: .2em .45em; border: 2px solid #666; background: #22224a;
+          cursor: pointer; white-space: nowrap; position: relative; }
+  .slot:hover { border-color: #ffb347; }
+  .slot.inh { color: #999; border-style: dashed; }
+  .slot.add { color: #888; min-width: 1.5em; text-align: center; }
+  .slot.lit { background: #ffb347; color: #000; }
+  .slot .x { margin-left: .5em; color: #f88; }
+  .from { color: #888; font-size: .82em; }
+  .from a, #s-body a { color: #ffb347; }
+  .row2 { margin: .4em 0; }
+  h4 { color: #ffb347; margin: .8em 0 .2em; }
+  #s-capture { position: fixed; inset: 0; background: #000c; display: flex; align-items: center; justify-content: center; z-index: 10; }
+  #s-capture .card { border: 4px solid #ffb347; background: #14142a; padding: 1.5em 2em; text-align: center; font-size: 1.2em; }
 </style>
 </head>
 <body>
@@ -59,7 +105,7 @@
   <div class="buttons">
     <button id="host">Host game</button>
     <button disabled title="Networked lobbies come in Phase C">Join game</button>
-    <button disabled title="Settings come in Phase E">Settings</button>
+    <button id="settings-open">Settings</button>
   </div>
   <div id="notice"></div>
 </div>
@@ -99,9 +145,26 @@
     <ul id="players"></ul>
     <div id="blocking"></div>
     <button id="start">Start</button>
-    <div class="keys">In play: F9 gives up the run, F10 pauses, F12 quits.</div>
+    <div class="keys">In play: F9 gives up the run, F10 pauses (or Select + Start on a pad), F12 quits. Rebind them in Settings.</div>
   </div>
 </div>
+
+<div id="settings" class="page hidden">
+  <div class="top">
+    <h2>Settings</h2>
+    <button id="tab-controls" class="tab">Controls</button>
+    <button id="tab-video" class="tab">Video</button>
+    <button id="tab-profile" class="tab">Profile</button>
+    <button id="s-back">Back</button>
+  </div>
+  <div id="s-scopes"></div>
+  <div id="s-body"></div>
+  <div id="s-status"></div>
+</div>
+<div id="s-capture" class="hidden"><div class="card">
+  <div id="s-capture-text"></div>
+  <div class="note">A click anywhere binds the mouse button. Nothing for five seconds cancels too.</div>
+</div></div>
 
 <script>
   const $ = id => document.getElementById(id);
@@ -269,5 +332,6 @@
   }
   init().catch(e => { $('notice').textContent = 'cannot reach the client: ' + e; });
 </script>
+<script src="settings.js"></script>
 </body>
 </html>

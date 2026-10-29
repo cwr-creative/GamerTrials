@@ -189,7 +189,8 @@ boot_seconds = 16.0            # optional; required by a `named` entry point
   ignored. A PC has a mouse beside its keyboard, so this shape carries one
   too: relative motion and buttons, answered as `RETRO_DEVICE_MOUSE` to a core
   that asks. There is nothing to declare for it — a game that reads the mouse
-  gets it, and one that does not is never told.
+  gets it, and one that does not is never told. What a *gamepad* presses on a
+  keyboard game is `[runner.libretro.pad_keys]`, below.
 
 `boot_seconds` is how long a cold boot takes to reach the game — DOS starting,
 the bundle's `[autoexec]` running. It converts to frames at `game.framerate` at
@@ -224,6 +225,31 @@ belong.
 Run `harness --game <name> --dump-options` to see what a core actually
 publishes: every key, its legal values, its default, and every environment call
 the core asked the frontend for and did not get.
+
+### `[runner.libretro.pad_keys]`
+
+```toml
+[runner.libretro.pad_keys]
+up = "up"
+b = "lctrl"       # fire
+a = "space"       # use
+start = "escape"
+```
+
+Optional, and only with `controller = "keyboard"`; on a pad game it is an
+error. It says which guest key each RetroPad button presses when a player drives
+a keyboard game with a gamepad. Keys are RetroPad names (`b y select start up
+down left right a x l r l2 r2 l3 r3`). Values are the names in
+`session_libretro::keymap::GUEST_KEYS`: the letters, the digits, the arrows,
+`lctrl`/`rctrl`, `lshift`/`rshift`, `lalt`/`ralt`, `space`, `enter`, `escape`,
+`tab`, `backspace` and the punctuation by name. An unknown name on either side
+is a load error. Two buttons may press one key.
+
+**It is a suggestion, not a remap.** The keyboard still passes straight through,
+and a player can rebind any of these in Settings, per game (ADR 0028). It
+belongs in the manifest because which keys a DOS game uses is a fact about that
+game: DOOM's are DOOM 1.9's own defaults, which the bundle pins. A button left
+out presses nothing until the player binds it.
 
 ### `[runner.libretro.memory]`
 
@@ -1055,4 +1081,10 @@ reopening ADR 0016.
 **Input remapping for keyboard games.** `controller = "keyboard"` passes the
 host keyboard through unchanged. A DOS game maps its own keys, and a manifest
 that rebound them would silently override a choice the player made inside the
-game.
+game. `pad_keys` does not change that: it says what a *gamepad* presses, where
+no key was pressed before. A player's own key remap is a setting, not a
+manifest field (ADR 0028).
+
+**Anything a player sets.** Bindings, window size, scaling and fullscreen are
+the client's settings, layered global → core → game. None of them reaches a
+core option or the frame clock (ADR 0028), so none of them is the manifest's.

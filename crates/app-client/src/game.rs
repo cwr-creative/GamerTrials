@@ -19,12 +19,15 @@ use challenge_core::{Next, Run, RunResult};
 use minifb::{Scale, ScaleMode, Window, WindowOptions};
 use session_api::{Presentable, SessionEvent, StageRunner, StageSpec};
 use session_libretro::audio::{self, Audio};
+use session_libretro::input::PadState;
 use session_libretro::libretro;
-use session_libretro::manifest::{Controller, Manifest};
+use session_libretro::manifest::{Controller, Manifest, PadLayout};
 use session_libretro::runner::LibretroRunner;
 use session_libretro::{input, prep};
 
 use crate::keys;
+use crate::settings::{self, Display, ResolvedInput, VideoPrefs};
+use crate::video::{self, Canvas};
 
 /// One round's content: what to derive and run, and the bound on the run.
 pub struct Load {
@@ -35,16 +38,23 @@ pub struct Load {
     /// Rolls the challenge's patch slots; ignored for a challenge without any.
     pub seed: u64,
     pub limit: u64,
+    /// The player's bindings for this game, resolved through every layer.
+    pub input: ResolvedInput,
+    /// The player's video settings for this game's core.
+    pub video: VideoPrefs,
+    pub display: Display,
 }
 
 /// What the client tells the game thread.
 pub enum Command {
     /// Derive the content, start the runner, enter the stage, and hold.
-    Load(Load),
+    Load(Box<Load>),
     /// The countdown is over: start the run and advance.
     Begin,
     /// Advance again after a pause.
     Resume,
+    /// The player gave up from the pause menu.
+    Forfeit,
     /// Drop the runner; keep the window.
     Unload,
     /// The overlay's window handle, so keys typed into it count as ours.
@@ -83,8 +93,14 @@ struct Loaded {
     /// `Begin` has been given.
     live: bool,
     done: bool,
-    pads: Option<input::Pads>,
+    pads: input::Pads,
+    /// Present for a keyboard game.
     mouse: Option<input::Mouse>,
+    input: ResolvedInput,
+    video: VideoPrefs,
+    display: Display,
+    /// The picture's shape as the core reports it, for `Aspect::Core`.
+    core_aspect: f32,
     _audio: Option<Audio>,
     frame_time: Duration,
     audio_target: Option<usize>,
@@ -92,25 +108,18 @@ struct Loaded {
     last_seq: u64,
 }
 
-const VK_F9: i32 = 0x78;
-const VK_F10: i32 = 0x79;
-
-pub fn run(scale: usize, cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), String> {
-    // Sized for the NES; every other console is scaled into it, which the
-    // aspect-preserving scale mode does per frame.
-    let (width, height) = (256usize, 240usize);
+pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), String> {
+    // Opened at the NES's size three times over; the first round resizes it
+    // to its own core's picture (`video::window_size`), and every frame is
+    // placed in it by `video::Canvas`, so minifb is only ever asked to stretch.
+    let (width, height) = (768usize, 720usize);
     let mut window = Window::new(
         "GamerTrials",
         width,
         height,
         WindowOptions {
-            scale: match scale {
-                4 => Scale::X4,
-                1 => Scale::X1,
-                3 => Scale::X2,
-                _ => Scale::X2,
-            },
-            scale_mode: ScaleMode::AspectRatioStretch,
+            scale: Scale::X1,
+            scale_mode: ScaleMode::Stretch,
             resize: true,
             ..WindowOptions::default()
         },
@@ -118,15 +127,20 @@ pub fn run(scale: usize, cmds: Receiver<Command>, reports: Sender<Report>) -> Re
     .map_err(|e| format!("cannot open window: {e}"))?;
     window.set_target_fps(0);
     // An unpainted window is white, and the overlay is transparent.
-    clear(&mut window, width, height)?;
+    clear(&mut window, 16, 16)?;
     let hwnd = window.get_window_handle() as isize;
     let _ = reports.send(Report::Window { hwnd });
 
     let mut loaded: Option<Loaded> = None;
     let mut held = false;
     let mut ours = vec![hwnd];
-    let mut f9_was_down = false;
-    let mut f10_was_down = false;
+    let mut pause_edge = settings::Edge::default();
+    let mut give_up_edge = settings::Edge::default();
+    let mut canvas = Canvas::default();
+    let mut borderless = false;
+    // The windowed size last asked for, so a player's own resize survives
+    // every round that would ask for the same size again.
+    let mut sized_for: Option<(u32, u32)> = None;
 
     while window.is_open() && !keys::quit_pressed() {
         loop {
@@ -136,8 +150,9 @@ pub fn run(scale: usize, cmds: Receiver<Command>, reports: Sender<Report>) -> Re
                     // Drop the old core before loading the next: the frontend
                     // statics are per core.
                     loaded = None;
-                    match load(l, &mut window) {
+                    match load(*l, &mut window) {
                         Ok(x) => {
+                            place_window(hwnd, &x.0, &mut borderless, &mut sized_for);
                             let _ = reports.send(Report::Loaded { round, artifact: x.1 });
                             loaded = Some(x.0);
                             held = false;
@@ -163,6 +178,11 @@ pub fn run(scale: usize, cmds: Receiver<Command>, reports: Sender<Report>) -> Re
                         l.next_deadline = Instant::now();
                     }
                 }
+                Ok(Command::Forfeit) => {
+                    if let Some(l) = loaded.as_mut() {
+                        forfeit(l, &reports);
+                    }
+                }
                 Ok(Command::Unload) => loaded = None,
                 Ok(Command::Overlay(h)) => ours = vec![hwnd, h],
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
@@ -180,23 +200,31 @@ pub fn run(scale: usize, cmds: Receiver<Command>, reports: Sender<Report>) -> Re
             }
         }
 
-        // The two keys the client owns during play, as edges.
+        // The two actions the client owns during play, as edges of whatever
+        // the player bound them to. Polled every pass, so an edge is never
+        // left over from before a pause.
         let in_front = keys::ours_in_front(&ours);
-        let f9 = in_front && keys::tapped(VK_F9);
-        let f10 = in_front && keys::tapped(VK_F10);
+        let pad = match loaded.as_mut() {
+            Some(l) => {
+                l.pads.pump();
+                l.pads.raw()
+            }
+            None => PadState::default(),
+        };
         if let Some(l) = loaded.as_mut() {
+            let dz = l.input.deadzone;
+            let down = |i: &settings::Input| in_front && keys::held_or_tapped(i, &pad, dz);
+            let give_up = give_up_edge.poll(&l.input.actions.give_up, down);
+            let pause = pause_edge.poll(&l.input.actions.pause, down);
             if l.live && !l.done && !held {
-                if f9 && !f9_was_down {
+                if give_up {
                     forfeit(l, &reports);
-                }
-                if f10 && !f10_was_down {
+                } else if pause {
                     held = true;
                     let _ = reports.send(Report::Paused);
                 }
             }
         }
-        f9_was_down = f9;
-        f10_was_down = f10;
 
         match loaded.as_mut() {
             None => {
@@ -207,14 +235,14 @@ pub fn run(scale: usize, cmds: Receiver<Command>, reports: Sender<Report>) -> Re
                 // Present whatever is there, pump the window, wait a frame.
                 if !l.live {
                     // The entry frame, if the core drew one on entering.
-                    present(l, &mut window)?;
+                    present(l, &mut window, &mut canvas)?;
                 } else {
                     window.update();
                 }
                 std::thread::sleep(l.frame_time);
             }
             Some(l) => {
-                step(l, &mut window, in_front, &reports)?;
+                step(l, &mut window, &mut canvas, in_front, &pad, &reports)?;
             }
         }
     }
@@ -240,6 +268,10 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
     let spec = manifest.stage_spec(&stage, content.key.clone());
     let judged = manifest.challenge_spec(&challenge);
     let controller = manifest.libretro.controller;
+    let layout = match controller {
+        Controller::Pad(layout) => layout,
+        Controller::Keyboard => PadLayout::Snes,
+    };
     let mut runner = LibretroRunner::start(manifest, None, content, Vec::new())?;
     let av = runner.av_info();
     let audio = match audio::start(av.timing.sample_rate) {
@@ -256,10 +288,13 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
     window.set_title(&format!("{title} \u{2014} GamerTrials"));
     runner.enter(&spec).map_err(|e| e.to_string())?;
     let run = Run::new(judged).map_err(|e| e.to_string())?.with_limit(l.limit);
-    let (pads, mouse) = match controller {
-        Controller::Pad(layout) => (Some(input::Pads::new(layout)), None),
-        Controller::Keyboard => (None, Some(input::Mouse::new())),
-    };
+    // A keyboard game reads the pad too: its RetroPad buttons press keys.
+    let pads = input::Pads::new(layout);
+    let mouse = l
+        .input
+        .keyboard
+        .as_ref()
+        .map(|kb| input::Mouse::new().with_sensitivity(kb.mouse_sensitivity));
     Ok((
         Loaded {
             round: l.round,
@@ -270,6 +305,10 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             done: false,
             pads,
             mouse,
+            input: l.input,
+            video: l.video,
+            display: l.display,
+            core_aspect: av.geometry.aspect_ratio,
             _audio: audio,
             frame_time,
             audio_target,
@@ -284,7 +323,9 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
 fn step(
     l: &mut Loaded,
     window: &mut Window,
+    canvas: &mut Canvas,
     in_front: bool,
+    pad: &PadState,
     reports: &Sender<Report>,
 ) -> Result<(), String> {
     match l.audio_target {
@@ -306,15 +347,12 @@ fn step(
     }
     window.update();
 
-    match l.pads.as_mut() {
-        Some(p) => {
-            p.pump();
-            let bits = if in_front { p.state() | keys::joypad() } else { 0 };
-            libretro::JOYPAD.store(bits, Ordering::Relaxed);
-        }
-        None => {
+    let bits = if in_front { keys::joypad(&l.input, pad) } else { 0 };
+    match l.input.keyboard.as_ref() {
+        None => libretro::JOYPAD.store(bits, Ordering::Relaxed),
+        Some(kb) => {
             if in_front {
-                keys::keyboard_passthrough();
+                keys::keyboard_game(kb, bits);
                 if let Some(m) = l.mouse.as_mut() {
                     m.pump(window);
                 }
@@ -346,7 +384,7 @@ fn step(
             let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: None });
         }
     }
-    present(l, window)
+    present(l, window, canvas)
 }
 
 fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
@@ -359,12 +397,15 @@ fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
     let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: Some(frame) });
 }
 
-fn present(l: &mut Loaded, window: &mut Window) -> Result<(), String> {
+fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas) -> Result<(), String> {
     let mut painted = false;
     let mut paint_error = None;
+    let client = window.get_size();
+    let (video, aspect) = (l.video, l.core_aspect);
     l.last_seq = l.runner.present(l.last_seq, &mut |f| {
         painted = true;
-        if let Err(e) = window.update_with_buffer(f.pixels, f.width, f.height) {
+        let (buf, w, h) = canvas.draw(&f, client, aspect, &video);
+        if let Err(e) = window.update_with_buffer(buf, w, h) {
             paint_error = Some(e.to_string());
         }
     });
@@ -375,6 +416,30 @@ fn present(l: &mut Loaded, window: &mut Window) -> Result<(), String> {
         window.update();
     }
     Ok(())
+}
+
+/// Fullscreen or not, and in a window, the size this core's picture wants at
+/// the player's scale.
+fn place_window(hwnd: isize, l: &Loaded, borderless: &mut bool, sized_for: &mut Option<(u32, u32)>) {
+    let want_borderless = l.display == Display::Borderless;
+    if want_borderless != *borderless {
+        video::window::set_borderless(hwnd, want_borderless);
+        *borderless = want_borderless;
+        *sized_for = None;
+    }
+    if *borderless {
+        return;
+    }
+    let av = l.runner.av_info();
+    let frame = (av.geometry.base_width as usize, av.geometry.base_height as usize);
+    if frame.0 == 0 || frame.1 == 0 {
+        return;
+    }
+    let size = video::window_size(frame, l.core_aspect, &l.video);
+    if *sized_for != Some(size) {
+        video::window::set_client_size(hwnd, size.0, size.1);
+        *sized_for = Some(size);
+    }
 }
 
 fn clear(window: &mut Window, width: usize, height: usize) -> Result<(), String> {

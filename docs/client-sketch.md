@@ -8,7 +8,26 @@ On launch, there is a simple main menu featuring a large art piece that is rando
 
 ## Settings
 
-Design TBD.
+Three tabs, and every change saves at once and applies from the next round
+(ADR 0028).
+
+- **Controls** — a generic modern gamepad drawn on screen, and under it every
+  RetroPad button with its keyboard-and-mouse binds and its gamepad binds, up
+  to three of each. Click a slot and press anything: a key, a mouse button, a pad
+  button, a stick direction. The two halves inherit separately. On the left,
+  the scope: **All games**, then each core, then each game under its core. A
+  scope shows what it inherits greyed out, and anything set there wins over
+  the scopes above it. Buttons a console does not have are dimmed. A keyboard
+  game (DOS) shows what each pad button *presses* in it instead, starting from
+  the manifest's `pad_keys`, plus a keyboard remap and mouse sensitivity. All
+  games also carries the stick deadzone and the two client actions, pause and
+  give up, as chords.
+- **Video** — window size, scaling (fit, integer, stretch), aspect (as the
+  console drew it, or square pixels), edge crop, and windowed or borderless
+  fullscreen. Each core can override any of it except fullscreen. Speed, frame
+  limiting, vsync, run-ahead and core options are deliberately absent, and the
+  page says why.
+- **Profile** — the display name.
 
 ## Lobby
 

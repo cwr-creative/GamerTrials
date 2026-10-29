@@ -69,6 +69,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0025](0025-widen-the-challenge-vocabulary-additively.md) | Widen the challenge vocabulary additively, and let a challenge name facts that cost a life | Accepted |
 | [0026](0026-score-a-match-on-placements-bound-every-run-and-deal-an-open-ended-series.md) | Score a match on placements, bound every run, and deal an open-ended series | Accepted |
 | [0027](0027-build-the-client-as-a-native-game-window-under-a-transparent-overlay.md) | Build the client as a native game window under a transparent overlay | Accepted |
+| [0028](0028-the-client-owns-input-binding-and-presentation.md) | The client owns input binding and presentation, and neither reaches the machine | Accepted |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is

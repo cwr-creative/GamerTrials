@@ -23,6 +23,7 @@
   button { font: inherit; font-size: 1.1em; padding: .5em 1.4em; margin: .4em;
            border: 3px solid #ffb347; background: #2a2a55; color: #fff; cursor: pointer; }
   button:hover { background: #3a3a77; }
+  #pause button.focus { background: #3a3a77; outline: 3px solid #fff; }
   table { border-collapse: collapse; margin: .6em auto; font-size: 1.05em; }
   th, td { padding: .25em .7em; text-align: left; }
   th { color: #ffb347; border-bottom: 2px solid #ffb347; }
@@ -104,8 +105,8 @@
   </div></div>
   <div id="pause" class="sheet hidden"><div class="card">
     <h1>Paused</h1>
-    <div><button id="resume">Resume</button><button id="end">End match</button></div>
-    <div style="margin-top:.8em;color:#aaa;font-size:.9em">F9 gives up the run · F10 pauses · F12 quits</div>
+    <div><button id="resume">Resume</button><button id="giveup">Give up the run</button><button id="end">End match</button></div>
+    <div id="pause-keys" style="margin-top:.8em;color:#aaa;font-size:.9em"></div>
   </div></div>
   <div id="error" class="hidden"></div>
   <div id="hud">overlay: waiting</div>
@@ -222,7 +223,7 @@
   async function showScore(p) {
     const delay = roundUntil - now();
     if (delay > 0) await wait(delay);
-    hide('round'); hide('waiting'); hide('pause');
+    hide('round'); hide('waiting'); hidePause();
     $('s-format').textContent = formatText(p.format) + (p.mode ? ' · ' + p.mode.replace('_', ' ') : '');
     standingsTable($('s-standings'), p.standings, p.mode, p.format, p.me);
     show('score');
@@ -244,8 +245,8 @@
         break;
       case 'round': showRound(p); break;
       case 'score': showScore(p); break;
-      case 'pause': show('pause'); hud('paused'); break;
-      case 'resume': hide('pause'); hud('playing'); break;
+      case 'pause': showPause(p); break;
+      case 'resume': hidePause(); hud('playing'); break;
       case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;
       case 'hud': hud(p.text); break;
     }
@@ -253,8 +254,58 @@
 
   $('again').onclick = () => { hide('score'); hide('error'); invoke('play_again'); };
   $('lobby').onclick = () => { hide('score'); invoke('back_to_lobby'); };
-  $('resume').onclick = () => { hide('pause'); invoke('resume'); };
-  $('end').onclick = () => { hide('pause'); invoke('end_match'); };
+  $('resume').onclick = () => { hidePause(); invoke('resume'); };
+  $('giveup').onclick = () => { hidePause(); invoke('give_up'); };
+  $('end').onclick = () => { hidePause(); invoke('end_match'); };
+
+  // ---- the pause menu, by pad as well as by mouse ----------------------------
+  // The game thread is held while this is up, so the page reads the pad
+  // itself (the Gamepad API, standard mapping): the d-pad or stick moves,
+  // South picks, Start resumes. A button already held when the menu opened —
+  // the Start of a Select+Start pause — counts only once it is let go.
+  const PAUSE_BUTTONS = ['resume', 'giveup', 'end'];
+  let pauseFocus = 0, pauseTimer = null, padWas = null;
+  const inputLabel = i => {
+    const [kind, rest] = i.split(':');
+    if (kind === 'key') return /^(f\d+|.)$/.test(rest) ? rest.toUpperCase() : rest;
+    if (kind === 'pad') return rest.charAt(0).toUpperCase() + rest.slice(1);
+    return i;
+  };
+  const chords = cs => (cs || []).map(c => c.map(inputLabel).join('+')).join(' or ') || 'unbound';
+  function focusPause(i) {
+    pauseFocus = (i + PAUSE_BUTTONS.length) % PAUSE_BUTTONS.length;
+    PAUSE_BUTTONS.forEach((id, n) => $(id).classList.toggle('focus', n === pauseFocus));
+  }
+  function showPause(p) {
+    $('pause-keys').textContent = 'Pause: ' + chords(p.pause) + ' · Give up: ' + chords(p.give_up) + ' · F12 quits';
+    show('pause'); hud('paused');
+    focusPause(0);
+    padWas = null;
+    if (!pauseTimer) pauseTimer = setInterval(pollPad, 50);
+  }
+  function hidePause() {
+    hide('pause');
+    clearInterval(pauseTimer); pauseTimer = null;
+    PAUSE_BUTTONS.forEach(id => $(id).classList.remove('focus'));
+  }
+  function pollPad() {
+    const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+    // Standard mapping: 0 South, 9 Start, 12-15 the d-pad.
+    const now = { south: false, start: false, up: false, down: false, left: false, right: false };
+    for (const g of pads) {
+      const b = i => g.buttons[i] && g.buttons[i].pressed;
+      now.south ||= b(0); now.start ||= b(9);
+      now.up ||= b(12) || g.axes[1] < -0.5; now.down ||= b(13) || g.axes[1] > 0.5;
+      now.left ||= b(14) || g.axes[0] < -0.5; now.right ||= b(15) || g.axes[0] > 0.5;
+    }
+    const was = padWas || now;
+    const pressed = k => now[k] && !was[k];
+    padWas = now;
+    if (pressed('up') || pressed('left')) focusPause(pauseFocus - 1);
+    if (pressed('down') || pressed('right')) focusPause(pauseFocus + 1);
+    if (pressed('start')) $('resume').onclick();
+    else if (pressed('south')) $(PAUSE_BUTTONS[pauseFocus]).onclick();
+  }
 
   // Tauri's event bridge; `withGlobalTauri` puts it on `window`. Listening
   // needs the `core:default` capability in `capabilities/`; without it the

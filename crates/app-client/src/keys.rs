@@ -1,4 +1,5 @@
-//! Keyboard reading that does not depend on which window has focus.
+//! Host input that does not depend on which window has focus, read through the
+//! player's bindings (ADR 0028).
 //!
 //! The harness reads keys from its minifb window's message queue, which only
 //! sees them while that window is focused. Under the overlay (ADR 0027) the
@@ -6,32 +7,17 @@
 //! `GetAsyncKeyState` reads the key's physical state instead, from any thread
 //! and whatever has focus; the one guard needed is that *one of our windows*
 //! is in front, so a game does not keep playing from keystrokes typed into
-//! another program.
+//! another program. Mouse buttons are virtual keys too, and read the same way.
 
 use winapi::um::winuser::{GetAsyncKeyState, GetForegroundWindow};
 
-use session_libretro::libretro::{
-    self, JOY_A, JOY_B, JOY_DOWN, JOY_L, JOY_LEFT, JOY_R, JOY_RIGHT, JOY_SELECT, JOY_START,
-    JOY_UP, JOY_X, JOY_Y,
-};
+use session_libretro::input::PadState;
+use session_libretro::keymap::GUEST_KEYS;
+use session_libretro::libretro;
 
-/// Virtual-key codes (winuser.h) for the keys the pad mapping uses.
-const VK_BACK: i32 = 0x08;
-const VK_TAB: i32 = 0x09;
-const VK_RETURN: i32 = 0x0D;
-const VK_ESCAPE: i32 = 0x1B;
-const VK_SPACE: i32 = 0x20;
-const VK_LEFT: i32 = 0x25;
-const VK_UP: i32 = 0x26;
-const VK_RIGHT: i32 = 0x27;
-const VK_DOWN: i32 = 0x28;
+use crate::settings::{Dir, Input, KeyboardGame, ResolvedInput, Stick};
+
 const VK_F12: i32 = 0x7B;
-const VK_LSHIFT: i32 = 0xA0;
-const VK_RSHIFT: i32 = 0xA1;
-const VK_LCONTROL: i32 = 0xA2;
-const VK_RCONTROL: i32 = 0xA3;
-const VK_LMENU: i32 = 0xA4;
-const VK_RMENU: i32 = 0xA5;
 
 pub fn down(vk: i32) -> bool {
     // High bit set: the key is down now.
@@ -57,97 +43,120 @@ pub fn quit_pressed() -> bool {
     down(VK_F12)
 }
 
-/// The same pad mapping as `session_libretro::input::keyboard`: Z/X are B/A,
-/// A/S are Y/X, Q/W the shoulders, Enter and right shift start and select.
-pub fn joypad() -> u32 {
+/// Whether one bound input is held now.
+pub fn held(input: &Input, pad: &PadState, deadzone: f32) -> bool {
+    match input {
+        Input::Key(vk) => down(*vk),
+        Input::Mouse(b) => down(b.vk()),
+        Input::Pad(b) => pad.buttons & (1 << b.index()) != 0,
+        Input::Stick(s, d) => stick(pad, *s, *d) > deadzone,
+    }
+}
+
+/// [`held`], with a key's tap since the last poll counted too: for the
+/// client's own actions, read as edges.
+pub fn held_or_tapped(input: &Input, pad: &PadState, deadzone: f32) -> bool {
+    match input {
+        Input::Key(vk) => tapped(*vk),
+        Input::Mouse(b) => tapped(b.vk()),
+        _ => held(input, pad, deadzone),
+    }
+}
+
+/// How far a stick is pushed one way, 0..1.
+pub fn stick(pad: &PadState, s: Stick, d: Dir) -> f32 {
+    let (x, y) = match s {
+        Stick::Left => (pad.sticks[0], pad.sticks[1]),
+        Stick::Right => (pad.sticks[2], pad.sticks[3]),
+    };
+    match d {
+        Dir::Up => y,
+        Dir::Down => -y,
+        Dir::Left => -x,
+        Dir::Right => x,
+    }
+}
+
+/// The RetroPad as the bindings say it is held: every bound input of a
+/// button, OR'd, so a key and a pad button on the same button both work.
+pub fn joypad(input: &ResolvedInput, pad: &PadState) -> u32 {
     let mut bits = 0u32;
-    let mut set = |id: u32, pressed: bool| {
-        if pressed {
+    for (id, inputs) in input.binds.iter().enumerate() {
+        if inputs.iter().any(|i| held(i, pad, input.deadzone)) {
             bits |= 1 << id;
         }
-    };
-    set(JOY_UP, down(VK_UP));
-    set(JOY_DOWN, down(VK_DOWN));
-    set(JOY_LEFT, down(VK_LEFT));
-    set(JOY_RIGHT, down(VK_RIGHT));
-    set(JOY_B, down(b'Z' as i32));
-    set(JOY_A, down(b'X' as i32));
-    set(JOY_Y, down(b'A' as i32));
-    set(JOY_X, down(b'S' as i32));
-    set(JOY_L, down(b'Q' as i32));
-    set(JOY_R, down(b'W' as i32));
-    set(JOY_START, down(VK_RETURN));
-    set(JOY_SELECT, down(VK_RSHIFT));
+    }
     bits
 }
 
-/// Virtual key to `RETROK_*`, for a keyboard game. Letters and digits are
-/// their ASCII; the rest is the same table `session_libretro::input` keeps.
-const PASSTHROUGH: &[(i32, u32)] = &[
-    (VK_UP, 273),
-    (VK_DOWN, 274),
-    (VK_RIGHT, 275),
-    (VK_LEFT, 276),
-    (VK_LCONTROL, 306),
-    (VK_RCONTROL, 305),
-    (VK_LSHIFT, 304),
-    (VK_RSHIFT, 303),
-    (VK_LMENU, 308),
-    (VK_RMENU, 307),
-    (VK_SPACE, 32),
-    (VK_RETURN, 13),
-    (VK_ESCAPE, 27),
-    (VK_TAB, 9),
-    (VK_BACK, 8),
-    (0xBC, 44), // comma
-    (0xBE, 46), // period
-    (0xBD, 45), // minus
-    (0xBB, 61), // equals
-    (0xBA, 59), // semicolon
-    (0xDE, 39), // apostrophe
-    (0xBF, 47), // slash
-    (0xDC, 92), // backslash
-    (0xDB, 91), // left bracket
-    (0xDD, 93), // right bracket
-];
-
-/// Push this frame's held keys into a keyboard game, as edges, the way
-/// `session_libretro::input::keyboard_passthrough` does.
-pub fn keyboard_passthrough() {
-    for (vk, code) in PASSTHROUGH {
-        if down(*vk) {
-            libretro::key_down(*code);
-        } else {
-            libretro::key_up(*code);
+/// Push this frame's keys into a keyboard game, as edges, the way
+/// `session_libretro::input::keyboard_passthrough` does — each host key as
+/// the player's remap says, plus whatever a gamepad's RetroPad buttons press.
+/// A guest key two sources hold is one press.
+pub fn keyboard_game(kb: &KeyboardGame, pad_bits: u32) {
+    let mut held_codes = Vec::new();
+    for (vk, sent) in &kb.keys {
+        if let Some(code) = sent {
+            if down(*vk) {
+                held_codes.push(*code);
+            }
         }
     }
-    for c in b'a'..=b'z' {
-        let vk = c.to_ascii_uppercase() as i32;
-        if down(vk) {
-            libretro::key_down(c as u32);
-        } else {
-            libretro::key_up(c as u32);
+    for (id, code) in &kb.pad_keys {
+        if pad_bits & (1 << id) != 0 {
+            held_codes.push(*code);
         }
     }
-    for d in b'0'..=b'9' {
-        if down(d as i32) {
-            libretro::key_down(d as u32);
+    for g in GUEST_KEYS {
+        if held_codes.contains(&g.retrok) {
+            libretro::key_down(g.retrok);
         } else {
-            libretro::key_up(d as u32);
+            libretro::key_up(g.retrok);
         }
     }
 }
 
 /// Release every passthrough key, for when input is withheld from the game.
 pub fn keyboard_release_all() {
-    for (_, code) in PASSTHROUGH {
-        libretro::key_up(*code);
-    }
-    for c in b'a'..=b'z' {
-        libretro::key_up(c as u32);
-    }
-    for d in b'0'..=b'9' {
-        libretro::key_up(d as u32);
+    for g in GUEST_KEYS {
+        libretro::key_up(g.retrok);
     }
 }
 
+/// The first input pressed now that was not held in `before`, for the
+/// settings page's capture. Every virtual key is scanned, so a key outside
+/// the guest table (F-keys, the numpad) can still bind a pad game's button.
+pub fn first_new_press(pad: &PadState, deadzone: f32, before: &[Input]) -> Option<Input> {
+    use crate::settings::{MouseButton, PadButton};
+    let mut now = Vec::new();
+    for b in [MouseButton::Left, MouseButton::Right, MouseButton::Middle, MouseButton::X1, MouseButton::X2] {
+        now.push(Input::Mouse(b));
+    }
+    for vk in 0x08..=0xFE {
+        // The generic Shift/Ctrl/Alt codes shadow their left and right ones.
+        if (0x10..=0x12).contains(&vk) {
+            continue;
+        }
+        now.push(Input::Key(vk));
+    }
+    for b in PadButton::ALL {
+        now.push(Input::Pad(b));
+    }
+    for s in [Stick::Left, Stick::Right] {
+        for d in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+            now.push(Input::Stick(s, d));
+        }
+    }
+    now.into_iter().find(|i| !before.contains(i) && held(i, pad, deadzone))
+}
+
+/// Everything held now, as [`first_new_press`] counts it.
+pub fn all_held(pad: &PadState, deadzone: f32) -> Vec<Input> {
+    let mut out = Vec::new();
+    let mut before = Vec::new();
+    while let Some(i) = first_new_press(pad, deadzone, &before) {
+        before.push(i);
+        out.push(i);
+    }
+    out
+}

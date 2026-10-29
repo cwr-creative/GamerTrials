@@ -31,6 +31,7 @@ use session_api::{
     AssetKey, ChallengeId, ChallengeSpec, EntryPoint, Framerate, GameId, StageId, StageSpec,
 };
 
+use crate::keymap::{self, RetroButton};
 use crate::memory::{AddressSpace, Endian, Prefer, Width};
 
 // One manifest, one version, one fact vocabulary: all three are the challenge
@@ -123,6 +124,10 @@ struct LibretroDoc {
     /// publishes once it has published it; an unknown key is an error.
     #[serde(default)]
     options: BTreeMap<String, String>,
+    /// What each RetroPad button presses on a keyboard game, as a suggestion
+    /// a player may rebind. RetroPad name to guest key name.
+    #[serde(default)]
+    pad_keys: BTreeMap<String, String>,
     memory: MemoryDoc,
 }
 
@@ -435,6 +440,10 @@ pub struct LibretroConfig {
     /// a piece of play takes, and two players on different values have
     /// incomparable scores (ADR 0018, invariant 4).
     pub options: BTreeMap<String, String>,
+    /// For a keyboard game: the key each RetroPad button presses when a
+    /// player drives it with a gamepad, until they rebind it (ADR 0028).
+    /// Values are [`keymap::GUEST_KEYS`] names. Empty for a pad game.
+    pub pad_keys: BTreeMap<RetroButton, String>,
     /// How long a cold boot takes before the game is at its named entry point.
     /// Zero for a console, where `Named` is not used at all; ~900 frames for a
     /// DOS bundle that has to start DOS first.
@@ -986,6 +995,27 @@ impl Doc {
                 ))
             }
         };
+        let mut pad_keys = BTreeMap::new();
+        if !lr.pad_keys.is_empty() {
+            if controller != Controller::Keyboard {
+                return Err("runner.libretro.pad_keys only means something when                             controller = \"keyboard\": a pad game's buttons are the                             RetroPad's already"
+                    .into());
+            }
+            for (button, key) in &lr.pad_keys {
+                let b = RetroButton::parse(button).ok_or_else(|| {
+                    format!(
+                        "runner.libretro.pad_keys: `{button}` is not a RetroPad button; try {}",
+                        RetroButton::ALL.map(RetroButton::name).join(", ")
+                    )
+                })?;
+                if keymap::guest_key(key).is_none() {
+                    return Err(format!(
+                        "runner.libretro.pad_keys.{button}: `{key}` is not a key this                          frontend sends; see keymap::GUEST_KEYS"
+                    ));
+                }
+                pad_keys.insert(b, key.clone());
+            }
+        }
         let scan = match &lr.memory.scan {
             None => None,
             Some(sc) => {
@@ -1207,6 +1237,7 @@ impl Doc {
                 },
                 scan,
                 options: lr.options,
+                pad_keys,
                 boot_frames,
             },
             watches,
@@ -1320,6 +1351,41 @@ entry = { state = "a.state" }
     fn a_keyboard_game_needs_no_layout_at_all() {
         let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\ncontroller = \"keyboard\"");
         assert_eq!(parse(&text).unwrap().libretro.controller, Controller::Keyboard);
+    }
+
+    #[test]
+    fn pad_keys_load_on_a_keyboard_game() {
+        let text = MINIMAL.replace(
+            "core_dir = \"cores\"",
+            "core_dir = \"cores\"
+controller = \"keyboard\"
+pad_keys = { b = \"lctrl\", start = \"escape\" }",
+        );
+        let m = parse(&text).unwrap();
+        assert_eq!(m.libretro.pad_keys.get(&RetroButton::B).map(String::as_str), Some("lctrl"));
+        assert_eq!(m.libretro.pad_keys.len(), 2);
+    }
+
+    #[test]
+    fn pad_keys_are_refused_on_a_pad_game() {
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"
+pad_keys = { b = \"lctrl\" }");
+        assert!(parse(&text).unwrap_err().contains("pad_keys"));
+    }
+
+    #[test]
+    fn pad_keys_name_real_buttons_and_keys() {
+        let kb = "core_dir = \"cores\"
+controller = \"keyboard\"
+";
+        let bad_button = MINIMAL.replace("core_dir = \"cores\"
+", &format!("{kb}pad_keys = {{ z = \"lctrl\" }}
+"));
+        assert!(parse(&bad_button).unwrap_err().contains("not a RetroPad button"));
+        let bad_key = MINIMAL.replace("core_dir = \"cores\"
+", &format!("{kb}pad_keys = {{ b = \"f2\" }}
+"));
+        assert!(parse(&bad_key).unwrap_err().contains("not a key"));
     }
 
     #[test]

@@ -78,6 +78,31 @@ controller = "keyboard"
 # exists to capture one.
 boot_seconds = 16.0
 
+# What each RetroPad button presses when a player drives DOOM with a gamepad
+# (ADR 0028). A suggestion, not a remap: the keyboard still passes straight
+# through, and a player can rebind any of these in Settings. The keys are
+# DOOM 1.9's own defaults, because the bundle's DEFAULT.CFG sets only sound
+# and so leaves every key where DOOM puts it. Left-hand modifiers rather than
+# right: DOS DOOM reads the plain scancode, and a right Ctrl or Alt is an
+# extended one. The d-pad and the left stick both arrive as the RetroPad's
+# directions, so both turn and walk. Playtested on a pad and on mouse and
+# keyboard (2026-10-29).
+[runner.libretro.pad_keys]
+up = "up"
+down = "down"
+left = "left"
+right = "right"
+b = "lctrl"       # fire
+r2 = "lctrl"      # fire, on a trigger too
+a = "space"       # use
+y = "lshift"      # run
+l = "comma"       # strafe left
+r = "period"      # strafe right
+l2 = "lalt"       # strafe while held
+x = "enter"       # confirm in DOOM's menus
+start = "escape"  # DOOM's menu
+select = "tab"    # automap
+
 # The load-bearing table, and a new kind of thing in a manifest: not an address
 # and not a hash, but a machine configuration without which two players are not
 # playing the same game.

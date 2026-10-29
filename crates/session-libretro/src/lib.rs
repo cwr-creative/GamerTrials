@@ -42,6 +42,7 @@
 
 pub mod audio;
 pub mod input;
+pub mod keymap;
 pub mod libretro;
 pub mod manifest;
 pub mod memory;

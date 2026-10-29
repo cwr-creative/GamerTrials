@@ -29,6 +29,7 @@ in [`docs/games/`](../../docs/games).
 | `watch` | the interpreter: markers, rules, edges, attempts |
 | `runner` | `LibretroRunner`: `StageRunner` + `Presentable` |
 | `input` | host keyboard and pad → a joypad bitmask, or keys and a captured mouse passed through |
+| `keymap` | the RetroPad's button names and the guest keys a keyboard game is sent, shared with the client's settings (ADR 0028) |
 | `audio` | resample to the device rate; doubles as the frame clock |
 | `ramsearch` | two ways to find an address nobody wrote down |
 | `bin/harness` | the window, the keys, the flags |

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use protocol::{ChallengeRef, LobbySettings, LobbyState, ToClient, ToServer};
@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::game::{self, Command, Load, Report};
 use crate::library::Library;
 use crate::overlay::Overlay;
+use crate::settings::Settings;
 use crate::{local, overlay};
 
 /// Everything the coordinator can hear.
@@ -40,6 +41,8 @@ pub enum UiCmd {
     EndMatch,
     /// From the pause menu.
     Resume,
+    /// Give up the run, from the pause menu.
+    GiveUp,
 }
 
 /// What the command line asked for in place of the menu.
@@ -63,7 +66,11 @@ pub struct Flow {
     library: Arc<Library>,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
-    scale: usize,
+    /// The player's settings, shared with the settings page. Read when a
+    /// round is dealt, so a change applies from the next round.
+    settings: Arc<Mutex<Settings>>,
+    /// `--scale`, over the settings' window scale.
+    scale: Option<u32>,
     spike: bool,
     to_server: Option<Sender<ToServer>>,
     player: Option<String>,
@@ -86,7 +93,8 @@ impl Flow {
     pub fn spawn(
         app: AppHandle,
         library: Arc<Library>,
-        scale: usize,
+        settings: Arc<Mutex<Settings>>,
+        scale: Option<u32>,
         spike: bool,
         auto: Auto,
     ) -> Sender<Msg> {
@@ -103,6 +111,7 @@ impl Flow {
                     library,
                     rx,
                     tx,
+                    settings,
                     scale,
                     spike,
                     to_server: None,
@@ -176,6 +185,12 @@ impl Flow {
                 self.passthrough(true);
                 self.emit(json!({ "kind": "resume" }));
             }
+            UiCmd::GiveUp => {
+                if let Some(g) = &self.game {
+                    let _ = g.send(Command::Forfeit);
+                }
+                self.passthrough(true);
+            }
         }
     }
 
@@ -230,20 +245,33 @@ impl Flow {
                     eprintln!("[match] dealt a challenge this client does not hold: {}", challenge.challenge);
                     return;
                 };
+                let game = &challenge.game;
+                let core = &self.library.cores[game];
+                let lr = &self.library.runner[game].libretro;
+                let (input, mut video, display) = {
+                    let s = self.settings.lock().unwrap();
+                    (s.resolve_input(core, game, lr.controller, &lr.pad_keys), s.resolve_video(core), s.video.display)
+                };
+                if let Some(scale) = self.scale {
+                    video.window_scale = scale;
+                }
                 let load = Load {
                     round,
-                    manifest: self.library.paths[&challenge.game].clone(),
+                    manifest: self.library.paths[game].clone(),
                     stage: c.stage.0.clone(),
                     challenge: c.id.0.clone(),
                     seed,
                     limit: limit_frames,
+                    input,
+                    video,
+                    display,
                 };
                 self.current = Some(Current { round });
                 self.emit(json!({ "kind": "loading", "round": round }));
                 match &self.game {
                     Some(g) => {
                         let _ = g.send(Command::Unload);
-                        let _ = g.send(Command::Load(load));
+                        let _ = g.send(Command::Load(Box::new(load)));
                     }
                     None => {
                         self.waiting_load = Some(load);
@@ -331,7 +359,7 @@ impl Flow {
                     let _ = w.hide();
                 }
                 if let (Some(g), Some(load)) = (&self.game, self.waiting_load.take()) {
-                    let _ = g.send(Command::Load(load));
+                    let _ = g.send(Command::Load(Box::new(load)));
                 }
             }
             Report::Loaded { round, artifact } => {
@@ -376,7 +404,8 @@ impl Flow {
                 }));
             }
             Report::Paused => {
-                self.emit(json!({ "kind": "pause" }));
+                let actions = self.settings.lock().unwrap().input.actions.clone();
+                self.emit(json!({ "kind": "pause", "pause": actions.pause, "give_up": actions.give_up }));
                 self.passthrough(false);
             }
             Report::Closed => {
@@ -438,11 +467,10 @@ impl Flow {
     fn open_table(&mut self) {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (rep_tx, rep_rx) = mpsc::channel();
-        let scale = self.scale;
         thread::Builder::new()
             .name("game".into())
             .spawn(move || {
-                if let Err(e) = game::run(scale, cmd_rx, rep_tx) {
+                if let Err(e) = game::run(cmd_rx, rep_tx) {
                     eprintln!("[game] {e}");
                 }
             })

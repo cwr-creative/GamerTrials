@@ -22,7 +22,8 @@
 //! is on the right" and "A is on the bottom" habits to work, and a four-button
 //! game cannot have that, because every position is already taken.
 
-use gilrs::{Axis, Button, Gilrs};
+use gilrs::Gilrs;
+pub use gilrs::{Axis, Button};
 use minifb::{Key, MouseButton, MouseMode, Window};
 
 use crate::libretro;
@@ -105,6 +106,73 @@ impl Pads {
             set(&mut bits, JOY_RIGHT, pad.is_pressed(Button::DPadRight) || sx > STICK_DEADZONE);
         }
         bits
+    }
+}
+
+/// The physical pad buttons a frontend's own bindings can name, in the order
+/// of [`PadState::buttons`]' bits. gilrs reports a modern pad by position, so
+/// South is the bottom of the diamond whatever the label on it says.
+pub const PAD_BUTTONS: [Button; 17] = [
+    Button::South,
+    Button::East,
+    Button::West,
+    Button::North,
+    Button::LeftTrigger,
+    Button::RightTrigger,
+    Button::LeftTrigger2,
+    Button::RightTrigger2,
+    Button::LeftThumb,
+    Button::RightThumb,
+    Button::Start,
+    Button::Select,
+    Button::Mode,
+    Button::DPadUp,
+    Button::DPadDown,
+    Button::DPadLeft,
+    Button::DPadRight,
+];
+
+/// Every connected pad, merged: what is held and where the sticks are. For a
+/// frontend that maps buttons itself rather than taking [`Pads::state`]'s
+/// layout-folded mask — the client does, from the player's settings.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct PadState {
+    /// Bit `i` is `PAD_BUTTONS[i]`.
+    pub buttons: u32,
+    /// Left X, left Y, right X, right Y, each in -1..=1, up positive. The
+    /// furthest-deflected pad wins each axis.
+    pub sticks: [f32; 4],
+}
+
+impl Pads {
+    pub fn raw(&self) -> PadState {
+        let mut out = PadState::default();
+        let Some(g) = self.gilrs.as_ref() else {
+            return out;
+        };
+        for (_id, pad) in g.gamepads() {
+            if !pad.is_connected() {
+                continue;
+            }
+            for (i, b) in PAD_BUTTONS.iter().enumerate() {
+                if pad.is_pressed(*b) {
+                    out.buttons |= 1 << i;
+                }
+            }
+            let axes = [Axis::LeftStickX, Axis::LeftStickY, Axis::RightStickX, Axis::RightStickY];
+            for (slot, axis) in out.sticks.iter_mut().zip(axes) {
+                let v = pad.value(axis);
+                if v.abs() > slot.abs() {
+                    *slot = v;
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any pad is connected, for a settings page to say so.
+    pub fn connected(&self) -> usize {
+        self.gilrs.as_ref().map_or(0, |g| g.gamepads().filter(|(_, p)| p.is_connected()).count())
     }
 }
 
@@ -238,11 +306,32 @@ pub struct Mouse {
     /// Held from the capturing click until it is released, so the game never
     /// sees the second half of a press it did not see start.
     swallow_left: bool,
+    /// Multiplies motion: a frontend's preference, applied before the game
+    /// sees it. The fraction a frame did not send is carried to the next, so
+    /// a slow drag at a low setting still moves.
+    sensitivity: f32,
+    carry: (f32, f32),
 }
 
 impl Mouse {
     pub fn new() -> Self {
-        Mouse { captured: false, swallow_left: false }
+        Mouse { captured: false, swallow_left: false, sensitivity: 1.0, carry: (0.0, 0.0) }
+    }
+
+    pub fn with_sensitivity(mut self, s: f32) -> Self {
+        self.sensitivity = s;
+        self
+    }
+
+    fn scaled(&mut self, dx: i32, dy: i32) -> (i32, i32) {
+        if self.sensitivity == 1.0 {
+            return (dx, dy);
+        }
+        let x = dx as f32 * self.sensitivity + self.carry.0;
+        let y = dy as f32 * self.sensitivity + self.carry.1;
+        let (ox, oy) = (x.trunc(), y.trunc());
+        self.carry = (x - ox, y - oy);
+        (ox as i32, oy as i32)
     }
 
     /// Latch this frame's motion and buttons into the core. Once per frame,
@@ -282,6 +371,7 @@ impl Mouse {
             set(&mut buttons, libretro::MOUSE_WHEELUP, wheel > 0.0);
             set(&mut buttons, libretro::MOUSE_WHEELDOWN, wheel < 0.0);
         }
+        let (dx, dy) = self.scaled(dx, dy);
         libretro::set_mouse(dx, dy, buttons);
     }
 

@@ -124,6 +124,21 @@ fn every_shipped_manifest_loads() {
     assert_eq!(m.stages.len(), 2);
 }
 
+/// DOOM's suggested pad keys: fire, use and the menu, where DOOM 1.9 puts
+/// them. A pad game carries none.
+#[test]
+fn doom_suggests_keys_for_a_gamepad() {
+    use crate::keymap::RetroButton;
+    let m = doom();
+    let key = |b| m.libretro.pad_keys.get(&b).map(String::as_str);
+    assert_eq!(key(RetroButton::B), Some("lctrl"));
+    assert_eq!(key(RetroButton::A), Some("space"));
+    assert_eq!(key(RetroButton::Start), Some("escape"));
+    assert_eq!(key(RetroButton::Up), Some("up"));
+    assert!(smb3().libretro.pad_keys.is_empty());
+    assert!(dkc().libretro.pad_keys.is_empty());
+}
+
 /// The two SMB3 custom challenges, pinned against `docs/games/smb3.md`.
 ///
 /// Every number here was read out of a disassembly and argued for in that
