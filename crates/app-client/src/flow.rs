@@ -5,6 +5,12 @@
 //! The overlay page animates and, when an animation ends, says so. This
 //! thread is what connects them, and it holds no rule about a match: it
 //! forwards facts and carries out verdicts.
+//!
+//! The server is in-process for solo play and a `gamertrials-server` for a
+//! lobby of several ([`Link`]); the flow is the same over either. A guest
+//! differs from the host only in what the server lets them do, and in what
+//! leaving means: a host's closed window ends the match and keeps the lobby,
+//! a guest's leaves the lobby.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,12 +25,16 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::game::{self, Command, Load, Report};
 use crate::library::Library;
 use crate::overlay::Overlay;
+use crate::link::{self, Link};
+use crate::overlay;
 use crate::settings::Settings;
-use crate::{local, overlay};
 
 /// Everything the coordinator can hear.
 pub enum Msg {
     Server(ToClient),
+    /// The link to a networked server failed. Tagged, so a link already
+    /// replaced cannot end the next one.
+    Disconnected { generation: u64, reason: String },
     Game(Report),
     Ui(UiCmd),
 }
@@ -32,6 +42,10 @@ pub enum Msg {
 /// What the pages ask for.
 pub enum UiCmd {
     Host { name: String },
+    /// Join a lobby on a networked server by invite (ADR 0030).
+    Join { name: String, invite: String },
+    /// Leave the lobby, from the lobby page or a guest's pause menu.
+    Leave,
     Settings(LobbySettings),
     Enable(Vec<ChallengeRef>),
     Start,
@@ -55,6 +69,12 @@ const RECHECK: Duration = Duration::from_secs(3);
 #[derive(Default)]
 pub struct Auto {
     pub host: Option<String>,
+    /// `--server`: host on this server rather than the profile's.
+    pub server: Option<String>,
+    /// `--join`: an invite to join instead of hosting, as `--name` (or the
+    /// profile's name).
+    pub join: Option<String>,
+    pub name: Option<String>,
     pub start: bool,
     pub mode: Option<protocol::Mode>,
     pub format: Option<protocol::Format>,
@@ -80,7 +100,9 @@ pub struct Flow {
     /// `--scale`, over the settings' window scale.
     scale: Option<u32>,
     spike: bool,
-    to_server: Option<Sender<ToServer>>,
+    link: Option<Link>,
+    /// Counts links, so a failure report from an old one is recognised.
+    generation: u64,
     player: Option<String>,
     lobby: Option<LobbyState>,
     game: Option<Sender<Command>>,
@@ -99,6 +121,9 @@ pub struct Flow {
     files: Option<FileReport>,
     /// The recheck timer is running.
     ticking: bool,
+    /// The flow closed the game window itself; its `Closed` is not the
+    /// player leaving.
+    closing: bool,
 }
 
 impl Flow {
@@ -112,7 +137,10 @@ impl Flow {
     ) -> Sender<Msg> {
         let (tx, rx) = mpsc::channel();
         let ui = tx.clone();
-        if let Some(name) = auto.host.clone() {
+        if let Some(invite) = auto.join.clone() {
+            let name = auto.name.clone().unwrap_or_default();
+            let _ = tx.send(Msg::Ui(UiCmd::Join { name, invite }));
+        } else if let Some(name) = auto.host.clone() {
             let _ = tx.send(Msg::Ui(UiCmd::Host { name }));
         }
         thread::Builder::new()
@@ -126,7 +154,8 @@ impl Flow {
                     settings,
                     scale,
                     spike,
-                    to_server: None,
+                    link: None,
+                    generation: 0,
                     player: None,
                     lobby: None,
                     game: None,
@@ -140,6 +169,7 @@ impl Flow {
                     auto_started: false,
                     files: None,
                     ticking: false,
+                    closing: false,
                 };
                 flow.run();
             })
@@ -152,6 +182,15 @@ impl Flow {
             match msg {
                 Msg::Ui(cmd) => self.ui(cmd),
                 Msg::Server(m) => self.server(m),
+                Msg::Disconnected { generation, reason } => {
+                    if generation == self.generation && self.link.is_some() {
+                        eprintln!("[link] {reason}");
+                        let text = format!("Lost the server: {reason}");
+                        self.emit(json!({ "kind": "error", "text": text }));
+                        self.leave();
+                        self.notice(&text);
+                    }
+                }
                 Msg::Game(r) => self.game(r),
             }
         }
@@ -162,17 +201,41 @@ impl Flow {
     fn ui(&mut self, cmd: UiCmd) {
         match cmd {
             UiCmd::Host { name } => {
-                if self.to_server.is_none() {
-                    let seed = local::fresh_seed();
-                    println!("[match] local server seeded {seed}");
-                    let tx = local::spawn(self.library.catalog.clone(), seed, self.tx.clone());
-                    self.to_server = Some(tx);
+                if self.link.is_some() {
+                    return;
                 }
-                let name = if name.trim().is_empty() { "Player".to_string() } else { name };
-                self.send(ToServer::Hello { name, library_hash: self.library.hash_hex(), lobby: None });
-                self.files = None;
-                self.send_files();
-                self.start_ticking();
+                let server = self
+                    .auto
+                    .server
+                    .clone()
+                    .or_else(|| Some(self.settings.lock().unwrap().server.clone()))
+                    .filter(|s| !s.trim().is_empty());
+                let link = match server {
+                    None => Link::local(self.library.catalog.clone(), self.tx.clone()),
+                    Some(server) => match self.connect(&server) {
+                        Ok(l) => l,
+                        Err(e) => return self.notice(&e),
+                    },
+                };
+                self.hello(link, name, None);
+            }
+            UiCmd::Join { name, invite } => {
+                if self.link.is_some() {
+                    return;
+                }
+                let profile = self.settings.lock().unwrap().server.clone();
+                let (server, code) = match link::parse_invite(&invite, Some(&profile)) {
+                    Ok(v) => v,
+                    Err(e) => return self.notice(&e),
+                };
+                match self.connect(&server) {
+                    Ok(l) => self.hello(l, name, Some(code)),
+                    Err(e) => self.notice(&e),
+                }
+            }
+            UiCmd::Leave => {
+                self.leave();
+                self.notice("");
             }
             UiCmd::Recheck => {
                 // Between matches only: in one, the table is up and the check
@@ -222,8 +285,15 @@ impl Flow {
     fn server(&mut self, m: ToClient) {
         match m {
             ToClient::Welcome { player, lobby } => {
-                println!("[lobby] joined as {player}");
-                self.player = Some(player);
+                println!("[lobby] joined {} as {player}", lobby.code);
+                self.player = Some(player.clone());
+                let invite = self.link.as_ref().and_then(|l| l.server.as_deref()).map(|s| link::invite(s, &lobby.code));
+                let _ = self.app.emit_to("main", "session", &json!({ "me": player, "invite": invite }));
+                if !lobby.players.first().is_some_and(|p| p.id == player) {
+                    // A guest: the lobby's settings are the host's to set.
+                    self.show_lobby(lobby);
+                    return;
+                }
                 let mut settings = lobby.settings.clone();
                 let mut changed = false;
                 if let Some(m) = self.auto.mode {
@@ -251,9 +321,19 @@ impl Flow {
             }
             ToClient::Refused { reason } => {
                 eprintln!("[server] refused: {reason}");
-                let _ = self.app.emit_to("main", "notice", &json!({ "text": reason }));
+                if self.player.is_none() {
+                    // Not let in: a lobby that is not there, or another library.
+                    self.leave();
+                }
+                self.notice(&reason);
             }
-            ToClient::Lobby(lobby) => self.show_lobby(lobby),
+            ToClient::Lobby(lobby) => {
+                if !lobby.in_match && self.game.is_some() {
+                    // The host went back to the lobby; so does everyone.
+                    self.leave_table();
+                }
+                self.show_lobby(lobby);
+            }
             ToClient::Dealt { round, challenge, kind, seed, limit_frames, players } => {
                 println!(
                     "[match] round {round}: {} / {} ({kind:?}), seed {seed}, limit {limit_frames} frames, players {players:?}",
@@ -378,7 +458,7 @@ impl Flow {
                 let format = self.lobby.as_ref().map(|l| l.settings.format);
                 self.emit(json!({
                     "kind": "score", "standings": standings, "mode": mode, "format": format,
-                    "me": self.player,
+                    "me": self.player, "host": self.is_host(),
                 }));
                 self.passthrough(false);
             }
@@ -460,7 +540,9 @@ impl Flow {
             }
             Report::Paused => {
                 let actions = self.settings.lock().unwrap().input.actions.clone();
-                self.emit(json!({ "kind": "pause", "pause": actions.pause, "give_up": actions.give_up }));
+                self.emit(json!({
+                    "kind": "pause", "pause": actions.pause, "give_up": actions.give_up, "host": self.is_host(),
+                }));
                 self.passthrough(false);
             }
             Report::Closed => {
@@ -468,11 +550,19 @@ impl Flow {
                 self.game = None;
                 self.game_hwnd = None;
                 self.overlay = None;
-                if self.current.is_some() {
-                    self.send(ToServer::EndMatch);
-                    self.current = None;
+                let asked = std::mem::take(&mut self.closing);
+                if self.is_host() {
+                    if self.current.is_some() {
+                        self.send(ToServer::EndMatch);
+                    }
+                    self.send(ToServer::BackToLobby);
+                } else if !asked && self.link.is_some() {
+                    // A guest who closes the table leaves; the server ends
+                    // the match for everyone, as for any player who leaves.
+                    self.leave();
+                    self.notice("You left the match.");
                 }
-                self.send(ToServer::BackToLobby);
+                self.current = None;
                 if let Some(w) = self.app.get_webview_window("main") {
                     let _ = w.show();
                     let _ = w.set_focus();
@@ -521,8 +611,50 @@ impl Flow {
     }
 
     fn send(&self, msg: ToServer) {
-        if let Some(tx) = &self.to_server {
-            let _ = tx.send(msg);
+        if let Some(link) = &self.link {
+            link.send(msg);
+        }
+    }
+
+    fn notice(&self, text: &str) {
+        let _ = self.app.emit_to("main", "notice", &json!({ "text": text }));
+    }
+
+    fn connect(&mut self, server: &str) -> Result<Link, String> {
+        self.generation += 1;
+        Link::connect(server, self.generation, self.tx.clone())
+    }
+
+    /// Says hello on a new link and reports this machine's files.
+    fn hello(&mut self, link: Link, name: String, lobby: Option<String>) {
+        self.link = Some(link);
+        let name = if name.trim().is_empty() { self.settings.lock().unwrap().name.clone() } else { name };
+        self.send(ToServer::Hello { name, library_hash: self.library.hash_hex(), lobby });
+        self.files = None;
+        self.send_files();
+        self.start_ticking();
+    }
+
+    /// Off the server: the link dropped, back to the menu.
+    fn leave(&mut self) {
+        if self.link.take().is_none() {
+            return;
+        }
+        self.generation += 1;
+        self.player = None;
+        self.lobby = None;
+        self.files = None;
+        self.auto_started = false;
+        if self.game.is_some() {
+            self.leave_table();
+        }
+        let _ = self.app.emit_to("main", "left", &json!({}));
+    }
+
+    fn is_host(&self) -> bool {
+        match (&self.lobby, &self.player) {
+            (Some(l), Some(me)) => l.players.first().is_some_and(|p| &p.id == me),
+            _ => false,
         }
     }
 
@@ -569,18 +701,25 @@ impl Flow {
             .expect("spawn the game thread");
         let to_flow = self.tx.clone();
         thread::spawn(move || {
+            // One `Closed` per window: the game thread's own, or this one if
+            // it ended without saying (an error, a panic).
+            let mut closed = false;
             for r in rep_rx {
+                closed |= matches!(r, Report::Closed);
                 if to_flow.send(Msg::Game(r)).is_err() {
-                    break;
+                    return;
                 }
             }
-            let _ = to_flow.send(Msg::Game(Report::Closed));
+            if !closed {
+                let _ = to_flow.send(Msg::Game(Report::Closed));
+            }
         });
         self.game = Some(cmd_tx);
     }
 
     fn leave_table(&mut self) {
         if let Some(g) = self.game.take() {
+            self.closing = true;
             let _ = g.send(Command::Quit);
         }
         self.current = None;

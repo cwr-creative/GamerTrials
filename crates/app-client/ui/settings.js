@@ -368,7 +368,10 @@
     if (tab === 'controls') renderControls();
     else if (tab === 'video') renderVideo();
     else {
-      $('s-body').innerHTML = '<table class="form"><tr><td>Display name</td><td><input id="pname" maxlength="24" value="' + esc(S.name) + '"></td></tr></table>' +
+      $('s-body').innerHTML = '<table class="form"><tr><td>Display name</td><td><input id="pname" maxlength="24" value="' + esc(S.name) + '"></td></tr>' +
+        '<tr><td>Server</td><td><input id="pserver" maxlength="255" spellcheck="false" placeholder="host:port" value="' + esc(S.server || '') + '"></td></tr></table>' +
+        '<p class="note">The <code>gamertrials-server</code> that Host game opens a lobby on, and that a bare invite code joins. ' +
+        'Leave it blank to play on this machine alone. Without a port it means 7878.</p>' +
         '<p class="note">Settings are saved to <code>' + esc(settingsPath || 'nowhere — no config directory') + '</code>. They never leave this machine.</p>';
     }
   }
@@ -452,6 +455,8 @@
       }
     } else if (t.id === 'pname') {
       S.name = t.value;
+    } else if (t.id === 'pserver') {
+      S.server = t.value.trim();
     } else return;
     save();
   };

@@ -1,9 +1,11 @@
 //! The GamerTrials client (ADR 0027): a native game window with a transparent
 //! Tauri overlay over it, and a menu and lobby in an ordinary window.
 //!
-//! `cargo run -p app-client` opens the menu. Host game opens a lobby of one
-//! on an in-process server (ADR 0009); Start plays a match. `--host <name>`
-//! skips the menu, `--start` presses Start as soon as the lobby allows, and
+//! `cargo run -p app-client` opens the menu. Host game opens a lobby on the
+//! server set in Settings › Profile, or a lobby of one on an in-process server
+//! when none is (ADR 0009); Join game takes an invite (ADR 0030); Start plays
+//! a match. `--host <name>` skips the menu (`--server <addr>` picks where),
+//! `--join <invite>` joins instead (as `--name <name>`), `--start` presses Start as soon as the lobby allows, and
 //! `--mode`, `--format kind:n`, `--games a,b` and `--limit <s>` set the
 //! match up first: a match from the
 //! command line, for playtesting and for the spike. `--spike` adds
@@ -23,6 +25,7 @@ mod flow;
 mod game;
 mod keys;
 mod library;
+mod link;
 mod local;
 mod overlay;
 mod settings;
@@ -53,6 +56,12 @@ struct Args {
     games: Option<Vec<String>>,
     /// With `--host`: the default limit per challenge, in seconds.
     limit: Option<f64>,
+    /// With `--host`: the server to host on, over the profile's.
+    server: Option<String>,
+    /// Join this invite instead of showing the menu.
+    join: Option<String>,
+    /// With `--join`: the display name, over the profile's.
+    name: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -66,6 +75,9 @@ fn parse_args() -> Result<Args, String> {
         format: None,
         games: None,
         limit: None,
+        server: None,
+        join: None,
+        name: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -73,6 +85,9 @@ fn parse_args() -> Result<Args, String> {
             "--manifests" => args.manifests = PathBuf::from(it.next().ok_or("--manifests wants a directory")?),
             "--host" => args.host = Some(it.next().ok_or("--host wants a player name")?),
             "--start" => args.start = true,
+            "--server" => args.server = Some(it.next().ok_or("--server wants host[:port]")?),
+            "--join" => args.join = Some(it.next().ok_or("--join wants an invite, host[:port]/CODE")?),
+            "--name" => args.name = Some(it.next().ok_or("--name wants a player name")?),
             "--games" => {
                 let v = it.next().ok_or("--games wants a comma-separated list of game ids")?;
                 args.games = Some(v.split(',').map(|g| g.trim().to_string()).collect());
@@ -145,6 +160,16 @@ fn catalog(state: State<'_, Shared>) -> serde_json::Value {
 #[tauri::command]
 fn host(state: State<'_, Shared>, name: String) {
     state.send(UiCmd::Host { name });
+}
+
+#[tauri::command]
+fn join(state: State<'_, Shared>, name: String, invite: String) {
+    state.send(UiCmd::Join { name, invite });
+}
+
+#[tauri::command]
+fn leave(state: State<'_, Shared>) {
+    state.send(UiCmd::Leave);
 }
 
 #[tauri::command]
@@ -288,6 +313,9 @@ fn main() {
     let spike = args.spike;
     let auto = flow::Auto {
         host: args.host,
+        server: args.server,
+        join: args.join,
+        name: args.name,
         start: args.start,
         mode: args.mode,
         format: args.format,
@@ -300,6 +328,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             catalog,
             host,
+            join,
+            leave,
             set_settings,
             set_enabled,
             start,

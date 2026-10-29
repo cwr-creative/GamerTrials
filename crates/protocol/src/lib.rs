@@ -181,6 +181,10 @@ pub struct LobbyState {
     pub can_start: bool,
     /// Why not, when `can_start` is false.
     pub blocking: Vec<String>,
+    /// A match is being played, or its score screen is up. When it turns
+    /// false the host has gone back to the lobby, and so does everyone.
+    #[serde(default)]
+    pub in_match: bool,
 }
 
 // ------------------------------------------------------------------- facts

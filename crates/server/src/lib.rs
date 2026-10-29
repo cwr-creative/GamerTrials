@@ -4,7 +4,7 @@
 //! This is a state machine, not a service. [`Server::handle`] takes one
 //! message from one connection and returns the messages to send; whoever
 //! owns the sockets delivers them. Solo play drives it over an in-process
-//! channel and a networked lobby will drive it over WebSockets (Phase C), and
+//! channel and `server-net` drives it over WebSockets (ADR 0030), and
 //! neither changes a rule here, because there is nothing else here.
 //!
 //! What it never does: run a game, read a ROM, hold a path. Its `Cargo.toml`
@@ -292,6 +292,7 @@ impl Server {
             dealable,
             can_start: blocking.is_empty(),
             blocking,
+            in_match: self.live.is_some(),
         }
     }
 

@@ -2,8 +2,8 @@
 
 On launch, there is a simple main menu featuring a large art piece that is random every time the user starts the program. There are three options on the main menu: 'Join game', 'Host game', and 'Settings'.
 
-- **Join Game** — Reveals a text field for a player to paste an invite code. On connection, takes the user to the associated lobby.
-- **Host Game** — Creates a lobby and takes the user there.
+- **Join Game** — Reveals a text field for a player to paste an invite code. On connection, takes the user to the associated lobby. An invite is `host[:port]/CODE`; a bare code joins on the profile's server (ADR 0030).
+- **Host Game** — Creates a lobby and takes the user there: on the server set in Profile, which the lobby shows as the invite to hand out, or on this machine alone when none is set.
 - **Settings** — Where the user sets up their keybinds, control surfaces, and video settings for all available emulators. They also choose their display name.
 
 ## Settings
@@ -27,7 +27,7 @@ Three tabs, and every change saves at once and applies from the next round
   fullscreen. Each core can override any of it except fullscreen. Speed, frame
   limiting, vsync, run-ahead and core options are deliberately absent, and the
   page says why.
-- **Profile** — the display name.
+- **Profile** — the display name, and the server Host game opens lobbies on.
 
 ## Lobby
 

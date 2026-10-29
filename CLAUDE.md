@@ -94,7 +94,8 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. Today: hashes a player's dump against the manifest's `sha1` and says what is missing. |
 | `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. |
 | `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). |
-| `server` | Rust (ADR 0024). Lobby, clock sync, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
+| `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
+| `server-net` | The transport (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (sync `tungstenite`, a thread per socket and per lobby), each lobby a `server::Server`. Held to the same dependency fence as `server`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 
 ## Conventions
@@ -135,21 +136,26 @@ rejected for non-obvious reasons.
 
 ## Current phase
 
-**Phase B — solo client, in progress.** `cargo run -p app-client` opens a
-menu; Host game opens a lobby of one on an in-process `server` (ADR 0009);
-Start deals a match across all three consoles in one process, drawn by a
-transparent overlay over a native game window (ADR 0027). The server deals
+**Phase B — the client — is built; Phase C has begun.** `cargo run -p
+app-client` opens a menu. Host game opens a lobby on the `gamertrials-server`
+named in Settings › Profile, or a lobby of one on an in-process `server` when
+none is (ADR 0009). Join game takes an invite, `host[:port]/CODE` (ADR 0030).
+`cargo run -p server-net` runs the server. Start deals a match across all
+three consoles, drawn by a transparent overlay over a native game window (ADR
+0027). The server deals
 from a seed, issues the rolled-content seed, judges every run from the `Frame`
 messages the client streams, and ends the match loudly if the client's
 provisional verdict or an artifact hash disagrees with its own.
-`--host <name> --start --mode … --format kind:n --games a,b --limit <s>` plays
-a match from the command line. Settings binds keyboard, mouse and gamepad
-to the RetroPad once, overridable per core and per game, and sets video the
+`--host <name> [--server <addr>] --start --mode … --format kind:n --games a,b
+--limit <s>` plays a match from the command line, and `--join <invite> --name
+<name>` joins one. A round a client cannot prepare is voided for everyone
+(ADR 0029). Settings binds keyboard, mouse and gamepad to the RetroPad once, overridable per core and per game, and sets video the
 same way; nothing in it reaches a core option or the frame clock (ADR 0028).
 Hand-tested on all three games before Settings; Settings itself is not yet
 hand-tested in a match. `app-client`'s `cargo test` covers only its pure
-modules (`settings`, `video`) — the server's tests play the client's loop on
-`session-fake` instead.
+modules (`settings`, `video`, `link`'s parsing). The server's tests play the
+client's loop on `session-fake` instead, and `server-net`'s do it over real
+sockets with two players.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`
@@ -161,14 +167,14 @@ changing that code.
 
 Open, roughly in order:
 
-- **Phase B owes:** Join game, which does nothing yet. A round a client
-  cannot prepare is voided for everyone and its challenge withdrawn (ADR
-  0029), and the lobby re-checks dumps and cores every few seconds; neither is
-  hand-tested yet. Borderless fullscreen is hand-tested (alt-tab, Win+Down, a
-  monitor move), as is Doom on a pad and on mouse and keyboard.
-- **ADR 0013 stays Proposed** until a remote server issues seeds and compares
-  hashes for several players (Phase C), along with the networked lobby and
-  spectating. Head-to-head comes last.
+- **Not yet hand-tested:** a networked match between two clients, a voided
+  round, the lobby's file re-check, and Settings in a match. Borderless
+  fullscreen is hand-tested (alt-tab, Win+Down, a monitor move), as is Doom on
+  a pad and on mouse and keyboard.
+- **Phase C owes:** spectating (ADR 0003). A finished or eliminated player
+  sees a waiting line. Also a server somewhere other than localhost or a LAN,
+  and `wss://`. **ADR 0013 stays Proposed** until a networked match has run on
+  two machines. Head-to-head comes last.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
   zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
   a member overlay — wait on it (ADR 0020).

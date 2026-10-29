@@ -101,11 +101,12 @@
     <h1>Match over</h1>
     <div id="s-format"></div>
     <table id="s-standings"></table>
-    <div><button id="again">Play again</button><button id="lobby">Back to lobby</button></div>
+    <div id="s-host"><button id="again">Play again</button><button id="lobby">Back to lobby</button></div>
+    <div id="s-guest" class="hidden">Waiting for the host… <button id="s-leave">Leave</button></div>
   </div></div>
   <div id="pause" class="sheet hidden"><div class="card">
     <h1>Paused</h1>
-    <div><button id="resume">Resume</button><button id="giveup">Give up the run</button><button id="end">End match</button></div>
+    <div><button id="resume">Resume</button><button id="giveup">Give up the run</button><button id="end">End match</button><button id="leave" class="hidden">Leave match</button></div>
     <div id="pause-keys" style="margin-top:.8em;color:#aaa;font-size:.9em"></div>
   </div></div>
   <div id="error" class="hidden"></div>
@@ -239,6 +240,8 @@
     hide('round'); hide('waiting'); hidePause();
     $('s-format').textContent = formatText(p.format) + (p.mode ? ' · ' + p.mode.replace('_', ' ') : '');
     standingsTable($('s-standings'), p.standings, p.mode, p.format, p.me);
+    $('s-host').classList.toggle('hidden', !p.host);
+    $('s-guest').classList.toggle('hidden', !!p.host);
     show('score');
     hud('match over');
   }
@@ -285,13 +288,16 @@
   $('resume').onclick = () => { hidePause(); invoke('resume'); };
   $('giveup').onclick = () => { hidePause(); invoke('give_up'); };
   $('end').onclick = () => { hidePause(); invoke('end_match'); };
+  // A guest leaving ends the match for everyone (ADR 0030); the host ends it instead.
+  $('leave').onclick = () => { hidePause(); invoke('leave'); };
+  $('s-leave').onclick = () => { hide('score'); invoke('leave'); };
 
   // ---- the pause menu, by pad as well as by mouse ----------------------------
   // The game thread is held while this is up, so the page reads the pad
   // itself (the Gamepad API, standard mapping): the d-pad or stick moves,
   // South picks, Start resumes. A button already held when the menu opened —
   // the Start of a Select+Start pause — counts only once it is let go.
-  const PAUSE_BUTTONS = ['resume', 'giveup', 'end'];
+  let PAUSE_BUTTONS = ['resume', 'giveup', 'end'];
   let pauseFocus = 0, pauseTimer = null, padWas = null;
   const inputLabel = i => {
     const [kind, rest] = i.split(':');
@@ -306,6 +312,10 @@
   }
   function showPause(p) {
     $('pause-keys').textContent = 'Pause: ' + chords(p.pause) + ' · Give up: ' + chords(p.give_up) + ' · F12 quits';
+    // Only the host may end the match; a guest may leave it.
+    $('end').classList.toggle('hidden', !p.host);
+    $('leave').classList.toggle('hidden', !!p.host);
+    PAUSE_BUTTONS = ['resume', 'giveup', p.host ? 'end' : 'leave'];
     show('pause'); hud('paused');
     focusPause(0);
     padWas = null;
@@ -314,7 +324,7 @@
   function hidePause() {
     hide('pause');
     clearInterval(pauseTimer); pauseTimer = null;
-    PAUSE_BUTTONS.forEach(id => $(id).classList.remove('focus'));
+    ['resume', 'giveup', 'end', 'leave'].forEach(id => $(id).classList.remove('focus'));
   }
   function pollPad() {
     const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];

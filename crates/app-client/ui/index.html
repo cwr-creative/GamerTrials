@@ -25,6 +25,14 @@
   #menu .buttons { margin-top: 1em; display: flex; flex-direction: column; }
   #menu button { font-size: 1.3em; min-width: 12em; }
   #notice { color: #ff8080; min-height: 1.5em; margin-top: .5em; }
+  #join-row { display: flex; align-items: center; justify-content: center; margin: .3em; }
+  #join-row input { width: 16em; margin-right: .3em; }
+  #invite-line { color: #aaa; font-size: .9em; margin: -.2em 0 .8em; }
+  #invite-line code { color: #fff; font-size: 1.15em; user-select: text; }
+  #invite-line button { font-size: .8em; padding: .2em .7em; }
+  #lobby .right .row2 { display: flex; gap: .3em; margin-top: auto; }
+  #lobby .right .row2 #start { flex: 1; margin-top: 0; }
+  #lobby.guest fieldset, #lobby.guest #tree { opacity: .7; pointer-events: none; }
 
   /* Lobby: settings and the tree on the left, players and start on the right. */
   #lobby { display: grid; grid-template-columns: 1fr 22em; gap: 1em; padding: 1em; box-sizing: border-box; }
@@ -104,7 +112,11 @@
   <label>Display name <input id="name" value="Player" maxlength="24"></label>
   <div class="buttons">
     <button id="host">Host game</button>
-    <button disabled title="Networked lobbies come in Phase C">Join game</button>
+    <button id="join-open">Join game</button>
+    <div id="join-row" class="hidden">
+      <input id="invite" placeholder="host:port/CODE" maxlength="300" spellcheck="false">
+      <button id="join">Join</button>
+    </div>
     <button id="settings-open">Settings</button>
   </div>
   <div id="notice"></div>
@@ -113,6 +125,7 @@
 <div id="lobby" class="page hidden">
   <div class="left">
     <h2>Lobby <span id="code" style="color:#888;font-size:.7em"></span></h2>
+    <div id="invite-line"></div>
     <fieldset>
       <label>Match mode
         <select id="mode">
@@ -144,7 +157,7 @@
     <h3>Players</h3>
     <ul id="players"></ul>
     <div id="blocking"></div>
-    <button id="start">Start</button>
+    <div class="row2"><button id="start">Start</button><button id="leave">Leave</button></div>
     <div class="keys">In play: F9 gives up the run, F10 pauses (or Select + Start on a pad), F12 quits. Rebind them in Settings.</div>
   </div>
 </div>
@@ -183,8 +196,20 @@
   let lobby = null;    // the server's lobby state
   let enabled = new Set();
   let dealable = new Set();
+  let me = null;       // this player's id in the lobby
+  let invite = null;   // what a guest pastes to join; null in a lobby of one
+
+  const isHost = () => !!lobby && lobby.players.length > 0 && lobby.players[0].id === me;
 
   $('host').onclick = () => { $('notice').textContent = ''; invoke('host', { name: $('name').value }); };
+  $('join-open').onclick = () => { $('join-row').classList.toggle('hidden'); $('invite').focus(); };
+  const join = () => {
+    $('notice').textContent = 'Joining…';
+    invoke('join', { name: $('name').value, invite: $('invite').value });
+  };
+  $('join').onclick = join;
+  $('invite').onkeydown = e => { if (e.key === 'Enter') join(); };
+  $('leave').onclick = () => invoke('leave');
 
   function settingsFromForm() {
     return {
@@ -308,8 +333,20 @@
       ul.appendChild(li);
     }
     $('blocking').innerHTML = lobby.blocking.map(b => '⚠ ' + esc(b)).join('<br>');
-    $('start').disabled = !lobby.can_start;
-    $('code').textContent = lobby.code;
+    const host = isHost();
+    $('start').disabled = !lobby.can_start || !host;
+    $('start').textContent = host ? 'Start' : 'Waiting for the host';
+    $('code').textContent = invite ? '' : lobby.code;
+    $('invite-line').innerHTML = invite
+      ? 'Invite: <code id="invite-code">' + esc(invite) + '</code> <button id="copy">Copy</button>'
+      : 'Playing on this machine. Set a server in Settings › Profile to invite players.';
+    if (invite) $('copy').onclick = () => {
+      navigator.clipboard.writeText(invite).then(() => { $('copy').textContent = 'Copied'; }, () => {
+        const r = document.createRange(); r.selectNodeContents($('invite-code'));
+        getSelection().removeAllRanges(); getSelection().addRange(r);
+      });
+    };
+    $('lobby').classList.toggle('guest', !host);
   }
 
   function render() {
@@ -329,6 +366,8 @@
       render();
     });
     await window.__TAURI__.event.listen('notice', e => { $('notice').textContent = e.payload.text; });
+    await window.__TAURI__.event.listen('session', e => { me = e.payload.me; invite = e.payload.invite; });
+    await window.__TAURI__.event.listen('left', () => { lobby = null; me = null; invite = null; render(); });
   }
   init().catch(e => { $('notice').textContent = 'cannot reach the client: ' + e; });
 </script>

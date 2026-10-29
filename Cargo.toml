@@ -9,6 +9,7 @@ members = [
     "crates/session-libretro",
     "crates/protocol",
     "crates/server",
+    "crates/server-net",
     "crates/asset-store",
     "crates/app-client",
 ]

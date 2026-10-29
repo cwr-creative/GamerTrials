@@ -1,0 +1,24 @@
+[package]
+name = "server-net"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "The server on a socket (ADR 0030): lobbies by invite code over WebSockets, each a `server::Server` on its own thread."
+
+# Held to ADR 0024 like `server`: never session-libretro, content-gen or
+# asset-store. This crate delivers messages; it learns no game.
+[dependencies]
+server = { path = "../server" }
+protocol = { path = "../protocol" }
+challenge-library = { path = "../challenge-library" }
+tungstenite = "0.29.0"
+
+[dev-dependencies]
+# The tests play the client's part on scripted telemetry, over real sockets.
+session-api = { path = "../session-api" }
+session-fake = { path = "../session-fake" }
+challenge-core = { path = "../challenge-core" }
+
+[[bin]]
+name = "gamertrials-server"
+path = "src/bin/gamertrials-server.rs"

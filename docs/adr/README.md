@@ -71,16 +71,17 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0027](0027-build-the-client-as-a-native-game-window-under-a-transparent-overlay.md) | Build the client as a native game window under a transparent overlay | Accepted |
 | [0028](0028-the-client-owns-input-binding-and-presentation.md) | The client owns input binding and presentation, and neither reaches the machine | Accepted |
 | [0029](0029-void-a-round-a-player-cannot-prepare.md) | Void a round a player cannot prepare | Accepted |
+| [0030](0030-carry-the-protocol-over-websockets-to-a-separate-server-process.md) | Carry the protocol over WebSockets to a separate server process | Accepted |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is
 fine, a wrong one is not.
 
 **0013 is `Proposed` although it is built, and that is accurate.** The
-derivation key, local generation and the artifact hash exist, and the
-in-process server issues the seed and compares hashes for a lobby of one. What
-makes it a decision about a *match* — a remote server doing that for several
-players — is Phase C.
+derivation key, local generation and the artifact hash exist, and a lobby
+issues one seed to every player and compares their hashes, in-process for one
+or over `gamertrials-server` for several (ADR 0030). Promoting it waits on a
+networked match played on two machines, not two clients on one.
 
 ## Notes
 

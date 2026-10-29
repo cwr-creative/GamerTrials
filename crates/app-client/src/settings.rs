@@ -452,6 +452,10 @@ pub struct Settings {
     pub settings_version: u32,
     /// The display name the menu offers.
     pub name: String,
+    /// `host[:port]` of the `gamertrials-server` Host game opens a lobby on
+    /// and a bare invite code joins on (ADR 0030). Empty: Host plays on this
+    /// machine alone.
+    pub server: String,
     pub input: InputSettings,
     /// By core id: `mesen`, `snes9x`, `dosbox_pure`.
     pub cores: BTreeMap<String, Layer>,
@@ -465,6 +469,7 @@ impl Default for Settings {
         Settings {
             settings_version: SETTINGS_VERSION,
             name: "Player".into(),
+            server: String::new(),
             input: InputSettings::default(),
             cores: BTreeMap::new(),
             games: BTreeMap::new(),
@@ -687,6 +692,7 @@ impl Settings {
         if self.name.is_empty() {
             self.name = "Player".into();
         }
+        self.server = self.server.trim().chars().take(255).collect();
         let clamp = |v: f32, lo: f32, hi: f32, default: f32| if v.is_finite() { v.clamp(lo, hi) } else { default };
         self.input.deadzone = clamp(self.input.deadzone, 0.1, 0.95, 0.5);
         self.input.mouse_sensitivity = clamp(self.input.mouse_sensitivity, 0.1, 10.0, 1.0);
