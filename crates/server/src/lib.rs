@@ -121,7 +121,7 @@ impl Server {
     }
 
     pub fn handle(&mut self, conn: ConnId, msg: ToServer) -> Outbox {
-        if let ToServer::Hello { name, library_hash } = msg {
+        if let ToServer::Hello { name, library_hash, .. } = msg {
             return self.hello(conn, name, library_hash);
         }
         let Some(seat) = self.seats.iter().position(|s| s.conn == conn) else {
@@ -146,6 +146,10 @@ impl Server {
             ToServer::Prepared { round, artifact } => {
                 let player = self.seats[seat].id.clone();
                 self.prepared(conn, player, round, artifact)
+            }
+            ToServer::Unprepared { round, reason } => {
+                let player = self.seats[seat].id.clone();
+                self.unprepared(conn, player, round, reason)
             }
             ToServer::Frame { round, frame, events } => {
                 let player = self.seats[seat].id.clone();
@@ -409,6 +413,29 @@ impl Server {
             s.run.enter();
         }
         self.broadcast(ToClient::Go { round })
+    }
+
+    /// A player cannot run the round. Nobody plays it, its challenge is
+    /// withdrawn, and the next one is dealt (ADR 0029). Only before `Go`: a
+    /// run under way is given up with `Forfeit`, not voided.
+    fn unprepared(&mut self, conn: ConnId, player: PlayerId, round: u64, reason: String) -> Outbox {
+        let started = self
+            .live
+            .as_ref()
+            .and_then(|l| l.round.as_ref())
+            .is_some_and(|r| r.deal.index == round && r.started);
+        if started {
+            return vec![(conn, ToClient::Refused { reason: "the round is under way".into() })];
+        }
+        if self.seat_run(round, &player).is_none() {
+            return Vec::new();
+        }
+        let live = self.live.as_mut().expect("a seat run means a live match");
+        live.round = None;
+        live.m.void();
+        let mut out = self.broadcast(ToClient::Voided { round, player: player.0, reason });
+        out.extend(self.deal_next());
+        out
     }
 
     fn frame(

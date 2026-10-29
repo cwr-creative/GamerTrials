@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use protocol::{ChallengeRef, LobbySettings, LobbyState, ToClient, ToServer};
+use protocol::{ChallengeRef, FileReport, LobbySettings, LobbyState, ToClient, ToServer};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -43,7 +44,12 @@ pub enum UiCmd {
     Resume,
     /// Give up the run, from the pause menu.
     GiveUp,
+    /// The lobby's periodic file check is due.
+    Recheck,
 }
+
+/// How often the lobby checks this machine's files again.
+const RECHECK: Duration = Duration::from_secs(3);
 
 /// What the command line asked for in place of the menu.
 #[derive(Default)]
@@ -59,6 +65,8 @@ pub struct Auto {
 /// The round being played, as the overlay needs to describe it.
 struct Current {
     round: u64,
+    /// Who is still playing it, for the waiting view.
+    playing: Vec<String>,
 }
 
 pub struct Flow {
@@ -87,6 +95,10 @@ pub struct Flow {
     auto: Auto,
     /// `--start` has been acted on.
     auto_started: bool,
+    /// The file report the server last heard.
+    files: Option<FileReport>,
+    /// The recheck timer is running.
+    ticking: bool,
 }
 
 impl Flow {
@@ -126,6 +138,8 @@ impl Flow {
                     spiked: false,
                     auto,
                     auto_started: false,
+                    files: None,
+                    ticking: false,
                 };
                 flow.run();
             })
@@ -155,8 +169,17 @@ impl Flow {
                     self.to_server = Some(tx);
                 }
                 let name = if name.trim().is_empty() { "Player".to_string() } else { name };
-                self.send(ToServer::Hello { name, library_hash: self.library.hash_hex() });
-                self.send(ToServer::Files(self.library.file_report()));
+                self.send(ToServer::Hello { name, library_hash: self.library.hash_hex(), lobby: None });
+                self.files = None;
+                self.send_files();
+                self.start_ticking();
+            }
+            UiCmd::Recheck => {
+                // Between matches only: in one, the table is up and the check
+                // would hash dumps under a running game for nothing.
+                if self.lobby.is_some() && self.game.is_none() {
+                    self.send_files();
+                }
             }
             UiCmd::Settings(s) => self.send(ToServer::Settings(s)),
             UiCmd::Enable(c) => self.send(ToServer::Enable { challenges: c }),
@@ -237,12 +260,23 @@ impl Flow {
                     challenge.game, challenge.challenge
                 );
                 self.dealt.insert(round, challenge.clone());
+                let me = self.player.clone().unwrap_or_default();
+                if !players.contains(&me) {
+                    // Out of the match: nothing to play. Spectating goes here.
+                    if let Some(g) = &self.game {
+                        let _ = g.send(Command::Unload);
+                    }
+                    self.current = None;
+                    self.emit(json!({ "kind": "eliminated", "round": round, "players": players }));
+                    return;
+                }
+                self.current = Some(Current { round, playing: players.clone() });
                 let Some(lib) = self.library.catalog.game(&challenge.game) else {
-                    eprintln!("[match] dealt a game this client does not hold: {}", challenge.game);
+                    self.unprepared(round, format!("this client does not hold the game `{}`", challenge.game));
                     return;
                 };
                 let Some(c) = lib.challenge(&challenge.challenge) else {
-                    eprintln!("[match] dealt a challenge this client does not hold: {}", challenge.challenge);
+                    self.unprepared(round, format!("this client does not hold the challenge `{}`", challenge.challenge));
                     return;
                 };
                 let game = &challenge.game;
@@ -266,7 +300,6 @@ impl Flow {
                     video,
                     display,
                 };
-                self.current = Some(Current { round });
                 self.emit(json!({ "kind": "loading", "round": round }));
                 match &self.game {
                     Some(g) => {
@@ -295,8 +328,27 @@ impl Flow {
                     }
                 }
             }
+            ToClient::Voided { round, player, reason } => {
+                println!("[match] round {round} void: {player} cannot prepare it: {reason}");
+                if let Some(g) = &self.game {
+                    let _ = g.send(Command::Unload);
+                }
+                if self.is_current(round) {
+                    self.current = None;
+                }
+                let who = if self.player.as_deref() == Some(player.as_str()) { "you".to_string() } else { player };
+                self.emit(json!({
+                    "kind": "voided", "round": round,
+                    "text": format!("Round skipped: {who} cannot prepare it ({reason})"),
+                }));
+            }
             ToClient::PlayerFinished { round, player, outcome } => {
                 println!("[match] round {round}: {player} {outcome:?}");
+                if let Some(c) = self.current.as_mut().filter(|c| c.round == round) {
+                    c.playing.retain(|p| p != &player);
+                    let playing = c.playing.clone();
+                    self.emit(json!({ "kind": "playing", "round": round, "players": playing }));
+                }
             }
             ToClient::RoundResult { round, entries, eliminated, standings } => {
                 println!("[match] round {round} result:");
@@ -363,6 +415,10 @@ impl Flow {
                 }
             }
             Report::Loaded { round, artifact } => {
+                if !self.is_current(round) {
+                    // Voided while it loaded.
+                    return;
+                }
                 println!("[match] round {round} prepared: {artifact}");
                 self.send(ToServer::Prepared { round, artifact });
                 if let Some(c) = self.dealt.get(&round).cloned() {
@@ -372,10 +428,9 @@ impl Flow {
                 }
             }
             Report::LoadFailed { round, error } => {
-                eprintln!("[match] round {round} cannot be prepared: {error}");
-                self.emit(json!({ "kind": "error", "text": format!("Cannot prepare this round: {error}") }));
-                // The protocol has no word for this yet; the match ends.
-                self.send(ToServer::EndMatch);
+                if self.is_current(round) {
+                    self.unprepared(round, error);
+                }
             }
             Report::Frame { round, frame, events } => {
                 let died = events.iter().any(|e| matches!(e, session_api::SessionEvent::Died { .. }));
@@ -427,6 +482,43 @@ impl Flow {
     }
 
     // ------------------------------------------------------------- helpers
+
+    fn is_current(&self, round: u64) -> bool {
+        self.current.as_ref().is_some_and(|c| c.round == round)
+    }
+
+    /// This client cannot run the round; the server voids it (ADR 0029).
+    fn unprepared(&mut self, round: u64, reason: String) {
+        eprintln!("[match] round {round} cannot be prepared: {reason}");
+        self.current = None;
+        self.send(ToServer::Unprepared { round, reason });
+    }
+
+    /// Sends the file report if it is not what the server last heard.
+    fn send_files(&mut self) {
+        let report = self.library.file_report();
+        if self.files.as_ref() != Some(&report) {
+            self.send(ToServer::Files(report.clone()));
+            self.files = Some(report);
+        }
+    }
+
+    fn start_ticking(&mut self) {
+        if self.ticking {
+            return;
+        }
+        self.ticking = true;
+        let tx = self.tx.clone();
+        thread::Builder::new()
+            .name("recheck".into())
+            .spawn(move || loop {
+                thread::sleep(RECHECK);
+                if tx.send(Msg::Ui(UiCmd::Recheck)).is_err() {
+                    break;
+                }
+            })
+            .expect("spawn the recheck timer");
+    }
 
     fn send(&self, msg: ToServer) {
         if let Some(tx) = &self.to_server {

@@ -25,6 +25,9 @@
 //!   consecutive failures eliminates; N failures eliminates. Eliminated
 //!   players are dealt nothing further. An elimination match ends when fewer
 //!   than two remain — or, with one player, when they are out.
+//! * **A round nobody can prepare is void** (ADR 0029). It is recorded for no
+//!   one, does not count toward a format, and its challenge is withdrawn for
+//!   the rest of the match. A match with nothing left to deal is over.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -255,7 +258,7 @@ impl Match {
     }
 
     pub fn is_over(&self) -> bool {
-        if self.ended {
+        if self.ended || self.dealer.exhausted() {
             return true;
         }
         match self.settings.format {
@@ -272,6 +275,20 @@ impl Match {
     pub fn end(&mut self) {
         self.ended = true;
         self.pending = None;
+    }
+
+    /// Drops the pending round unplayed, because a player could not prepare
+    /// it, and withdraws its challenge for the rest of the match. Nothing is
+    /// recorded: it costs nobody anything and counts toward no format. Its
+    /// index is not reused, so a match's round indices can have gaps.
+    ///
+    /// # Panics
+    ///
+    /// If no round is pending.
+    pub fn void(&mut self) -> Deal {
+        let deal = self.pending.take().expect("no round is pending");
+        self.dealer.withdraw(&deal.challenge.game, &deal.challenge.id);
+        deal
     }
 
     /// Deals the next round, or `None` once the match is over.
@@ -815,5 +832,86 @@ mod tests {
         .unwrap();
         m.deal();
         m.deal();
+    }
+
+    #[test]
+    fn a_voided_round_is_not_counted() {
+        let mut m = Match::new(
+            pool(ChallengeKind::Survival, 4),
+            players(&["a", "b"]),
+            settings(Mode::Survival, Format::Challenges(2)),
+            3,
+        )
+        .unwrap();
+        let voided = m.deal().unwrap();
+        assert_eq!(m.void(), voided);
+        assert_eq!(m.pending(), None);
+        assert!(m.rounds().is_empty());
+        assert!(m.standings().iter().all(|s| s.rounds == 0 && s.failures == 0));
+        let r1 = play(&mut m, |d, _| done(d, 10));
+        assert_eq!(r1.deal.index, voided.index + 1, "the voided index is skipped, not reused");
+        assert!(!m.is_over(), "the void did not count toward the two");
+        play(&mut m, |d, _| done(d, 10));
+        assert!(m.is_over());
+    }
+
+    #[test]
+    fn a_voided_challenge_is_not_dealt_again() {
+        let mut m = Match::new(
+            pool(ChallengeKind::Survival, 3),
+            players(&["a"]),
+            settings(Mode::Survival, Format::Challenges(12)),
+            8,
+        )
+        .unwrap();
+        let voided = m.deal().unwrap().challenge.id;
+        m.void();
+        for _ in 0..12 {
+            let r = play(&mut m, |d, _| done(d, 10));
+            assert_ne!(r.deal.challenge.id, voided);
+        }
+    }
+
+    #[test]
+    fn voiding_every_challenge_ends_the_match() {
+        let mut m = Match::new(
+            pool(ChallengeKind::Survival, 2),
+            players(&["a"]),
+            settings(Mode::Survival, Format::Wins(3)),
+            0,
+        )
+        .unwrap();
+        play(&mut m, |d, _| done(d, 10));
+        m.deal().unwrap();
+        m.void();
+        assert!(!m.is_over());
+        m.deal().unwrap();
+        m.void();
+        assert!(m.is_over());
+        assert_eq!(m.deal(), None);
+        assert_eq!(m.standings()[0].wins, 1, "what was played still stands");
+    }
+
+    #[test]
+    fn the_deal_after_a_void_is_reproducible() {
+        let deals = || {
+            let mut m = Match::new(
+                pool(ChallengeKind::Survival, 5),
+                players(&["a"]),
+                settings(Mode::Survival, Format::Challenges(6)),
+                21,
+            )
+            .unwrap();
+            m.deal().unwrap();
+            m.void();
+            let mut out = Vec::new();
+            while let Some(deal) = m.deal() {
+                out.push((deal.index, deal.challenge.id.0.clone(), deal.seed));
+                let r = died(&deal);
+                m.record(vec![(PlayerId("a".into()), r)]);
+            }
+            out
+        };
+        assert_eq!(deals(), deals());
     }
 }

@@ -132,6 +132,19 @@
   let introUp = false;
   let goWanted = false;    // the server said go; waiting on the intro
   let counting = false;
+  let playing = [];        // who is still playing this round, for the waiting line
+
+  const waitingText = () => playing.length
+    ? 'Waiting for ' + playing.map(esc).join(', ') + '…'
+    : 'Waiting for the round to end…';
+  function showWaiting(text) { $('waiting').innerHTML = text; show('waiting'); }
+
+  // The round will not be played: whatever was on the way to a countdown stops.
+  function dropRound() {
+    goWanted = false; introUp = false;
+    $('intro').classList.remove('in');
+    if (!counting) $('intro').classList.add('out');
+  }
 
   async function showIntro(p) {
     const delay = roundUntil - now();
@@ -232,7 +245,7 @@
 
   function handle(p) {
     switch (p.kind) {
-      case 'loading': hud('loading round ' + p.round); break;
+      case 'loading': playing = []; hud('loading round ' + p.round); break;
       case 'intro': showIntro(p); break;
       case 'go': goWanted = true; tryGo(); break;
       case 'death': replay($('flash'), 'hit'); hud('death at frame ' + p.frame); break;
@@ -241,7 +254,22 @@
         $('badge').innerHTML = (p.kind === 'garland' ? '\u{1F3C6}' : '\u{1F480}') + '<small>' + esc(p.text || '') + '</small>';
         replay($('badge'), 'show');
         hud((p.kind === 'garland' ? 'cleared' : 'out') + ' at frame ' + p.frame);
-        setTimeout(() => { $('waiting').textContent = 'Waiting for the round to end…'; show('waiting'); }, 2000);
+        setTimeout(() => showWaiting(waitingText()), 2000);
+        break;
+      case 'playing':
+        playing = p.players || [];
+        if (!$('waiting').classList.contains('hidden')) showWaiting(waitingText());
+        break;
+      case 'eliminated':
+        playing = p.players || [];
+        dropRound();
+        showWaiting("You're out. " + waitingText());
+        hud('eliminated, round ' + p.round);
+        break;
+      case 'voided':
+        dropRound();
+        showWaiting(esc(p.text));
+        hud('round ' + p.round + ' void');
         break;
       case 'round': showRound(p); break;
       case 'score': showScore(p); break;

@@ -16,7 +16,8 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use session_api::{ChallengeKind, ExitReason, SessionEvent};
 
-pub const VERSION: u32 = 1;
+/// 2 added `Unprepared` and `Voided` (ADR 0029) and `Hello.lobby` (ADR 0030).
+pub const VERSION: u32 = 2;
 
 /// A versioned message. `v` is read before anything else.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -397,8 +398,15 @@ impl From<&challenge_core::Standing> for Standing {
 pub enum ToServer {
     /// First message on a connection. `library_hash` is the client's
     /// `Catalog::hash`, in hex; a lobby refuses a client holding another
-    /// library (ADR 0009).
-    Hello { name: String, library_hash: String },
+    /// library (ADR 0009). `lobby` names the lobby to join; `None` asks for a
+    /// new one. A networked server routes on it (ADR 0030); a lobby itself,
+    /// already chosen, ignores it.
+    Hello {
+        name: String,
+        library_hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lobby: Option<String>,
+    },
     /// Host only.
     Settings(LobbySettings),
     /// Host only. Replaces the enabled set.
@@ -410,6 +418,10 @@ pub enum ToServer {
     /// This round's content is derived and the runner is at the entry point.
     /// `artifact` is the SHA-1 of the bytes the game runs on (ADR 0013).
     Prepared { round: u64, artifact: String },
+    /// Sent instead of `Prepared`: this client cannot run the round — a dump,
+    /// a core or the challenge itself is missing here. The round is void for
+    /// everyone (ADR 0029).
+    Unprepared { round: u64, reason: String },
     /// One advanced frame with what the runner reported on it. Sent for every
     /// frame that carried an event, and for the frame the client's own judge
     /// settled the run on, so the server can replay the judgement exactly.
@@ -433,8 +445,8 @@ pub enum ToClient {
     Welcome { player: String, lobby: LobbyState },
     Refused { reason: String },
     Lobby(LobbyState),
-    /// The next round. Every player prepares it, the eliminated included:
-    /// they spectate it.
+    /// The next round. Everyone hears of it; only `players` prepare it. The
+    /// eliminated wait it out, and will spectate it.
     Dealt {
         round: u64,
         challenge: ChallengeRef,
@@ -445,6 +457,10 @@ pub enum ToClient {
         /// Who plays this round.
         players: Vec<String>,
     },
+    /// A player could not prepare the round, so nobody plays it and its
+    /// challenge is withdrawn for the rest of the match (ADR 0029). The next
+    /// `Dealt`, or `MatchOver`, follows.
+    Voided { round: u64, player: String, reason: String },
     /// Every player is prepared on the same artifact: count down and go.
     Go { round: u64 },
     /// A player's run ended; the server's verdict. For the waiting view.
@@ -469,14 +485,14 @@ mod tests {
     #[test]
     fn packets_round_trip_and_carry_the_version() {
         let text = encode(&ToServer::Start);
-        assert!(text.contains("\"v\":1"), "{text}");
+        assert!(text.contains("\"v\":2"), "{text}");
         assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
     }
 
     #[test]
     fn another_version_is_refused_before_the_body_is_read() {
         let text = r#"{"v":99,"body":{"type":"start"}}"#;
-        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 1 }));
+        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 2 }));
     }
 
     #[test]
@@ -505,5 +521,23 @@ mod tests {
         let text = serde_json::to_string(&s).unwrap();
         assert!(text.contains(r#""format":{"kind":"strikes","n":2}"#), "{text}");
         assert_eq!(serde_json::from_str::<LobbySettings>(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn a_hello_without_a_lobby_leaves_it_off_the_wire() {
+        let new = ToServer::Hello { name: "A".into(), library_hash: "h".into(), lobby: None };
+        let text = encode(&new);
+        assert!(!text.contains("lobby"), "{text}");
+        assert_eq!(decode::<ToServer>(&text).unwrap(), new);
+        let join = ToServer::Hello { name: "B".into(), library_hash: "h".into(), lobby: Some("KXQFM".into()) };
+        assert_eq!(decode::<ToServer>(&encode(&join)).unwrap(), join);
+    }
+
+    #[test]
+    fn a_void_survives_the_wire() {
+        let up = ToServer::Unprepared { round: 3, reason: "no core".into() };
+        assert_eq!(decode::<ToServer>(&encode(&up)).unwrap(), up);
+        let down = ToClient::Voided { round: 3, player: "B".into(), reason: "no core".into() };
+        assert_eq!(decode::<ToClient>(&encode(&down)).unwrap(), down);
     }
 }

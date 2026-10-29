@@ -24,9 +24,10 @@
 //! an open-ended one that happens to run the same number of rounds see the
 //! same challenges.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
-use session_api::{ChallengeKind, ChallengeSpec};
+use session_api::{ChallengeId, ChallengeKind, ChallengeSpec, GameId};
 
 /// The three ways a session can run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,6 +125,11 @@ pub struct Dealt {
 /// Within a deck no challenge repeats. Across the deck boundary the first
 /// challenge of the new deck is moved one place down if it would repeat the
 /// last one dealt, which is the only departure from a plain reshuffle.
+///
+/// A challenge can be [withdrawn](Dealer::withdraw) — a round nobody could
+/// prepare (ADR 0029). The deck is still shuffled over the whole pool and the
+/// withdrawn ones are passed over, so what a seed deals stays reproducible
+/// from the seed and the withdrawals alone.
 #[derive(Clone, Debug)]
 pub struct Dealer {
     pool: Vec<ChallengeSpec>,
@@ -134,6 +140,8 @@ pub struct Dealer {
     decks: u64,
     dealt: u64,
     last: Option<usize>,
+    /// Indices into `pool` that are never dealt again.
+    withdrawn: BTreeSet<usize>,
 }
 
 /// Domains for [`derive`]: which purpose a derived seed serves.
@@ -155,7 +163,16 @@ impl Dealer {
         if available == 0 {
             return Err(DealError::NotEnough { mode, wanted: 1, available });
         }
-        Ok(Dealer { pool, mode, seed, deck: Vec::new(), decks: 0, dealt: 0, last: None })
+        Ok(Dealer {
+            pool,
+            mode,
+            seed,
+            deck: Vec::new(),
+            decks: 0,
+            dealt: 0,
+            last: None,
+            withdrawn: BTreeSet::new(),
+        })
     }
 
     pub fn mode(&self) -> Mode {
@@ -172,23 +189,56 @@ impl Dealer {
         derive(self.seed, CONTENT, index)
     }
 
-    pub fn deal(&mut self) -> Dealt {
-        if self.deck.is_empty() {
-            let seed = if self.decks == 0 { self.seed } else { derive(self.seed, DECK, self.decks) };
-            let count = self.pool.iter().filter(|c| self.mode.admits(c.kind)).count();
-            let mut order = order(&self.pool, self.mode, count, seed).expect("checked in new");
-            if order.len() > 1 && self.last == Some(order[0]) {
-                order.swap(0, 1);
+    /// Never deals this challenge again.
+    pub fn withdraw(&mut self, game: &GameId, id: &ChallengeId) {
+        for (i, c) in self.pool.iter().enumerate() {
+            if &c.game == game && &c.id == id {
+                self.withdrawn.insert(i);
             }
-            order.reverse();
-            self.deck = order;
-            self.decks += 1;
         }
-        let i = self.deck.pop().expect("a deck is never empty");
+    }
+
+    /// Every challenge the mode admits has been withdrawn: nothing is left to deal.
+    pub fn exhausted(&self) -> bool {
+        !self
+            .pool
+            .iter()
+            .enumerate()
+            .any(|(i, c)| self.mode.admits(c.kind) && !self.withdrawn.contains(&i))
+    }
+
+    /// # Panics
+    ///
+    /// If the dealer is [exhausted](Dealer::exhausted).
+    pub fn deal(&mut self) -> Dealt {
+        assert!(!self.exhausted(), "every challenge has been withdrawn");
+        let i = loop {
+            if self.deck.is_empty() {
+                self.shuffle();
+            }
+            let i = self.deck.pop().expect("a deck is never empty");
+            // Withdrawn since this deck was shuffled.
+            if !self.withdrawn.contains(&i) {
+                break i;
+            }
+        };
         self.last = Some(i);
         let index = self.dealt;
         self.dealt += 1;
         Dealt { index, challenge: self.pool[i].clone(), seed: self.content_seed(index) }
+    }
+
+    fn shuffle(&mut self) {
+        let seed = if self.decks == 0 { self.seed } else { derive(self.seed, DECK, self.decks) };
+        let count = self.pool.iter().filter(|c| self.mode.admits(c.kind)).count();
+        let mut order = order(&self.pool, self.mode, count, seed).expect("checked in new");
+        order.retain(|i| !self.withdrawn.contains(i));
+        if order.len() > 1 && self.last == Some(order[0]) {
+            order.swap(0, 1);
+        }
+        order.reverse();
+        self.deck = order;
+        self.decks += 1;
     }
 }
 
@@ -386,5 +436,37 @@ mod tests {
         let l = vec![challenge("smb3", "only", ChallengeKind::Survival)];
         let mut dealer = Dealer::new(l, Mode::Both, 3).unwrap();
         assert!(dealt_ids(&mut dealer, 5).iter().all(|id| id == "smb3/only"));
+    }
+
+    #[test]
+    fn a_withdrawn_challenge_is_passed_over_mid_deck_and_in_every_later_deck() {
+        let l = library();
+        let mut dealer = Dealer::new(l.clone(), Mode::Survival, 5).unwrap();
+        let first = dealer.deal();
+        let plain = {
+            let mut d = Dealer::new(l, Mode::Survival, 5).unwrap();
+            dealt_ids(&mut d, 36)
+        };
+        // Withdraw something still to come in this deck.
+        let later = &plain[3];
+        let (game, id) = later.split_once('/').unwrap();
+        dealer.withdraw(&GameId(game.into()), &ChallengeId(id.into()));
+        let rest = dealt_ids(&mut dealer, 33);
+        assert!(!rest.contains(later));
+        let expected: Vec<String> = plain[1..].iter().filter(|c| *c != later).cloned().collect();
+        assert_eq!(rest[..10], expected[..10], "the rest of the deck keeps its order");
+        assert_eq!(format!("{}/{}", first.challenge.game, first.challenge.id), plain[0]);
+        assert!(!dealer.exhausted());
+    }
+
+    #[test]
+    fn withdrawing_everything_the_mode_admits_exhausts_the_dealer() {
+        let l = library();
+        let mut dealer = Dealer::new(l.clone(), Mode::TimeTrial, 1).unwrap();
+        for c in l.iter().filter(|c| c.kind == ChallengeKind::TimeTrial) {
+            assert!(!dealer.exhausted());
+            dealer.withdraw(&c.game, &c.id);
+        }
+        assert!(dealer.exhausted());
     }
 }

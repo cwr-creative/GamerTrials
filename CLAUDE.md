@@ -161,10 +161,11 @@ changing that code.
 
 Open, roughly in order:
 
-- **Phase B owes:** a protocol word for "I cannot prepare this round" (a
-  missing dump at deal time ends the match through `EndMatch`. Borderless
-  fullscreen is hand-tested (alt-tab, Win+Down, a monitor move), as is Doom on
-  a pad and on mouse and keyboard. Join game does nothing yet.
+- **Phase B owes:** Join game, which does nothing yet. A round a client
+  cannot prepare is voided for everyone and its challenge withdrawn (ADR
+  0029), and the lobby re-checks dumps and cores every few seconds; neither is
+  hand-tested yet. Borderless fullscreen is hand-tested (alt-tab, Win+Down, a
+  monitor move), as is Doom on a pad and on mouse and keyboard.
 - **ADR 0013 stays Proposed** until a remote server issues seeds and compares
   hashes for several players (Phase C), along with the networked lobby and
   spectating. Head-to-head comes last.

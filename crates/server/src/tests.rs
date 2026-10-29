@@ -101,7 +101,7 @@ impl Table {
         self.clients.push(Client { conn, name: name.into(), inbox: Vec::new(), style });
         let who = self.clients.len() - 1;
         let hash = self.server.library_hash();
-        self.send(who, ToServer::Hello { name: name.into(), library_hash: hash });
+        self.send(who, ToServer::Hello { name: name.into(), library_hash: hash, lobby: None });
         self.send(who, ToServer::Files(FileReport::default()));
         who
     }
@@ -226,7 +226,7 @@ fn a_client_holding_another_library_is_refused() {
     let conn = t.server.connect();
     let out = t.server.handle(
         conn,
-        ToServer::Hello { name: "x".into(), library_hash: "0000000000000000".into() },
+        ToServer::Hello { name: "x".into(), library_hash: "0000000000000000".into(), lobby: None },
     );
     assert!(matches!(&out[..], [(c, ToClient::Refused { reason })] if *c == conn && reason.contains("library")));
 }
@@ -237,7 +237,7 @@ fn the_lobby_blocks_start_until_files_are_reported_and_names_the_reason() {
     let conn = t.server.connect();
     t.clients.push(Client { conn, name: "solo".into(), inbox: Vec::new(), style: ace });
     let hash = t.server.library_hash();
-    t.send(0, ToServer::Hello { name: "solo".into(), library_hash: hash });
+    t.send(0, ToServer::Hello { name: "solo".into(), library_hash: hash, lobby: None });
     let lobby = t.lobby(0);
     assert!(!lobby.can_start);
     assert!(lobby.blocking.iter().any(|b| b.contains("files")), "{:?}", lobby.blocking);
@@ -489,4 +489,100 @@ fn only_a_match_in_progress_takes_frames() {
     assert!(matches!(msgs.last(), Some(ToClient::Refused { .. })), "{msgs:?}");
     let names: Vec<&str> = t.clients.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["solo"]);
+}
+
+// -------------------------------------------------------------------- void
+
+fn voided(t: &Table, who: usize) -> Vec<(u64, String, String)> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Voided { round, player, reason } => Some((*round, player.clone(), reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_unprepared_round_is_voided_and_redealt() {
+    let mut t = Table::new(42);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.settings(LobbySettings { format: Format::Challenges(1), ..Default::default() });
+    t.start();
+    let (round, first, _) = t.last_dealt(0).unwrap();
+    t.send(0, ToServer::Prepared { round, artifact: "abc".into() });
+    t.send(1, ToServer::Unprepared { round, reason: "no core".into() });
+    for who in 0..2 {
+        assert_eq!(voided(&t, who), [(round, "guest".into(), "no core".into())]);
+        assert!(t.errors(who).is_empty(), "a void is not an error: {:?}", t.errors(who));
+    }
+    let (next, second, _) = t.last_dealt(0).unwrap();
+    assert_eq!(next, round + 1, "the voided index is not reused");
+    assert_ne!(second, first);
+    assert!(t.match_over(0).is_none(), "the void does not count toward the one challenge");
+    t.play_round();
+    let standings = t.match_over(0).expect("over after the one round played");
+    assert!(standings.iter().all(|s| s.rounds == 1));
+}
+
+#[test]
+fn a_voided_challenge_is_not_dealt_again() {
+    let mut t = Table::new(5);
+    t.join("solo", ace);
+    t.settings(LobbySettings { format: Format::Challenges(20), ..Default::default() });
+    t.start();
+    let (round, first, _) = t.last_dealt(0).unwrap();
+    t.send(0, ToServer::Unprepared { round, reason: "missing dump".into() });
+    for _ in 0..20 {
+        let (_, dealt, _) = t.last_dealt(0).unwrap();
+        assert_ne!(dealt, first);
+        t.play_round();
+    }
+    assert!(t.match_over(0).is_some());
+}
+
+#[test]
+fn voiding_every_challenge_ends_the_match() {
+    let mut t = Table::new(9);
+    t.join("solo", ace);
+    let only = t.lobby(0).enabled[..2].to_vec();
+    t.send(0, ToServer::Enable { challenges: only });
+    t.settings(LobbySettings { mode: Mode::Combo, format: Format::Wins(5), ..Default::default() });
+    t.start();
+    for _ in 0..2 {
+        let (round, _, _) = t.last_dealt(0).unwrap();
+        t.send(0, ToServer::Unprepared { round, reason: "no".into() });
+    }
+    assert_eq!(voided(&t, 0).len(), 2);
+    assert!(t.match_over(0).is_some(), "nothing left to deal");
+}
+
+#[test]
+fn unprepared_after_go_is_refused() {
+    let mut t = Table::new(3);
+    t.join("solo", ace);
+    t.start();
+    let (round, _, _) = t.last_dealt(0).unwrap();
+    t.send(0, ToServer::Prepared { round, artifact: "abc".into() });
+    t.take(0);
+    t.send(0, ToServer::Unprepared { round, reason: "late".into() });
+    let msgs = t.take(0);
+    assert!(matches!(msgs.as_slice(), [ToClient::Refused { .. }]), "{msgs:?}");
+}
+
+#[test]
+fn a_player_leaving_mid_match_ends_it() {
+    let mut t = Table::new(4);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.start();
+    let conn = t.clients[1].conn;
+    let out = t.server.disconnect(conn);
+    t.deliver(out);
+    assert_eq!(t.errors(0), ["guest left the match"]);
+    assert!(t.match_over(0).is_some());
+    let players: Vec<String> = t.lobby(0).players.iter().map(|p| p.id.clone()).collect();
+    assert_eq!(players, ["host"]);
 }

@@ -4,11 +4,16 @@
 //!
 //! The file check lives here too: which base ROMs the manifests name, whether
 //! the player's own dump of each is the one they were authored against
-//! (`asset-store`), said as what is missing (ADR 0009's lobby).
+//! (`asset-store`), said as what is missing (ADR 0009's lobby). It covers
+//! cores as well, so that nothing the lobby passes is found missing only once
+//! a round is dealt (ADR 0029). The lobby runs it every few seconds, so a dump
+//! is hashed again only when its size or modification time moved.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use challenge_library::{Catalog, Grouping};
 use protocol::{FileReport, MissingFile};
@@ -24,7 +29,12 @@ pub struct Library {
     /// Which core each game runs on, by game id: what a player's per-core
     /// settings are keyed by (ADR 0028).
     pub cores: BTreeMap<String, String>,
+    /// What each dump's check found, while its size and mtime stand.
+    checked: Mutex<BTreeMap<PathBuf, Checked>>,
 }
+
+/// A dump's size and mtime when it was checked, and what the check found.
+type Checked = (u64, Option<SystemTime>, Option<String>);
 
 /// A core's id: its DLL's name without `_libretro` — `mesen`, `snes9x`,
 /// `dosbox_pure`. A `core_dir` holding no core is named for the directory,
@@ -69,7 +79,7 @@ impl Library {
         }
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let catalog = Catalog::parse_all(&refs)?;
-        Ok(Library { catalog, runner, paths, cores })
+        Ok(Library { catalog, runner, paths, cores, checked: Mutex::default() })
     }
 
     /// `Catalog::hash` as the wire carries it.
@@ -77,10 +87,26 @@ impl Library {
         format!("{:016x}", self.catalog.hash())
     }
 
-    /// Every base ROM the manifests name, checked against this machine.
+    /// Every core and base ROM the manifests name, checked against this machine.
     pub fn file_report(&self) -> FileReport {
         let mut missing = Vec::new();
         for (game, m) in &self.runner {
+            let dir = &m.libretro.core_dir;
+            if let Err(e) = runner::find_core(dir) {
+                // The runner's wording names its own `--core` flag; say it plainly.
+                let problem = if e.starts_with("several") {
+                    "more than one *_libretro.dll there; keep one"
+                } else {
+                    "no *_libretro.dll there"
+                };
+                missing.push(MissingFile {
+                    game: game.clone(),
+                    rom: "core".into(),
+                    name: format!("libretro core in {}", dir.display()),
+                    sha1: None,
+                    problem: problem.into(),
+                });
+            }
             for rom in &m.roms {
                 if rom.from.is_some() {
                     // Derived from the base by a patch that ships with the app.
@@ -105,7 +131,7 @@ impl Library {
                     sha1: rom.sha1.clone(),
                     min_bytes: rom.min_bytes,
                 };
-                if let Some(problem) = asset_store::check(&needed).problem {
+                if let Some(problem) = self.check(&needed) {
                     missing.push(MissingFile {
                         game: game.clone(),
                         rom: rom.id.clone(),
@@ -115,12 +141,33 @@ impl Library {
                             name
                         ),
                         sha1: rom.sha1.clone(),
-                        problem: problem.to_string(),
+                        problem,
                     });
                 }
             }
         }
         FileReport { missing }
+    }
+
+    /// `asset_store::check`, remembered while the file's size and mtime stand.
+    fn check(&self, needed: &asset_store::Needed) -> Option<String> {
+        let stamp = fs::metadata(&needed.path).ok().map(|m| (m.len(), m.modified().ok()));
+        let mut checked = self.checked.lock().unwrap();
+        if let (Some((len, mtime)), Some((l, t, problem))) = (stamp, checked.get(&needed.path)) {
+            if (len, mtime) == (*l, *t) {
+                return problem.clone();
+            }
+        }
+        let problem = asset_store::check(needed).problem.map(|p| p.to_string());
+        match stamp {
+            Some((len, mtime)) => {
+                checked.insert(needed.path.clone(), (len, mtime, problem.clone()));
+            }
+            None => {
+                checked.remove(&needed.path);
+            }
+        }
+        problem
     }
 
     /// What the settings page needs to know about every game: its core, how
