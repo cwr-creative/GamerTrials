@@ -15,6 +15,14 @@
 //! seed means. It is not yet a *wire* contract — nothing deals on two machines
 //! and compares — but it becomes one the moment anything does, and the same
 //! rule applies then: changing it changes every seed.
+//!
+//! [`deal`] deals a fixed count. A match whose length is not known up front —
+//! first to N wins, last player standing — needs a [`Dealer`]: a stream that
+//! plays the pool through as one shuffled deck, then reshuffles under the next
+//! seed derived from the match seed and goes on (ADR 0026). Its first deck is
+//! exactly what [`deal`] deals for the same seed, so a fixed-length match and
+//! an open-ended one that happens to run the same number of rounds see the
+//! same challenges.
 
 use std::fmt;
 
@@ -69,11 +77,24 @@ pub fn deal(
     count: usize,
     seed: u64,
 ) -> Result<Vec<&ChallengeSpec>, DealError> {
-    let mut pool: Vec<&ChallengeSpec> = library.iter().filter(|c| mode.admits(c.kind)).collect();
+    Ok(order(library, mode, count, seed)?.into_iter().map(|i| &library[i]).collect())
+}
+
+/// [`deal`], as indices into `library`.
+fn order(
+    library: &[ChallengeSpec],
+    mode: Mode,
+    count: usize,
+    seed: u64,
+) -> Result<Vec<usize>, DealError> {
+    let mut pool: Vec<usize> =
+        (0..library.len()).filter(|&i| mode.admits(library[i].kind)).collect();
     if pool.len() < count {
         return Err(DealError::NotEnough { mode, wanted: count, available: pool.len() });
     }
-    pool.sort_by(|a, b| (&a.game, &a.id).cmp(&(&b.game, &b.id)));
+    pool.sort_by(|&a, &b| {
+        (&library[a].game, &library[a].id).cmp(&(&library[b].game, &library[b].id))
+    });
 
     // A partial Fisher-Yates: the first `count` places are a uniform draw
     // without replacement, in order.
@@ -84,6 +105,91 @@ pub fn deal(
     }
     pool.truncate(count);
     Ok(pool)
+}
+
+/// What a [`Dealer`] hands out: the `index`-th challenge of the match, counted
+/// from 0, and the seed a generated challenge is rolled from.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Dealt {
+    pub index: u64,
+    pub challenge: ChallengeSpec,
+    /// Derived from the match seed and `index`, so every player who derives
+    /// this challenge's content derives the same artifact (ADR 0013). Issued
+    /// for every challenge; a vanilla one ignores it.
+    pub seed: u64,
+}
+
+/// An open-ended deal: one shuffled deck of the pool after another.
+///
+/// Within a deck no challenge repeats. Across the deck boundary the first
+/// challenge of the new deck is moved one place down if it would repeat the
+/// last one dealt, which is the only departure from a plain reshuffle.
+#[derive(Clone, Debug)]
+pub struct Dealer {
+    pool: Vec<ChallengeSpec>,
+    mode: Mode,
+    seed: u64,
+    /// Indices into `pool` still to deal from the current deck, last first.
+    deck: Vec<usize>,
+    decks: u64,
+    dealt: u64,
+    last: Option<usize>,
+}
+
+/// Domains for [`derive`]: which purpose a derived seed serves.
+const DECK: u64 = 1;
+const CONTENT: u64 = 2;
+
+/// A seed for one purpose, from the match seed. Written out so that it can
+/// be reproduced anywhere: one SplitMix64 output over a state that folds in
+/// the domain and the index.
+fn derive(seed: u64, domain: u64, index: u64) -> u64 {
+    let state = seed ^ domain.rotate_left(32) ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    SplitMix64(state).next()
+}
+
+impl Dealer {
+    /// Refuses a pool with nothing of `mode` in it; otherwise never runs out.
+    pub fn new(pool: Vec<ChallengeSpec>, mode: Mode, seed: u64) -> Result<Dealer, DealError> {
+        let available = pool.iter().filter(|c| mode.admits(c.kind)).count();
+        if available == 0 {
+            return Err(DealError::NotEnough { mode, wanted: 1, available });
+        }
+        Ok(Dealer { pool, mode, seed, deck: Vec::new(), decks: 0, dealt: 0, last: None })
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// How many challenges have been dealt so far.
+    pub fn dealt(&self) -> u64 {
+        self.dealt
+    }
+
+    /// The seed a generated challenge at `index` is rolled from.
+    pub fn content_seed(&self, index: u64) -> u64 {
+        derive(self.seed, CONTENT, index)
+    }
+
+    pub fn deal(&mut self) -> Dealt {
+        if self.deck.is_empty() {
+            let seed = if self.decks == 0 { self.seed } else { derive(self.seed, DECK, self.decks) };
+            let count = self.pool.iter().filter(|c| self.mode.admits(c.kind)).count();
+            let mut order = order(&self.pool, self.mode, count, seed).expect("checked in new");
+            if order.len() > 1 && self.last == Some(order[0]) {
+                order.swap(0, 1);
+            }
+            order.reverse();
+            self.deck = order;
+            self.decks += 1;
+        }
+        let i = self.deck.pop().expect("a deck is never empty");
+        self.last = Some(i);
+        let index = self.dealt;
+        self.dealt += 1;
+        Dealt { index, challenge: self.pool[i].clone(), seed: self.content_seed(index) }
+    }
 }
 
 /// SplitMix64 (Steele, Lea & Flood, 2014). Small, fully specified, and good
@@ -213,5 +319,72 @@ mod tests {
         assert_eq!(firsts.len(), 24);
         // 1000 expected each; a generous band still catches a skewed draw.
         assert!(firsts.values().all(|n| (850..1150).contains(n)), "{firsts:?}");
+    }
+
+    fn dealt_ids(dealer: &mut Dealer, n: usize) -> Vec<String> {
+        (0..n)
+            .map(|_| dealer.deal())
+            .map(|d| format!("{}/{}", d.challenge.game, d.challenge.id))
+            .collect()
+    }
+
+    #[test]
+    fn a_dealers_first_deck_is_what_deal_deals() {
+        let l = library();
+        let mut dealer = Dealer::new(l.clone(), Mode::Both, 42).unwrap();
+        assert_eq!(dealt_ids(&mut dealer, 24), ids(&deal(&l, Mode::Both, 24, 42).unwrap()));
+    }
+
+    #[test]
+    fn a_dealer_never_runs_out_and_never_repeats_within_a_deck() {
+        let l = library();
+        for seed in 0..50 {
+            let mut dealer = Dealer::new(l.clone(), Mode::Survival, seed).unwrap();
+            let all = dealt_ids(&mut dealer, 36);
+            for deck in all.chunks(12) {
+                let mut unique = deck.to_vec();
+                unique.sort();
+                unique.dedup();
+                assert_eq!(unique.len(), 12, "seed {seed} repeated within a deck");
+            }
+            assert!(all.windows(2).all(|w| w[0] != w[1]), "seed {seed} dealt one twice running");
+            assert_eq!(dealer.dealt(), 36);
+        }
+    }
+
+    #[test]
+    fn a_dealer_is_deterministic_and_seeds_differ_per_challenge() {
+        let l = library();
+        let a: Vec<Dealt> = {
+            let mut d = Dealer::new(l.clone(), Mode::Both, 9).unwrap();
+            (0..30).map(|_| d.deal()).collect()
+        };
+        let b: Vec<Dealt> = {
+            let mut d = Dealer::new(l.clone(), Mode::Both, 9).unwrap();
+            (0..30).map(|_| d.deal()).collect()
+        };
+        assert_eq!(a, b);
+        assert_eq!(a.iter().map(|d| d.index).collect::<Vec<_>>(), (0..30).collect::<Vec<_>>());
+        let mut seeds: Vec<u64> = a.iter().map(|d| d.seed).collect();
+        seeds.sort();
+        seeds.dedup();
+        assert_eq!(seeds.len(), 30);
+        let mut other = Dealer::new(l, Mode::Both, 10).unwrap();
+        assert_ne!(other.deal().seed, a[0].seed);
+    }
+
+    #[test]
+    fn a_pool_with_nothing_of_the_mode_is_refused() {
+        let l: Vec<ChallengeSpec> =
+            library().into_iter().filter(|c| c.kind == ChallengeKind::Survival).collect();
+        let err = Dealer::new(l, Mode::TimeTrial, 0).unwrap_err();
+        assert_eq!(err, DealError::NotEnough { mode: Mode::TimeTrial, wanted: 1, available: 0 });
+    }
+
+    #[test]
+    fn a_pool_of_one_deals_it_forever() {
+        let l = vec![challenge("smb3", "only", ChallengeKind::Survival)];
+        let mut dealer = Dealer::new(l, Mode::Both, 3).unwrap();
+        assert!(dealt_ids(&mut dealer, 5).iter().all(|id| id == "smb3/only"));
     }
 }

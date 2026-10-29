@@ -13,6 +13,10 @@ id = "smb3"
 title = "Super Mario Bros. 3"
 console = "nes"
 region = "usa"
+genre = "platformer"
+# Year of release in this manifest's region: the USA cartridge is 1990, though
+# Japan had it in 1988. The lobby's "era" is this decade.
+year = 1990
 # NTSC NES. Every duration a challenge authors in seconds is converted at this
 # rate, once, at load.
 framerate = 60.0988
@@ -22,8 +26,10 @@ id = "base"
 name = "Super Mario Bros. 3 (USA) (Rev 1)"
 path = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
 header = "ines"
-# sha1 is deliberately absent: no hash has been taken against a verified dump.
-# `asset-store` will require one before a ROM can be accepted from a player.
+# The hash of the playtested dump: the one every entry state above was captured
+# on, and the one hack3's patch was authored against. `asset-store` compares a
+# player's own dump to it.
+sha1 = "6bd518e85eb46a4252af07910f61036e84b020d1"
 
 [runner]
 kind = "libretro"
@@ -312,6 +318,7 @@ name = "World 1-1: Five Stomps"
 stage = "1-1"
 kind = "time_trial"
 complete_when = { enemies_defeated = 5 }
+goal = "Stomp five enemies!"
 note = "the clock stops on the fifth stomp; reaching the end of the level is not required"
 
 # --------------------------------------------------------- generated content
@@ -376,6 +383,8 @@ name = "Sun Storm"
 stage = "sun-storm"
 kind = "survival"
 complete_when = { cleared = true }
+# Static text, so it promises no count: how many suns there are is the roll.
+goal = "Reach the end under the Angry Suns!"
 generator_version = 1
 
 [[challenge.patch_slot]]
@@ -399,6 +408,7 @@ name = "Sun Storm"
 stage = "sun-storm"
 kind = "time_trial"
 complete_when = { cleared = true }
+goal = "Reach the end under the Angry Suns!"
 generator_version = 1
 
 [[challenge.patch_slot]]
@@ -446,6 +456,8 @@ name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "time_trial"
 complete_when = { counts = { score_award = 4 } }
+# Four slots, each a goomba or a bro: the count is fixed, only the species rolls.
+goal = "Kill all four enemies, by any means!"
 generator_version = 2
 note = "the clock stops on the fourth kill, by any means; reaching the card is not required"
 
@@ -475,6 +487,7 @@ name = "Bro Roulette"
 stage = "bro-roulette"
 kind = "survival"
 complete_when = { counts = { score_award = 4 } }
+goal = "Kill all four enemies, by any means!"
 generator_version = 2
 
 [[challenge.patch_slot]]

@@ -20,13 +20,22 @@
 //! * `[game]` and `[[challenge]]` — owned here, and every unknown key is
 //!   refused, for the reason `session-libretro` gives: a mistyped key is a
 //!   criterion silently switched off.
-//! * `[[stage]]` — its `id` and `name` only. The rest (`rom`, `entry`) is the
-//!   runner's, and the runner's loader is the strict one there.
+//! * `[[stage]]` — its `id`, `name` and `rom`. The entry point is the runner's,
+//!   and the runner's loader is the strict one there.
+//! * `[[rom]]` — each one's `id`, `name`, and whether it carries a `from`. That
+//!   is what a lobby needs: whether a challenge runs on a hack, and what to
+//!   call it (ADR 0020). The patch, the path, the hash and the dump checks are
+//!   the runner's, and so is the rule that exactly one entry is the base — the
+//!   six rules of ADR 0020 have one authority, and it is `session-libretro`.
 //! * `[[rule]]` — only what each rule *emits*. A criterion naming a fact no
 //!   rule announces is a challenge nobody can complete, and catching that needs
 //!   the emit vocabulary but none of the addresses behind it.
 //!
 //! Anything else in the file is the runner's, and is not read at all.
+//!
+//! A [`Catalog`] is several libraries together — the whole of what a lobby
+//! lists — with a hash over the texts they were read from, so two machines can
+//! tell whether they hold the same library before a match starts.
 //!
 //! A generated challenge's `patch_slot` table is accepted and not interpreted.
 //! It belongs to `content-gen`, which the server must never link; what a dealer
@@ -74,6 +83,8 @@ struct VersionDoc {
 struct Doc {
     game: GameDoc,
     #[serde(default)]
+    rom: Vec<RomDoc>,
+    #[serde(default)]
     rule: Vec<RuleDoc>,
     #[serde(default)]
     stage: Vec<StageDoc>,
@@ -90,6 +101,28 @@ struct GameDoc {
     #[serde(default)]
     region: Option<String>,
     framerate: f64,
+    /// Free text, lowercase by convention. What a lobby groups "by genre" on.
+    #[serde(default)]
+    genre: Option<String>,
+    /// Year of release in the manifest's region. What a lobby groups "by era"
+    /// on: the era is the decade.
+    #[serde(default)]
+    year: Option<u16>,
+}
+
+/// One piece of content, as far as a lobby is concerned: a name to show, and
+/// whether it is the player's own dump or something derived from it. Not
+/// `deny_unknown_fields`: `path`, `patch`, `sha1` and the dump checks are the
+/// runner's, and this crate must not learn them (ADR 0020).
+#[derive(Deserialize, Debug)]
+struct RomDoc {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    /// Its presence is what makes a ROM derived. What it names is the runner's
+    /// to check.
+    #[serde(default)]
+    from: Option<String>,
 }
 
 /// The part of a rule that says what it announces. The field it watches and
@@ -113,13 +146,15 @@ struct RuleDoc {
     objective: Option<String>,
 }
 
-/// A stage as a dealer sees it: something to name. Where it runs and how it is
-/// entered are the runner's.
+/// A stage as a dealer sees it: something to name, on some content. How it is
+/// entered is the runner's.
 #[derive(Deserialize, Debug)]
 struct StageDoc {
     id: String,
     #[serde(default)]
     name: Option<String>,
+    /// Required on every stage, in every manifest (ADR 0020).
+    rom: String,
 }
 
 /// What a player is actually dealt: one stage, one kind, and the criteria that
@@ -139,6 +174,14 @@ struct ChallengeDoc {
     ends_attempt_on: Vec<String>,
     #[serde(default)]
     note: Option<String>,
+    /// The goal in plain English, for the intro and the lobby. Composed from
+    /// `complete_when` when absent.
+    #[serde(default)]
+    goal: Option<String>,
+    /// The run's bound, authored in seconds and converted to frames at load
+    /// like `survive_seconds`. Absent means the lobby's default applies.
+    #[serde(default)]
+    limit_seconds: Option<f64>,
 
     // ADR 0015's generated-challenge keys. The table's shape is `content-gen`'s
     // and is checked by the adapter that links it; here only their presence is
@@ -280,14 +323,34 @@ pub struct Game {
     pub console: String,
     pub region: Option<String>,
     pub framerate: Framerate,
+    /// Free text, lowercase by convention (`platformer`, `fps`). A lobby
+    /// groups on it; nothing else reads it.
+    pub genre: Option<String>,
+    /// Year of release in the manifest's region. Its decade is the game's era.
+    pub year: Option<u16>,
 }
 
-/// A stage, as far as dealing is concerned: an id a challenge names, and what
-/// to call it.
+/// One piece of content a stage runs on, as a lobby sees it: the player's own
+/// dump, or a hack derived from it. What derives it is the runner's (ADR 0020).
+#[derive(Clone, Debug)]
+pub struct Rom {
+    pub id: String,
+    /// What a player is shown for a stage on this ROM, over the game's title.
+    /// Defaults to the id.
+    pub name: String,
+    /// Declared with a `from`: a hand-authored hack rather than the base dump.
+    /// A challenge on one is a custom challenge, as a generated one is.
+    pub derived: bool,
+}
+
+/// A stage, as far as dealing is concerned: an id a challenge names, what to
+/// call it, and which content it runs on.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub id: StageId,
     pub name: String,
+    /// A `[[rom]]` id this manifest declares.
+    pub rom: String,
 }
 
 /// One challenge this game offers. Several may share a `stage`: the same place
@@ -306,17 +369,55 @@ pub struct Challenge {
     /// names, validated against what the manifest emits (ADR 0025).
     pub ends_attempt_on: BTreeSet<String>,
     pub note: Option<String>,
+    /// The goal as the contributor wrote it, if they did. [`Self::goal_text`]
+    /// is what to show; this is here so a lobby can tell authored from
+    /// composed.
+    pub goal: Option<String>,
+    /// The run's bound, already in frames at the game's framerate, when the
+    /// manifest declares one. `None` means the lobby's default limit applies;
+    /// a run always has one (ADR 0023, ADR 0026).
+    pub limit_frames: Option<u64>,
     /// `Some` when this challenge's content is rolled per attempt from a seed
     /// (ADR 0013, ADR 0015), and the version of the table that rolls it. A
     /// dealer issues a seed for exactly these. The table itself is read by the
     /// adapter, through `content-gen`.
     pub generator_version: Option<u32>,
+    /// Resolved at load: generated, or on a derived ROM.
+    custom: bool,
+    /// Composed at load from `complete_when`, for when `goal` is absent.
+    goal_fallback: String,
 }
 
 impl Challenge {
     /// Whether dealing this challenge needs a seed.
     pub fn is_generated(&self) -> bool {
         self.generator_version.is_some()
+    }
+
+    /// A custom challenge is one that does not run on the game as it shipped:
+    /// generated content (ADR 0013), or a stage on a hand-authored hack (ADR
+    /// 0020). A lobby's "allow custom challenges" toggle filters on exactly
+    /// this.
+    pub fn is_custom(&self) -> bool {
+        self.custom
+    }
+
+    /// What a player is shown as the game's name for this challenge: the ROM's
+    /// name on a hack, because a hack has its own title and `[game].title` is
+    /// the base game's; the game's title otherwise (ADR 0020).
+    pub fn display_title(&self, lib: &Library) -> String {
+        match lib.rom_of(&self.stage) {
+            Some(rom) if rom.derived => rom.name.clone(),
+            _ => lib.game.title.clone(),
+        }
+    }
+
+    /// The goal in plain English, for the challenge intro and the lobby: what
+    /// the contributor wrote, or one composed from `complete_when` — "Reach
+    /// the end!", "Defeat 5 enemies!", "Survive for 45 seconds!". It says the
+    /// goal, not the kind: the intro already names the kind.
+    pub fn goal_text(&self) -> String {
+        self.goal.clone().unwrap_or_else(|| self.goal_fallback.clone())
     }
 
     /// The challenge as `challenge-core` sees it. Nothing adapter-shaped
@@ -338,6 +439,9 @@ impl Challenge {
 #[derive(Clone, Debug)]
 pub struct Library {
     pub game: Game,
+    /// In declaration order. Which one is the base, and that there is exactly
+    /// one, is the runner's loader's to check.
+    pub roms: Vec<Rom>,
     /// In declaration order.
     pub stages: Vec<Stage>,
     /// In declaration order.
@@ -363,6 +467,17 @@ impl Library {
         self.stages.iter().find(|s| s.id.0 == id)
     }
 
+    pub fn rom(&self, id: &str) -> Option<&Rom> {
+        self.roms.iter().find(|r| r.id == id)
+    }
+
+    /// The content a stage runs on. Load checked that every stage names a
+    /// declared ROM, so this is `None` only for a stage this library does not
+    /// have.
+    pub fn rom_of(&self, stage: &StageId) -> Option<&Rom> {
+        self.stage(&stage.0).and_then(|s| self.rom(&s.rom))
+    }
+
     pub fn challenge(&self, id: &str) -> Option<&Challenge> {
         self.challenges.iter().find(|c| c.id.0 == id)
     }
@@ -379,6 +494,161 @@ impl Library {
     pub fn specs(&self) -> Vec<ChallengeSpec> {
         self.challenges.iter().map(|c| c.spec(&self.game.id)).collect()
     }
+}
+
+// ------------------------------------------------------------------ catalog
+
+/// Every library a lobby can offer, and a hash that says which library it is.
+///
+/// Two machines about to play a match have to be holding the same challenges
+/// — the same criteria, the same patch tables, the same limits — and the
+/// manifests ship with the app rather than being fetched, so each side hashes
+/// what it loaded and the host compares. The hash is over the manifest texts
+/// in a canonical order, which makes it independent of the order the files
+/// were read in; it is for agreement, not security, and is FNV-1a so that
+/// nothing new is linked for it.
+///
+/// No I/O: the caller reads the files and hands over the texts, as with
+/// [`Library::parse`].
+#[derive(Clone, Debug)]
+pub struct Catalog {
+    /// Sorted by game id.
+    libraries: Vec<Library>,
+    hash: u64,
+}
+
+/// How a lobby groups the games it lists.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Grouping {
+    /// The decade of `[game].year`: "1990s". A game with no year is "unknown".
+    Era,
+    /// `[game].genre` as written. A game with none is "uncategorised".
+    Genre,
+    /// `[game].console` as written.
+    Console,
+}
+
+impl Grouping {
+    /// The category one game falls in under this grouping.
+    pub fn category(self, game: &Game) -> String {
+        match self {
+            Grouping::Era => match game.year {
+                Some(y) => format!("{}s", y / 10 * 10),
+                None => "unknown".into(),
+            },
+            Grouping::Genre => game
+                .genre
+                .clone()
+                .unwrap_or_else(|| "uncategorised".into()),
+            Grouping::Console => game.console.clone(),
+        }
+    }
+}
+
+impl Catalog {
+    /// Parses every text as a manifest. An error names the game where it can,
+    /// and the text's position where the manifest did not get that far.
+    pub fn parse_all(texts: &[&str]) -> Result<Catalog, String> {
+        let mut entries = Vec::with_capacity(texts.len());
+        for (i, text) in texts.iter().enumerate() {
+            let lib = Library::parse(text).map_err(|e| format!("manifest #{}: {e}", i + 1))?;
+            entries.push((text.to_string(), lib));
+        }
+        Catalog::new(entries)
+    }
+
+    /// Builds a catalog from libraries already parsed, each paired with the
+    /// text it was parsed from — the hash is over the texts.
+    ///
+    /// Two games with one id, or two challenges with one id across games, are
+    /// refused: a dealt challenge is named by its id alone, and a match has to
+    /// mean one thing by it.
+    pub fn new(mut entries: Vec<(String, Library)>) -> Result<Catalog, String> {
+        entries.sort_by(|a, b| a.1.game.id.0.cmp(&b.1.game.id.0));
+
+        let mut hash = FNV_OFFSET;
+        let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+        for pair in entries.windows(2) {
+            let (a, b) = (&pair[0].1.game.id.0, &pair[1].1.game.id.0);
+            if a == b {
+                return Err(format!("game `{a}`: two manifests declare it"));
+            }
+        }
+        for (text, lib) in &entries {
+            for c in &lib.challenges {
+                if let Some(other) = seen.insert(&c.id.0, &lib.game.id.0) {
+                    return Err(format!(
+                        "challenge `{}`: declared by both `{other}` and `{}`; a challenge id \
+                         names one challenge across the whole library",
+                        c.id.0, lib.game.id.0
+                    ));
+                }
+            }
+            // Length-prefixed, so two texts cannot hash the same by moving a
+            // boundary. Carriage returns are dropped so a checkout that
+            // rewrote line endings still agrees with one that did not.
+            let bytes: Vec<u8> = text.bytes().filter(|&b| b != b'\r').collect();
+            hash = fnv1a(hash, &(bytes.len() as u64).to_le_bytes());
+            hash = fnv1a(hash, &bytes);
+        }
+
+        Ok(Catalog { libraries: entries.into_iter().map(|(_, lib)| lib).collect(), hash })
+    }
+
+    /// Over every manifest text, in game-id order. Equal on two machines
+    /// holding the same manifests, whatever order they read them in.
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    /// Every library, sorted by game id.
+    pub fn games(&self) -> &[Library] {
+        &self.libraries
+    }
+
+    pub fn game(&self, id: &str) -> Option<&Library> {
+        self.libraries.iter().find(|l| l.game.id.0 == id)
+    }
+
+    /// A challenge and the library it belongs to. Ids are unique across the
+    /// catalog, so there is at most one.
+    pub fn challenge(&self, id: &ChallengeId) -> Option<(&Library, &Challenge)> {
+        self.libraries
+            .iter()
+            .find_map(|l| l.challenge(&id.0).map(|c| (l, c)))
+    }
+
+    /// Every challenge in the catalog with its library, games in id order and
+    /// challenges in declaration order.
+    pub fn challenges(&self) -> impl Iterator<Item = (&Library, &Challenge)> {
+        self.libraries
+            .iter()
+            .flat_map(|l| l.challenges.iter().map(move |c| (l, c)))
+    }
+
+    /// The games grouped for a lobby's tree, categories in sorted order and
+    /// each category's games in id order. Every game appears exactly once.
+    pub fn grouping(&self, by: Grouping) -> Vec<(String, Vec<&Library>)> {
+        let mut groups: BTreeMap<String, Vec<&Library>> = BTreeMap::new();
+        for lib in &self.libraries {
+            groups.entry(by.category(&lib.game)).or_default().push(lib);
+        }
+        groups.into_iter().collect()
+    }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a, 64-bit, continued from `hash`. Written out rather than taken from a
+/// crate for the reason the content generator's RNG is: the value is compared
+/// across machines, so it has to be exactly this.
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 // ------------------------------------------------------------- construction
@@ -522,14 +792,38 @@ impl Doc {
         }
         let framerate = Framerate(self.game.framerate);
 
+        // Only what a lobby needs from a ROM. Whether the array has exactly one
+        // base, and whether a derived one is well-formed, is the runner's
+        // loader's — one authority per rule (ADR 0020).
+        let mut roms: Vec<Rom> = Vec::new();
+        for r in &self.rom {
+            if roms.iter().any(|x| x.id == r.id) {
+                return Err(format!("rom `{}`: declared twice", r.id));
+            }
+            roms.push(Rom {
+                id: r.id.clone(),
+                name: r.name.clone().unwrap_or_else(|| r.id.clone()),
+                derived: r.from.is_some(),
+            });
+        }
+
         let mut stages: Vec<Stage> = Vec::new();
         for s in &self.stage {
             if stages.iter().any(|x| x.id.0 == s.id) {
                 return Err(format!("stage `{}`: declared twice", s.id));
             }
+            if !roms.iter().any(|r| r.id == s.rom) {
+                return Err(format!(
+                    "stage `{}`: runs on rom `{}`, which this manifest does not declare; it has {}",
+                    s.id,
+                    s.rom,
+                    list_or_none(&roms.iter().map(|r| r.id.clone()).collect())
+                ));
+            }
             stages.push(Stage {
                 id: StageId(s.id.clone()),
                 name: s.name.clone().unwrap_or_else(|| s.id.clone()),
+                rom: s.rom.clone(),
             });
         }
 
@@ -582,6 +876,35 @@ impl Doc {
                 (false, Some(v)) => Some(as_u32(v, &format!("{what}: generator_version"))?),
             };
 
+            let limit_frames = match c.limit_seconds {
+                None => None,
+                Some(secs) => {
+                    if !secs.is_finite() || secs <= 0.0 {
+                        return Err(format!(
+                            "{what}: limit_seconds must be a positive number of seconds, got {secs}"
+                        ));
+                    }
+                    let limit = framerate.frames(secs);
+                    // A limit shorter than the survival the criteria ask for
+                    // is a run that can never complete.
+                    if let Some(need) = complete_when.survive_frames {
+                        if limit < need {
+                            return Err(format!(
+                                "{what}: limit_seconds ({secs}) is shorter than survive_seconds, \
+                                 so the run is over before it can complete"
+                            ));
+                        }
+                    }
+                    Some(limit)
+                }
+            };
+
+            let derived = roms
+                .iter()
+                .find(|r| r.id == stage.rom)
+                .is_some_and(|r| r.derived);
+            let goal_fallback = compose_goal(&complete_when, framerate, &facts);
+
             challenges.push(Challenge {
                 id: ChallengeId(c.id.clone()),
                 name: c.name.clone().unwrap_or_else(|| stage.name.clone()),
@@ -590,7 +913,11 @@ impl Doc {
                 complete_when,
                 ends_attempt_on,
                 note: c.note.clone(),
+                goal: c.goal.clone(),
+                limit_frames,
                 generator_version,
+                custom: generator_version.is_some() || derived,
+                goal_fallback,
             });
         }
 
@@ -601,7 +928,10 @@ impl Doc {
                 console: self.game.console,
                 region: self.game.region,
                 framerate,
+                genre: self.game.genre,
+                year: self.game.year,
             },
+            roms,
             stages,
             challenges,
         })
@@ -765,6 +1095,46 @@ fn ends_attempt_on(
         }
     }
     Ok(out)
+}
+
+/// The goal a challenge shows when its contributor wrote none: one phrase per
+/// criterion, in a fixed order, joined with "and" and ending with "!".
+///
+/// A table, not a grammar. An item or counter is named as the manifest names
+/// it — "Collect 50 banana" — because the name is the contributor's, and a
+/// contributor who wants better prose writes a `goal`. `damaged` gets no
+/// phrase: taking hits is not something anyone is asked to go and do.
+fn compose_goal(w: &Completion, framerate: Framerate, facts: &Facts) -> String {
+    let mut phrases: Vec<String> = Vec::new();
+    if w.cleared {
+        phrases.push("Reach the end".into());
+    }
+    if let Some(frames) = w.survive_frames {
+        // Back to whole seconds for display only; the frames are what is
+        // judged.
+        let secs = (frames as f64 / framerate.0).round() as u64;
+        phrases.push(format!("Survive for {secs} seconds"));
+    }
+    for (name, n) in &w.counts {
+        let phrase = match (name.as_str(), facts.tallies.get(name)) {
+            (ENEMY_DEFEATED, _) => {
+                format!("Defeat {n} {}", if *n == 1 { "enemy" } else { "enemies" })
+            }
+            (DAMAGED, _) => continue,
+            (_, Some(Tally::Item)) => format!("Collect {n} {name}"),
+            _ => format!("Reach {n} {name}"),
+        };
+        phrases.push(phrase);
+    }
+    for objective in &w.objectives {
+        phrases.push(format!("Reach {objective}"));
+    }
+    if phrases.is_empty() {
+        // Only a `damaged` count on its own gets here. Something has to be
+        // shown, and the manifest can always say it better.
+        phrases.push("Complete the challenge".into());
+    }
+    format!("{}!", phrases.join(" and "))
 }
 
 fn as_u32(v: i64, what: &str) -> Result<u32, String> {

@@ -15,6 +15,8 @@ id = "dkc"
 title = "Donkey Kong Country"
 console = "snes"
 region = "usa"
+genre = "platformer"
+year = 1994
 framerate = 60.0988
 
 [[rom]]
@@ -26,7 +28,10 @@ path = "assets/ROMs/snes/Donkey Kong Country (U) (V1.0) [!].smc"
 # whether it carries a 512-byte copier header, which shifts every ROM offset.
 header = "copier-optional"
 min_bytes = 32768
-# sha1 deliberately absent; see the note in smb3.toml.
+# The hash of the playtested dump — the one the entry states were captured on.
+# A headerless 4 MB file; a copier-headered dump of the same cart hashes
+# differently and is a different file to `asset-store`.
+sha1 = "0fcee45d9af5d2f62995ed4b04d22146b906c86b"
 
 [runner]
 kind = "libretro"
@@ -407,6 +412,7 @@ name = "Mine Cart Carnage: 45 Seconds"
 stage = "mine-cart-carnage"
 kind = "survival"
 complete_when = { survive_seconds = 45.0 }
+goal = "Stay in the cart for 45 seconds!"
 
 # Conjunction, and the per-bit item naming: `kong_letters` is one byte, and the
 # `bit_labels` on its rule are what turn bit 2 into `kong_letter:N`. All four
@@ -417,6 +423,7 @@ id = "jungle-hijinx-kong"
 name = "Jungle Hijinx: K-O-N-G"
 stage = "jungle-hijinx"
 kind = "time_trial"
+goal = "Collect K, O, N and G, then reach the end!"
 note = "every DKC level holds exactly four letters; the counts are 1 each, not 4 of one"
 
 [challenge.complete_when]
@@ -516,6 +523,7 @@ name = "Reptile Roulette"
 stage = "reptile-rumble"
 kind = "survival"
 complete_when = { cleared = true }
+goal = "Reach the end through a room full of reptiles!"
 generator_version = 1
 note = "26 enemy spawn slots in SPR_ReptileRumble_Main, each rerolled independently over the reptile pool"
 

@@ -51,7 +51,8 @@ GAME:
                      verdict is printed when the run ends. F2 starts a new run
     --limit <SECS>   End a --challenge run as timed out after this long, across
                      every attempt. Converted to frames at the game's rate, so
-                     it is the same number of frames on every machine
+                     it is the same number of frames on every machine. Default:
+                     the challenge's own `limit_seconds`, if it declares one
     --list-stages    Print the manifest's stages and exit
     --list-challenges
                      Print every challenge and what completes it, and exit
@@ -282,10 +283,20 @@ fn run() -> Result<(), String> {
     // What `challenge-core` reads: the challenge in shared vocabulary, and the
     // limit already in frames. Taken before the runner owns the manifest.
     let judged = challenge.as_ref().map(|c| {
-        let limit = args.limit.map(|s| manifest.framerate.frames(s));
-        if let Some(l) = limit {
-            println!("[run] limited to {l} frames across every attempt");
-        }
+        // The flag, else the manifest's hint. A match would fall back to the
+        // lobby's default after that (ADR 0026); the harness has none.
+        let limit = match (args.limit, c.limit_frames) {
+            (Some(secs), _) => {
+                let l = manifest.framerate.frames(secs);
+                println!("[run] limited to {l} frames across every attempt (--limit)");
+                Some(l)
+            }
+            (None, Some(l)) => {
+                println!("[run] limited to {l} frames across every attempt (manifest)");
+                Some(l)
+            }
+            (None, None) => None,
+        };
         (manifest.challenge_spec(c), limit)
     });
     let mut run = judged.as_ref().map(start_run).transpose()?;

@@ -12,12 +12,14 @@ rebuild (invariant 5), and that now covers a ROM hack and a generated challenge
 as well. Two loaders read it, and between them they are the authority on what
 parses; this document is the authority on what the fields *mean*.
 `crates/challenge-library` reads the challenge half — `schema_version`,
-`[game]`, every `[[challenge]]`, each `[[stage]]`'s `id` and `name`, and what
-each `[[rule]]` emits — and is what the server deals and judges from (ADR 0009).
-`crates/session-libretro/src/manifest.rs` parses through it first and reads the
-runner half itself: `[[rom]]`, `[runner]`, `[watch]`, the rest of `[[stage]]`
-and `[[rule]]`, and a challenge's `patch_slot` table. One file, one version:
-the split is in who reads what, not in what a contributor writes.
+`[game]`, every `[[challenge]]`, each `[[stage]]`'s `id`, `name` and `rom`,
+each `[[rom]]`'s `id`, `name` and whether it has a `from`, and what each
+`[[rule]]` emits — and is what the server deals and judges from (ADR 0009), and
+what a lobby lists. `crates/session-libretro/src/manifest.rs` parses through it
+first and reads the runner half itself: the rest of `[[rom]]`, `[runner]`,
+`[watch]`, the rest of `[[stage]]` and `[[rule]]`, and a challenge's
+`patch_slot` table. One file, one version: the split is in who reads what, not
+in what a contributor writes.
 
 One manifest per **base ROM**, and a manifest may carry ROMs *derived* from that
 base — hand-authored hacks, each declared as a BPS patch against it — with every
@@ -50,7 +52,7 @@ Used precisely throughout, and worth learning before reading further (ADR 0017):
 
 | Table | What it settles |
 |---|---|
-| [`[game]`](#game) | identity, console family, framerate |
+| [`[game]`](#game) | identity, console family, framerate, and how a lobby groups it |
 | [`[[rom]]`](#rom) | the content this game runs on: one base, and any hacks of it |
 | [`[runner]`](#runner) | which adapter runs it, how it is controlled, and how it reaches memory |
 | [`[watch.<name>]`](#watchname) | the addresses to read, and where each came from |
@@ -78,8 +80,20 @@ id = "dkc"                     # matches the manifest's filename by convention
 title = "Donkey Kong Country"
 console = "snes"               # closed, small set: one entry per console family
 region = "usa"                 # optional
+genre = "platformer"           # optional; free text, lowercase by convention
+year = 1994                    # optional; year of release in the manifest's region
 framerate = 60.0988
 ```
+
+`genre` and `year` exist for the lobby, which groups the library by genre, by
+console, or by **era** — the decade of `year`, so `1994` files under "1990s".
+Both are optional: a game without a year lists under "unknown" and one without
+a genre under "uncategorised", and nothing else reads either. `genre` is free
+text rather than a closed set because the library will outgrow any list written
+today; keep it lowercase and reuse a word already in use (`platformer`, `fps`)
+before coining one, since two spellings are two groups. `year` is the release
+in the region the manifest declares, which is why `smb3.toml` says 1990 and
+not 1988.
 
 `framerate` is the manifest's own number, not the core's. It is what durations
 authored in seconds are converted at, so it must be the same on every machine —
@@ -573,6 +587,8 @@ stage = "mine-cart-carnage"    # a [[stage]] id
 kind = "survival"              # "time_trial" | "survival"
 complete_when = { cleared = true }
 ends_attempt_on = []           # optional; facts that cost what a death costs
+goal = "Reach the end!"        # optional; composed from complete_when if absent
+limit_seconds = 120            # optional; the run's bound, else the lobby's default
 note = "optional, for whatever the id and the criteria do not say"
 ```
 
@@ -707,17 +723,58 @@ hit. Before a challenge uses a fact here, playtest that fact's rule *for missed
 detections*, not only for false ones. `damaged` in particular was emitted by
 all three slice games long before anything read it.
 
-### What is deliberately missing: a failure bound
+### `goal`
 
-Neither kind has one yet. A time trial where a death only restarts has no losing
-state, and a survival challenge whose criterion the player can simply decline to
-pursue (`enemies_defeated`, with the player standing somewhere safe) has the
-same problem — `survive_seconds` is the only criterion that terminates itself.
+The goal in plain English, shown in the challenge intro and in the lobby's
+listing. Optional: when it is absent the library composes one from
+`complete_when` — "Reach the end!", "Defeat 5 enemies!", "Survive for 45
+seconds!", "Collect 10 banana and Reach boss-defeated!" — naming items,
+counters and objectives exactly as the manifest names them. Plain "reach the
+end" challenges can leave it out; anything whose criteria read awkwardly as a
+sentence should write one.
 
-A per-challenge time limit, a per-round cap, or a forfeit will be needed before
-either kind ships. It is not in this schema because nothing enforces it yet, and
-a field that parses but does nothing is exactly what ADR 0015 refused. It is
-`challenge-core`'s to settle, along with the round clock. See ADR 0017.
+```toml
+goal = "Collect K, O, N and G, then reach the end!"
+```
+
+Two rules. **It says the goal, not the kind** — the intro already says "time
+trial" or "survival", so "Reach the end!" rather than "Reach the end as fast as
+you can!". And **it is static text, so it must not promise a rolled quantity.**
+A generated challenge's `goal` is written once and shown for every seed; Sun
+Storm rolls one to three suns and its goal says "the Angry Suns", not how many.
+Bro Roulette can say "all four" because the four slots are fixed and only the
+species rolls.
+
+### `limit_seconds`
+
+The run's bound: how long a player has, across every attempt, before the run is
+over without completing. Optional, and like `survive_seconds` it is converted
+to frames at `game.framerate` at load. A challenge that says nothing takes the
+lobby's default limit, so every run has one; a challenge that knows its stage
+— Doom's E1M1 has a par of 30 s and a two-minute limit — can say so.
+
+```toml
+limit_seconds = 120
+```
+
+It must be positive, and on a survival challenge it may not be shorter than the
+`survive_seconds` the criteria ask for, since that run would be over before it
+could complete.
+
+### The bound
+
+Every run is bounded, and ADR 0017's failure bound is now settled in two
+halves. **What ends a run that is not completing** is the per-challenge limit
+above (this field, else the lobby's default) plus a give-up: a player may
+forfeit at any time. **Who enforces it** is the session, not the manifest and
+not the adapter: `challenge-core`'s `Run` takes a frame limit and a forfeit as
+arguments (ADR 0023), and the session feeds it the limit it resolved. A run
+that hits either is not complete, and places behind every completed run. ADR
+0026, being written alongside the client, records the policy — how a
+non-completed run counts in a total, and how a match reads the result.
+
+This is the field ADR 0023 deferred until something enforced it. The schema
+gains it now because the session that applies it exists in the same change.
 
 ---
 
@@ -980,11 +1037,12 @@ own rules for when a run may complete and what breaking it costs. ADR 0025
 defers it until a challenge needs it and the detectors it would read have been
 playtested for misses.
 
-**Scoring.** `[[challenge]]` says what completes a run. Nothing here says what a
-completed run was *worth* — no points, no ranking, no comparison between
-players, no verdict on a run that ended without completing. Manifests report
-facts and declare criteria; `challenge-core` compares one against the other
-(ADR 0017).
+**Scoring.** `[[challenge]]` says what completes a run, and `limit_seconds`
+says how long one may take. Nothing here says what a completed run was *worth*
+— no points, no ranking, no comparison between players, no verdict on a run
+that ended without completing. Manifests report facts and declare criteria;
+`challenge-core` compares one against the other (ADR 0017), and what a match
+makes of the result is ADR 0026's.
 
 **Pointer indirection.** A rule names an address; it cannot follow one. This was
 confirmed impossible *and* unnecessary for DOS: a DOS/4GW program's internal

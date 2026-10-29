@@ -7,9 +7,10 @@ Solo developer. Windows targets. Vertical slice = SMB3 (NES), DKC (SNES), Doom (
 
 ## Challenges
 
-A session runs in one of three modes — time trial, survival, or both — and deals
-a randomised series of challenges from the library. Three words, used precisely
-(ADR 0017):
+A **match** — what ADR 0009 calls a session; the `session-*` crates mean one
+running stage — runs in one of three modes — time trial, survival, or both —
+and deals a randomised series of challenges from the library. Three words,
+used precisely (ADR 0017):
 
 - **stage** — a place, and the entry point that reaches it.
 - **challenge** — what a player is dealt: one stage, one kind, and the criteria
@@ -32,8 +33,9 @@ inferred from a stage: 100 levels as time trials is 100 `[[challenge]]` entries,
 and 200 if they should also be survival runs. Completion criteria are a closed
 predicate set over facts the same manifest emits — never code, never arithmetic.
 
-Neither kind has a failure bound yet, and one is owed before either ships; see
-ADR 0017.
+Every run is bounded: a manifest may hint a `limit_seconds`, the lobby supplies
+a default otherwise, and a run that does not complete costs the full limit in
+any total (ADR 0026).
 
 Either kind may run on **vanilla** content (a stage as it originally shipped), on
 a **hack** (content a contributor authored in a level editor, carried as a BPS
@@ -210,26 +212,25 @@ Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
 What is *not* done, and the next things to settle:
 
-- **`challenge-core` judges a run, but nothing runs a session yet.** It
-  compares `SessionEvent`s against `complete_when`, re-enters a time trial on
-  death, deals a session's challenges from a seed, and places the players of
-  one challenge — and the harness drives it (`--challenge`, `--limit`). The
-  rules it judges by are ADR 0023, still `Proposed`. `challenge-library` reads
-  the challenge half of every manifest without an emulator, so the server that
-  will deal and judge has what it needs to read (ADR 0009/0024). Still owed:
-  - *the bound's policy.* A run takes a frame limit and a forfeit; how long,
-    and whether per challenge or per round, is the session's to decide.
-  - *scoring across challenges.* Ranking within one challenge is all the
-    documented rules say; points and totals are undecided.
-  - *the driver loop itself.* `session-fake` exists: a `StageRunner` that plays
-    a list of scripted attempts, one per entry, keeping the real runner's
-    contract (frame 1 first, `StageEntered` never seen, other content
-    refused). `crates/session-fake/tests/session.rs` deals sessions from the
-    real manifests and plays several players in lockstep, so the rules above
-    are tested end to end without a ROM. But the loop those tests drive with
-    — enter, advance, observe, re-enter — is test code, and so is what it
-    does when a runner fails (forfeit). It belongs to `app-client`, and moves
-    there when that crate exists.
+- **`challenge-core` judges a run and scores a match, but nothing runs one
+  yet.** It compares `SessionEvent`s against `complete_when`, re-enters a time
+  trial on death, deals an open-ended series from a seed (`Dealer`), places the
+  players of one challenge, and folds those places into a match (`Match`):
+  four formats, three mode standings, elimination, and a bound on every run.
+  The rules are ADR 0023 (per run) and ADR 0026 (per match); the harness
+  drives a run (`--challenge`, `--limit`, falling back to the manifest's
+  `limit_seconds`), and `crates/session-fake/tests/session.rs` plays whole
+  matches from the real manifests without a ROM. `challenge-library` reads the
+  challenge half of every manifest, plus what a lobby needs — genre, year,
+  goal text, which ROM a stage runs on — and a `Catalog` hashes a set of
+  manifests so a server and its clients can agree on one (ADR 0009). Still
+  owed:
+  - *the driver loop itself.* The loop the fake tests drive with — enter,
+    advance, observe, re-enter, and forfeit when a runner fails — is test
+    code. It belongs to `app-client`, and moves there when that crate exists
+    (ADR 0027, owed).
+  - *the lobby's default limit and the match seed* have no home: both come
+    from the server, which does not exist. The wire protocol is owed with it.
 - **`asset-store` will need to hash a bundle's members, not the container.** A
   DOS game is a zip, and its hash depends on how it was zipped (ADR 0018). That
   work also gates DOS hacks: a BPS patch against a zip is meaningless, so a PWAD

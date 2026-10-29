@@ -6,23 +6,30 @@
 //! `challenge-core` itself; the client half — enter, advance, re-enter — is
 //! [`play_together`] below, and the game is a [`FakeRunner`].
 //!
-//! Two choices here are the tests', not the platform's, and are not settled
-//! anywhere: every run is bounded by [`LIMIT`], and a runner that fails is a
-//! forfeit. Both are the session's to decide (ADR 0023).
+//! One choice here is the tests', not the platform's: a runner that fails is
+//! a forfeit. The bound is the match's (ADR 0026): every run takes the limit
+//! its [`Deal`] carries, and the single-challenge tests use [`LIMIT`] for it.
+//!
+//! The match tests at the end drive a [`Match`] the way the server will: deal,
+//! play every active player, record, until it is over.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use challenge_core::{deal, places, AttemptEnd, Ending, Mode, Next, Run, RunResult};
+use challenge_core::{
+    deal, places, AttemptEnd, Deal, Ending, Entry, Format, Match, Mode, Next, Run, RunResult,
+    Settings, Standing,
+};
 use challenge_library::Library;
 use session_api::{
-    ChallengeId, ChallengeKind, ChallengeSpec, Completion, ExitReason, GameId, StageId,
+    ChallengeId, ChallengeKind, ChallengeSpec, Completion, ExitReason, GameId, PlayerId, StageId,
     StageRunner, DAMAGED,
 };
 use session_fake::{stage_for, Attempt, FakeRunner};
 
-/// Every run's frame limit, across all its attempts.
+/// The frame limit of every run in the single-challenge tests, and the match
+/// tests' default limit.
 const LIMIT: u64 = 5_000;
 
 // ------------------------------------------------------------------- driver
@@ -61,12 +68,20 @@ impl Outcome {
 /// does — every client runs at its own pace — and nothing scored may depend on
 /// it, which `interleaving_players_changes_no_result` checks.
 fn play_together(challenge: &ChallengeSpec, players: Vec<(&str, Vec<Attempt>)>) -> Outcome {
+    play_within(challenge, players, LIMIT)
+}
+
+fn play_within(
+    challenge: &ChallengeSpec,
+    players: Vec<(&str, Vec<Attempt>)>,
+    limit: u64,
+) -> Outcome {
     let stage = stage_for(challenge);
     let mut seats: Vec<Seat> = players
         .into_iter()
         .map(|(player, attempts)| {
             let mut runner = FakeRunner::new(stage.clone(), attempts);
-            let mut run = Run::new(challenge.clone()).unwrap().with_limit(LIMIT);
+            let mut run = Run::new(challenge.clone()).unwrap().with_limit(limit);
             runner.enter(&stage).unwrap();
             run.enter();
             Seat { player: player.to_string(), runner, run, result: None }
@@ -357,4 +372,180 @@ fn survivors_tie_on_the_frame_they_survive_to() {
     assert_eq!(o.result("idle").frames, 2704);
     assert_eq!(o.result("late").ending, Ending::Failed(AttemptEnd::Died));
     assert_eq!(o.places(), [1, 1, 3]);
+}
+
+// ------------------------------------------------------------------ matches
+
+/// Each player's script, by name, for whatever challenge is dealt.
+fn script(player: &str, c: &ChallengeSpec) -> Vec<Attempt> {
+    match player {
+        "ace" => ace(c),
+        "steady" => steady(c),
+        "reckless" => reckless(c),
+        other => panic!("no script for {other}"),
+    }
+}
+
+fn pool() -> Vec<Entry> {
+    library().into_iter().map(|spec| Entry { spec, limit: None }).collect()
+}
+
+fn names(players: &[&str]) -> Vec<PlayerId> {
+    players.iter().map(|p| PlayerId(p.to_string())).collect()
+}
+
+/// Plays a whole match: deal, play every active player on the dealt
+/// challenge within its limit, record, until the match says it is over.
+/// Returns the match for its rounds and standings.
+fn play_match(players: &[&str], mode: Mode, format: Format, seed: u64) -> Match {
+    let settings = Settings { mode, format, default_limit: LIMIT };
+    let mut m = Match::new(pool(), names(players), settings, seed).unwrap();
+    while let Some(deal) = m.deal() {
+        let active: Vec<String> = m.active().into_iter().map(|p| p.0.clone()).collect();
+        let seats = active.iter().map(|p| (p.as_str(), script(p, &deal.challenge))).collect();
+        let outcome = play_within(&deal.challenge, seats, deal.limit);
+        let results = outcome.results.into_iter().map(|(p, r)| (PlayerId(p), r)).collect();
+        m.record(results);
+    }
+    m
+}
+
+fn standing(m: &Match, player: &str) -> Standing {
+    m.standings().into_iter().find(|s| s.player.0 == player).unwrap()
+}
+
+fn ranks(m: &Match) -> Vec<(String, u32)> {
+    m.standings().into_iter().map(|s| (s.player.0, s.rank)).collect()
+}
+
+/// Ten challenges from the real library, both kinds, three players: the
+/// default match. Every round reads every active player, and the standings
+/// come out in the order the scripts deserve.
+#[test]
+fn a_ten_challenge_match_on_the_library_stands_everyone() {
+    let m = play_match(&["ace", "steady", "reckless"], Mode::Both, Format::Challenges(10), 2026);
+    assert_eq!(m.rounds().len(), 10);
+    assert!(m.rounds().iter().all(|r| r.entries.len() == 3));
+    assert_eq!(ranks(&m), [("ace".into(), 1), ("steady".into(), 2), ("reckless".into(), 3)]);
+    let (ace, steady, reckless) =
+        (standing(&m, "ace"), standing(&m, "steady"), standing(&m, "reckless"));
+    assert!(ace.points > steady.points && steady.points > reckless.points);
+    assert_eq!(ace.completions, 10);
+    assert_eq!(reckless.completions, 0);
+    assert_eq!(reckless.points, 0);
+}
+
+/// A time-trial match is total frames, and a run that never completes costs
+/// the full limit every time.
+#[test]
+fn a_time_trial_match_totals_frames_and_a_timeout_costs_the_limit() {
+    let m = play_match(&["ace", "steady", "reckless"], Mode::TimeTrial, Format::Challenges(3), 7);
+    assert_eq!(m.rounds().len(), 3);
+    assert_eq!(standing(&m, "reckless").frames, 3 * LIMIT);
+    assert!(standing(&m, "ace").frames < standing(&m, "steady").frames);
+    assert_eq!(ranks(&m), [("ace".into(), 1), ("steady".into(), 2), ("reckless".into(), 3)]);
+    assert!(m.rounds().iter().all(|r| r.deal.limit == LIMIT));
+}
+
+/// A survival match counts completions, so two players who clear everything
+/// share first however fast either was.
+#[test]
+fn a_survival_match_counts_completions_and_ties_the_finishers() {
+    let m = play_match(&["ace", "steady", "reckless"], Mode::Survival, Format::Challenges(4), 11);
+    assert_eq!(ranks(&m), [("ace".into(), 1), ("steady".into(), 1), ("reckless".into(), 3)]);
+    assert_eq!(standing(&m, "steady").completions, 4);
+    assert_eq!(standing(&m, "reckless").failures, 4);
+    assert!(m.rounds().iter().all(|r| r.eliminated.is_empty()));
+}
+
+/// Stock: reckless fails the first challenge, loses their one life, and the
+/// other player is the last standing, so the match ends after one round.
+#[test]
+fn a_stock_match_ends_when_one_player_stands() {
+    let m = play_match(&["steady", "reckless"], Mode::Both, Format::Stock(1), 3);
+    assert_eq!(m.rounds().len(), 1);
+    assert_eq!(m.rounds()[0].eliminated, names(&["reckless"]));
+    assert!(m.is_over());
+    assert_eq!(ranks(&m), [("steady".into(), 1), ("reckless".into(), 2)]);
+    assert_eq!(standing(&m, "reckless").eliminated, Some(0));
+}
+
+/// Strikes: reckless is out after two consecutive failures and is dealt
+/// nothing after that, while the other two play on. Nothing else ends a
+/// strikes match between players who never fail, so the host ends it.
+#[test]
+fn a_strikes_match_stops_dealing_to_the_eliminated() {
+    let settings = Settings { mode: Mode::Survival, format: Format::Strikes(2), default_limit: LIMIT };
+    let mut m = Match::new(pool(), names(&["ace", "steady", "reckless"]), settings, 5).unwrap();
+    for _ in 0..4 {
+        let deal = m.deal().unwrap();
+        let active: Vec<String> = m.active().into_iter().map(|p| p.0.clone()).collect();
+        let seats = active.iter().map(|p| (p.as_str(), script(p, &deal.challenge))).collect();
+        let outcome = play_within(&deal.challenge, seats, deal.limit);
+        m.record(outcome.results.into_iter().map(|(p, r)| (PlayerId(p), r)).collect());
+    }
+    assert!(!m.is_over());
+    assert_eq!(m.rounds()[1].eliminated, names(&["reckless"]));
+    assert_eq!(m.rounds()[2].entries.len(), 2);
+    assert_eq!(m.rounds()[3].entries.len(), 2);
+    m.end();
+    assert!(m.is_over());
+    assert_eq!(ranks(&m), [("ace".into(), 1), ("steady".into(), 1), ("reckless".into(), 3)]);
+}
+
+/// Wins: ace is first on every time trial, so a first-to-three match is
+/// exactly three rounds long.
+#[test]
+fn a_wins_match_ends_on_the_round_the_count_is_reached() {
+    let m = play_match(&["ace", "steady", "reckless"], Mode::TimeTrial, Format::Wins(3), 9);
+    assert_eq!(m.rounds().len(), 3);
+    assert_eq!(standing(&m, "ace").wins, 3);
+    assert_eq!(standing(&m, "steady").wins, 0);
+    assert_eq!(ranks(&m), [("ace".into(), 1), ("steady".into(), 2), ("reckless".into(), 3)]);
+}
+
+/// The server and every client deal from the same seed, so the same seed
+/// must mean the same challenges, the same content seeds and the same
+/// standings everywhere.
+#[test]
+fn a_seed_means_the_same_match_everywhere() {
+    let dealt = |m: &Match| -> Vec<(String, u64, u64)> {
+        m.rounds().iter().map(|r| (r.deal.challenge.id.0.clone(), r.deal.seed, r.deal.limit)).collect()
+    };
+    let a = play_match(&["ace", "steady"], Mode::Both, Format::Challenges(8), 4242);
+    let b = play_match(&["ace", "steady"], Mode::Both, Format::Challenges(8), 4242);
+    assert_eq!(dealt(&a), dealt(&b));
+    assert_eq!(a.standings(), b.standings());
+    let c = play_match(&["ace", "steady"], Mode::Both, Format::Challenges(8), 4243);
+    assert_ne!(dealt(&a), dealt(&c));
+}
+
+/// The library today holds fewer than eight challenges of some kinds, so a
+/// longer match reshuffles: no challenge repeats within a deck, and the deck
+/// boundary never deals one twice running.
+#[test]
+fn a_long_match_reshuffles_without_dealing_one_twice_running() {
+    let m = play_match(&["ace"], Mode::TimeTrial, Format::Challenges(20), 1);
+    let ids: Vec<String> = m.rounds().iter().map(|r| r.deal.challenge.id.0.clone()).collect();
+    let deck = pool().iter().filter(|e| e.spec.kind == ChallengeKind::TimeTrial).count();
+    assert!(deck < 20, "the library grew; pick a longer match");
+    for chunk in ids.chunks(deck) {
+        let mut unique = chunk.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), chunk.len());
+    }
+    assert!(ids.windows(2).all(|w| w[0] != w[1]));
+}
+
+/// A deal names the round's limit and a content seed, which is what a client
+/// needs to prepare the stage before anyone counts down.
+#[test]
+fn every_deal_carries_a_limit_and_a_seed() {
+    let settings = Settings { mode: Mode::Both, format: Format::Challenges(1), default_limit: 60 };
+    let mut m = Match::new(pool(), names(&["ace"]), settings, 0).unwrap();
+    let deal: Deal = m.deal().unwrap();
+    assert_eq!(deal.index, 0);
+    assert_eq!(deal.limit, 60);
+    assert_eq!(m.pending(), Some(&deal));
 }

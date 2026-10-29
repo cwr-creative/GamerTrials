@@ -20,6 +20,8 @@ id = "doom"
 title = "DOOM (shareware)"
 console = "dos"
 region = "usa"
+genre = "fps"
+year = 1993
 # VGA's own refresh, which is what the core reports with
 # `dosbox_pure_force60fps` off: 70.0866 Hz in the 320x200 mode DOOM draws in,
 # and in the text mode DOS boots in. Not a constant of the machine the way
@@ -47,8 +49,13 @@ header = "none"
 #   DOOM.EXE    sha1 aa0668fae2f743ee5e3e5634ee42d3c8ace7d907
 #   DOOM1.WAD   sha1 5b2e249b9c5133ec987b3ea77596381dc0d6bc1d
 #   DEFAULT.CFG sha1 f193767bde9b9b36a27d14d23780b27db79a74e3
-# The archive's own sha1 depends on how it was zipped, so `sha1` is left unset
-# until asset-store can hash the members rather than the container (ADR 0018).
+# The archive's own sha1 depends on how it was zipped, so the hash that should
+# identify this bundle is the members'. Until asset-store hashes members rather
+# than the container (ADR 0018), the container's hash stands in: this is the
+# sha1 of assets/ROMs/dos/doom-shareware-e1m1.zip as zipped in this repository,
+# the bundle the entry state was captured on. Re-zipping it changes this value
+# without changing the game.
+sha1 = "6228b659d80e700c2f34e9139464acc372ce0adc"
 #
 # DEFAULT.CFG is what makes the game audible. DOOM takes its sound card from
 # that file, SETUP.EXE normally writes it, and without one both devices default
@@ -331,6 +338,10 @@ entry = { state = "assets/states/doom_e1m1.state" }
 # Ordinary [[challenge]] entries, unchanged in every respect from the console
 # manifests. That is the point of the whole exercise: a DOS game needed four
 # additions to the *runner* half of the schema and nothing at all here.
+#
+# `limit_seconds` is the run's bound. Par is 30 s and a wandering first-timer
+# takes a minute or two, so two minutes is generous without letting a stalled
+# run hold a match; a challenge that says nothing gets the lobby's default.
 
 [[challenge]]
 id = "e1m1-time-trial"
@@ -338,6 +349,7 @@ name = "E1M1: Hangar"
 stage = "e1m1-hangar"
 kind = "time_trial"
 complete_when = { cleared = true }
+limit_seconds = 120
 note = "a human reached the exit in ~19 s without hurrying; par is around 30 s"
 
 [[challenge]]
@@ -346,3 +358,4 @@ name = "E1M1: Hangar"
 stage = "e1m1-hangar"
 kind = "survival"
 complete_when = { cleared = true }
+limit_seconds = 120

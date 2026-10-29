@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::*;
 
-/// No `[runner]`, no `[watch]`, no `[[rom]]` and no entry state: the whole of
+/// No `[runner]`, no `[watch]`, no ROM file and no entry state: the whole of
 /// what a server can see of a game. A manifest this crate parses cannot be
 /// loaded by `session-libretro`, and that is the point of the fixtures here.
 const MINIMAL: &str = r#"
@@ -12,6 +12,8 @@ id = "t"
 title = "Test"
 console = "nes"
 framerate = 60.0
+[[rom]]
+id = "base"
 "#;
 
 /// A stage, and a rule that can clear it. `field` and `edge` are the runner's
@@ -23,6 +25,7 @@ edge = "increases"
 emit = "stage_cleared"
 [[stage]]
 id = "s"
+rom = "base"
 "#;
 
 fn with_challenge(body: &str) -> Result<Library, String> {
@@ -43,11 +46,14 @@ fn the_version_is_checked_before_the_shape() {
     assert!(Library::parse(text).unwrap_err().contains("schema_version"));
 }
 
-/// The runner half is someone else's: it is neither required nor read.
+/// The runner half is someone else's: it is neither required nor read. That
+/// includes the rest of a `[[rom]]` — a path, a patch, a hash — which this
+/// crate must not learn (ADR 0020).
 #[test]
 fn the_runner_half_is_ignored() {
     let text = format!(
-        "{MINIMAL}{CLEARABLE}rom = \"base\"\nentry = {{ state = \"a.state\" }}\n\
+        "{MINIMAL}path = \"a.nes\"\nheader = \"ines\"\nmin_bytes = 1\n\
+         {CLEARABLE}entry = {{ state = \"a.state\" }}\n\
          [runner]\nkind = \"anything\"\n[watch.lives]\nat = 0x0736\n\
          [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
          complete_when = {{ cleared = true }}\n"
@@ -151,7 +157,7 @@ fn two_challenges_cannot_share_an_id() {
 
 #[test]
 fn two_stages_cannot_share_an_id() {
-    let text = format!("{MINIMAL}{CLEARABLE}[[stage]]\nid = \"s\"\n");
+    let text = format!("{MINIMAL}{CLEARABLE}[[stage]]\nid = \"s\"\nrom = \"base\"\n");
     assert!(Library::parse(&text).unwrap_err().contains("declared twice"));
 }
 
@@ -167,7 +173,7 @@ fn a_challenge_with_no_criteria_is_refused() {
 #[test]
 fn a_criterion_over_a_fact_nothing_emits_is_refused() {
     let text = format!(
-        "{MINIMAL}\n[[stage]]\nid = \"s\"\n\
+        "{MINIMAL}\n[[stage]]\nid = \"s\"\nrom = \"base\"\n\
          [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
          complete_when = {{ cleared = true }}\n"
     );
@@ -405,24 +411,447 @@ fn a_generator_version_with_nothing_to_roll_is_refused() {
     assert!(e.contains("nothing is generated"), "{e}");
 }
 
+// ------------------------------------------------------- roms and stages (0020)
+
+/// What this crate reads of a `[[rom]]`: a name, and whether it is derived.
+#[test]
+fn a_stage_knows_which_rom_it_runs_on() {
+    let text = format!(
+        "{MINIMAL}name = \"The Dump\"\n\
+         [[rom]]\nid = \"hack\"\nname = \"A Hack Of It\"\nfrom = \"base\"\npatch = \"a.bps\"\n\
+         {CLEARABLE}\
+         [[stage]]\nid = \"h\"\nrom = \"hack\"\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    assert!(!lib.rom("base").unwrap().derived);
+    assert_eq!(lib.rom("base").unwrap().name, "The Dump");
+    assert!(lib.rom("hack").unwrap().derived);
+    assert_eq!(lib.rom_of(&StageId("h".into())).unwrap().name, "A Hack Of It");
+    assert_eq!(lib.stage("s").unwrap().rom, "base");
+}
+
+#[test]
+fn a_stage_naming_an_undeclared_rom_is_refused() {
+    let text = format!("{MINIMAL}{CLEARABLE}").replace("rom = \"base\"", "rom = \"hack\"");
+    let e = Library::parse(&text).unwrap_err();
+    assert!(e.contains("stage `s`") && e.contains("rom `hack`"), "{e}");
+}
+
+#[test]
+fn a_stage_without_a_rom_is_refused() {
+    let text = format!("{MINIMAL}{CLEARABLE}").replace("rom = \"base\"\n", "");
+    assert!(Library::parse(&text).unwrap_err().contains("rom"));
+}
+
+/// Which ROM is the base, and that there is one, is the runner's rule to
+/// enforce: this crate does not pretend to, so the two loaders cannot refuse
+/// the same manifest with two different messages.
+#[test]
+fn how_many_roms_are_the_base_is_not_this_crates_business() {
+    let text = format!("{MINIMAL}[[rom]]\nid = \"other\"\n{CLEARABLE}");
+    assert_eq!(Library::parse(&text).unwrap().roms.len(), 2);
+}
+
+// ------------------------------------------- custom challenges and titles
+
+const HACKED: &str = "[[rom]]\nid = \"hack\"\nname = \"A Hack Of It\"\nfrom = \"base\"\n\
+                      [[stage]]\nid = \"h\"\nrom = \"hack\"\n";
+
+/// Custom means "not the game as it shipped": generated content, or a stage
+/// on a hack. The lobby's toggle filters on this and nothing else.
+#[test]
+fn a_challenge_on_a_hack_or_a_roll_is_custom() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{HACKED}\
+         [[challenge]]\nid = \"plain\"\nstage = \"s\"\nkind = \"survival\"\n\
+         complete_when = {{ cleared = true }}\n\
+         [[challenge]]\nid = \"hacked\"\nstage = \"h\"\nkind = \"survival\"\n\
+         complete_when = {{ cleared = true }}\n\
+         [[challenge]]\nid = \"rolled\"\nstage = \"s\"\nkind = \"survival\"\n\
+         complete_when = {{ cleared = true }}\ngenerator_version = 1\n\
+         [[challenge.patch_slot]]\noffset = 0x10\nwidth = \"u8\"\nvalues = {{ pool = [1] }}\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    assert!(!lib.challenge("plain").unwrap().is_custom());
+    assert!(lib.challenge("hacked").unwrap().is_custom());
+    assert!(lib.challenge("rolled").unwrap().is_custom());
+}
+
+/// A hack has its own title, and `[game].title` is the base game's (ADR 0020).
+#[test]
+fn a_challenge_on_a_hack_is_titled_by_the_hack() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{HACKED}\
+         [[challenge]]\nid = \"plain\"\nstage = \"s\"\nkind = \"survival\"\n\
+         complete_when = {{ cleared = true }}\n\
+         [[challenge]]\nid = \"hacked\"\nstage = \"h\"\nkind = \"survival\"\n\
+         complete_when = {{ cleared = true }}\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    assert_eq!(lib.challenge("plain").unwrap().display_title(&lib), "Test");
+    assert_eq!(lib.challenge("hacked").unwrap().display_title(&lib), "A Hack Of It");
+}
+
+// -------------------------------------------------------------- goal text
+
+/// The contributor's own words win, verbatim.
+#[test]
+fn an_authored_goal_is_shown_as_written() {
+    let lib = with_challenge(
+        "id = \"c\"\nkind = \"survival\"\ncomplete_when = { cleared = true }\n\
+         goal = \"Get to the flag!\"\n",
+    )
+    .unwrap();
+    let c = lib.challenge("c").unwrap();
+    assert_eq!(c.goal.as_deref(), Some("Get to the flag!"));
+    assert_eq!(c.goal_text(), "Get to the flag!");
+}
+
+/// Without one, a goal is composed from the criteria: one phrase each, in a
+/// fixed order, named as the manifest names them.
+#[test]
+fn a_goal_is_composed_from_the_criteria_when_none_is_written() {
+    let rules = "[[rule]]\nfield = \"x\"\nedge = \"increases\"\nemit = \"enemy_defeated\"\n\
+                 [[rule]]\nfield = \"y\"\nedge = \"increases\"\nemit = \"item\"\nitem = \"coin\"\n\
+                 [[rule]]\nfield = \"b\"\nedge = \"enters\"\nvalue = 0\n\
+                 emit = \"objective\"\nobjective = \"boss-defeated\"\n";
+    let challenge = |id: &str, body: &str| {
+        format!("[[challenge]]\nid = \"{id}\"\nstage = \"s\"\n{body}\n")
+    };
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{NOTES}{rules}{}{}{}{}{}{}",
+        challenge("end", "kind = \"survival\"\ncomplete_when = { cleared = true }"),
+        challenge("sv", "kind = \"survival\"\ncomplete_when = { survive_seconds = 45 }"),
+        challenge("one", "kind = \"time_trial\"\ncomplete_when = { enemies_defeated = 1 }"),
+        challenge("many", "kind = \"time_trial\"\ncomplete_when = { enemies_defeated = 5 }"),
+        challenge(
+            "all",
+            "kind = \"time_trial\"\n[challenge.complete_when]\ncleared = true\n\
+             items_collected = { coin = 10 }\ncounts = { note = 20 }\n\
+             objectives = [\"boss-defeated\"]",
+        ),
+        challenge("boss", "kind = \"time_trial\"\ncomplete_when = { objectives = [\"boss-defeated\"] }"),
+    );
+    let lib = Library::parse(&text).unwrap();
+    let goal = |id: &str| lib.challenge(id).unwrap().goal_text();
+    assert_eq!(goal("end"), "Reach the end!");
+    assert_eq!(goal("sv"), "Survive for 45 seconds!");
+    assert_eq!(goal("one"), "Defeat 1 enemy!");
+    assert_eq!(goal("many"), "Defeat 5 enemies!");
+    assert_eq!(goal("all"), "Reach the end and Collect 10 coin and Reach 20 note and Reach boss-defeated!");
+    assert_eq!(goal("boss"), "Reach boss-defeated!");
+    assert!(lib.challenge("end").unwrap().goal.is_none());
+}
+
+/// Taking hits is not a goal anyone is set, so a `damaged` count composes no
+/// phrase — and a challenge made of nothing else still shows something.
+#[test]
+fn a_damaged_count_composes_no_phrase() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}{HITS}\
+         [[challenge]]\nid = \"c\"\nstage = \"s\"\nkind = \"survival\"\n\
+         complete_when = {{ cleared = true, counts = {{ damaged = 3 }} }}\n\
+         [[challenge]]\nid = \"only\"\nstage = \"s\"\nkind = \"survival\"\n\
+         complete_when = {{ counts = {{ damaged = 3 }} }}\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    assert_eq!(lib.challenge("c").unwrap().goal_text(), "Reach the end!");
+    assert_eq!(lib.challenge("only").unwrap().goal_text(), "Complete the challenge!");
+}
+
+// ------------------------------------------------------------ the bound
+
+/// Authored in seconds, stored in frames, like every other duration.
+#[test]
+fn a_limit_is_stored_in_frames() {
+    let lib = with_challenge(
+        "id = \"c\"\nkind = \"time_trial\"\ncomplete_when = { cleared = true }\n\
+         limit_seconds = 120\n",
+    )
+    .unwrap();
+    assert_eq!(lib.challenge("c").unwrap().limit_frames, Some(7200));
+
+    let lib = with_challenge("id = \"c\"\nkind = \"time_trial\"\ncomplete_when = { cleared = true }\n")
+        .unwrap();
+    assert_eq!(lib.challenge("c").unwrap().limit_frames, None);
+}
+
+#[test]
+fn a_limit_must_be_positive() {
+    for bad in ["0", "-5", "inf", "nan"] {
+        let e = with_challenge(&format!(
+            "id = \"c\"\nkind = \"time_trial\"\ncomplete_when = {{ cleared = true }}\n\
+             limit_seconds = {bad}\n"
+        ))
+        .unwrap_err();
+        assert!(e.contains("limit_seconds"), "{bad}: {e}");
+    }
+}
+
+/// A limit shorter than the survival the criteria ask for is a run that is
+/// over before it can complete.
+#[test]
+fn a_limit_shorter_than_the_survival_is_refused() {
+    let e = with_challenge(
+        "id = \"c\"\nkind = \"survival\"\ncomplete_when = { survive_seconds = 45 }\n\
+         limit_seconds = 30\n",
+    )
+    .unwrap_err();
+    assert!(e.contains("shorter than survive_seconds"), "{e}");
+
+    let ok = with_challenge(
+        "id = \"c\"\nkind = \"survival\"\ncomplete_when = { survive_seconds = 45 }\n\
+         limit_seconds = 45\n",
+    );
+    assert!(ok.is_ok(), "{ok:?}");
+}
+
+// ------------------------------------------------------------- the game
+
+#[test]
+fn genre_and_year_are_optional_and_read() {
+    let lib = Library::parse(MINIMAL).unwrap();
+    assert_eq!(lib.game.genre, None);
+    assert_eq!(lib.game.year, None);
+
+    let text = MINIMAL.replace("console = \"nes\"", "console = \"nes\"\ngenre = \"platformer\"\nyear = 1990");
+    let lib = Library::parse(&text).unwrap();
+    assert_eq!(lib.game.genre.as_deref(), Some("platformer"));
+    assert_eq!(lib.game.year, Some(1990));
+}
+
+// --------------------------------------------------------------- catalog
+
+const SECOND: &str = r#"
+schema_version = 3
+[game]
+id = "u"
+title = "Other"
+console = "snes"
+genre = "racing"
+year = 1985
+framerate = 60.0
+[[rom]]
+id = "base"
+[[rule]]
+field = "lives"
+edge = "increases"
+emit = "stage_cleared"
+[[stage]]
+id = "s"
+rom = "base"
+[[challenge]]
+id = "u-run"
+stage = "s"
+kind = "time_trial"
+complete_when = { cleared = true }
+"#;
+
+fn first() -> String {
+    format!(
+        "{MINIMAL}{CLEARABLE}\
+         [[challenge]]\nid = \"t-run\"\nstage = \"s\"\nkind = \"time_trial\"\n\
+         complete_when = {{ cleared = true }}\n"
+    )
+}
+
+/// The hash is over the texts in game-id order: the same files read in any
+/// order agree, and one changed byte does not.
+#[test]
+fn the_catalog_hash_is_order_independent_and_text_sensitive() {
+    let a = Catalog::parse_all(&[&first(), SECOND]).unwrap();
+    let b = Catalog::parse_all(&[SECOND, &first()]).unwrap();
+    assert_eq!(a.hash(), b.hash());
+    assert_eq!(a.games().iter().map(|l| l.game.id.0.as_str()).collect::<Vec<_>>(), ["t", "u"]);
+
+    let edited = SECOND.replace("year = 1985", "year = 1986");
+    let c = Catalog::parse_all(&[&first(), &edited]).unwrap();
+    assert_ne!(a.hash(), c.hash());
+
+    // Line endings are not content: a checkout that rewrote them still agrees.
+    let crlf = SECOND.replace('\n', "\r\n");
+    let d = Catalog::parse_all(&[&first(), &crlf]).unwrap();
+    assert_eq!(a.hash(), d.hash());
+}
+
+#[test]
+fn the_catalog_finds_a_challenge_by_id_alone() {
+    let cat = Catalog::parse_all(&[&first(), SECOND]).unwrap();
+    let (lib, c) = cat.challenge(&ChallengeId("u-run".into())).unwrap();
+    assert_eq!(lib.game.id.0, "u");
+    assert_eq!(c.id.0, "u-run");
+    assert!(cat.challenge(&ChallengeId("nope".into())).is_none());
+    assert_eq!(cat.challenges().count(), 2);
+    assert_eq!(cat.game("t").unwrap().game.title, "Test");
+}
+
+/// A dealt challenge is named by its id alone, so one id cannot mean two
+/// challenges — and two manifests cannot claim one game.
+#[test]
+fn the_catalog_refuses_an_id_used_twice() {
+    let clash = SECOND.replace("id = \"u-run\"", "id = \"t-run\"");
+    let e = Catalog::parse_all(&[&first(), &clash]).unwrap_err();
+    assert!(e.contains("challenge `t-run`"), "{e}");
+
+    let e = Catalog::parse_all(&[&first(), &first()]).unwrap_err();
+    assert!(e.contains("game `t`"), "{e}");
+}
+
+#[test]
+fn a_manifest_that_does_not_parse_is_named_by_position() {
+    let e = Catalog::parse_all(&[&first(), "schema_version = 9\n"]).unwrap_err();
+    assert!(e.starts_with("manifest #2"), "{e}");
+}
+
+#[test]
+fn games_are_grouped_by_era_genre_or_console() {
+    let cat = Catalog::parse_all(&[&first(), SECOND]).unwrap();
+    let names = |g: Vec<(String, Vec<&Library>)>| -> Vec<(String, Vec<String>)> {
+        g.into_iter()
+            .map(|(k, v)| (k, v.iter().map(|l| l.game.id.0.clone()).collect()))
+            .collect()
+    };
+    assert_eq!(
+        names(cat.grouping(Grouping::Era)),
+        [("1980s".to_string(), vec!["u".to_string()]), ("unknown".into(), vec!["t".into()])]
+    );
+    assert_eq!(
+        names(cat.grouping(Grouping::Genre)),
+        [("racing".to_string(), vec!["u".to_string()]), ("uncategorised".into(), vec!["t".into()])]
+    );
+    assert_eq!(
+        names(cat.grouping(Grouping::Console)),
+        [("nes".to_string(), vec!["t".to_string()]), ("snes".into(), vec!["u".into()])]
+    );
+}
+
 // --------------------------------------------------------- shipped manifests
 
-/// Every shipped manifest yields a library on its own, with no emulator, no
-/// ROM and no runner — which is what a server has.
-#[test]
-fn every_shipped_manifest_parses_without_its_runner() {
+fn shipped() -> Vec<(String, String)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
-    let mut seen = 0;
+    let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).unwrap();
-        let lib = Library::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert!(!lib.challenges.is_empty(), "{} offers no challenges", path.display());
+        out.push((path.display().to_string(), std::fs::read_to_string(&path).unwrap()));
+    }
+    out
+}
+
+/// Every shipped manifest yields a library on its own, with no emulator, no
+/// ROM and no runner — which is what a server has.
+#[test]
+fn every_shipped_manifest_parses_without_its_runner() {
+    let mut seen = 0;
+    for (path, text) in shipped() {
+        let lib = Library::parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(!lib.challenges.is_empty(), "{path} offers no challenges");
         assert_eq!(lib.specs().len(), lib.challenges.len());
         seen += 1;
     }
     assert!(seen >= 3, "expected the three slice manifests, found {seen}");
+}
+
+fn shipped_catalog() -> Catalog {
+    let texts = shipped();
+    Catalog::parse_all(&texts.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>()).unwrap()
+}
+
+/// The exact goal every shipped challenge shows, authored or composed. A
+/// change here is a change to what a player reads in the intro.
+#[test]
+fn every_shipped_challenge_has_the_goal_it_should() {
+    let cat = shipped_catalog();
+    let goal = |id: &str| cat.challenge(&ChallengeId(id.into())).unwrap().1.goal_text();
+    // SMB3
+    for id in ["1-1-time-trial", "1-1-survival", "1-2-time-trial", "1-2-survival",
+               "1-3-time-trial", "1-3-survival", "1-4-survival"] {
+        assert_eq!(goal(id), "Reach the end!", "{id}");
+    }
+    assert_eq!(goal("1-1-stomp-rush"), "Stomp five enemies!");
+    assert_eq!(goal("sun-storm-survival"), "Reach the end under the Angry Suns!");
+    assert_eq!(goal("sun-storm-time-trial"), "Reach the end under the Angry Suns!");
+    assert_eq!(goal("bro-roulette-time-trial"), "Kill all four enemies, by any means!");
+    assert_eq!(goal("bro-roulette-survival"), "Kill all four enemies, by any means!");
+    // DKC
+    for id in ["jungle-hijinx-time-trial", "jungle-hijinx-survival", "reptile-rumble-time-trial",
+               "reptile-rumble-survival", "ropey-rampage-time-trial", "ropey-rampage-survival",
+               "barrel-cannon-canyon-time-trial", "barrel-cannon-canyon-survival",
+               "coral-capers-time-trial", "coral-capers-survival", "mine-cart-carnage-survival"] {
+        assert_eq!(goal(id), "Reach the end!", "{id}");
+    }
+    assert_eq!(goal("mine-cart-carnage-45s"), "Stay in the cart for 45 seconds!");
+    assert_eq!(goal("jungle-hijinx-kong"), "Collect K, O, N and G, then reach the end!");
+    assert_eq!(goal("reptile-roulette"), "Reach the end through a room full of reptiles!");
+    // Doom
+    assert_eq!(goal("e1m1-time-trial"), "Reach the end!");
+    assert_eq!(goal("e1m1-survival"), "Reach the end!");
+}
+
+/// E1M1 carries its own bound; everything else takes the lobby's default.
+#[test]
+fn only_doom_e1m1_declares_a_limit() {
+    let cat = shipped_catalog();
+    for (lib, c) in cat.challenges() {
+        let expected = if lib.game.id.0 == "doom" { Some(8410) } else { None };
+        assert_eq!(c.limit_frames, expected, "{}", c.id.0);
+    }
+}
+
+#[test]
+fn the_custom_challenges_are_the_rolls_and_the_hack() {
+    let cat = shipped_catalog();
+    let custom: Vec<&str> = cat
+        .challenges()
+        .filter(|(_, c)| c.is_custom())
+        .map(|(_, c)| c.id.0.as_str())
+        .collect();
+    assert_eq!(
+        custom,
+        ["reptile-roulette", "sun-storm-survival", "sun-storm-time-trial",
+         "bro-roulette-time-trial", "bro-roulette-survival"]
+    );
+    assert!(!cat.challenge(&ChallengeId("1-1-time-trial".into())).unwrap().1.is_custom());
+}
+
+/// A hack is shown under its own name, and the base game under the game's.
+#[test]
+fn the_hack_stages_are_titled_by_the_hack() {
+    let cat = shipped_catalog();
+    let title = |id: &str| {
+        let (lib, c) = cat.challenge(&ChallengeId(id.into())).unwrap();
+        c.display_title(lib)
+    };
+    assert_eq!(title("sun-storm-survival"), "SMB3: Gamer Trials");
+    assert_eq!(title("bro-roulette-time-trial"), "SMB3: Gamer Trials");
+    assert_eq!(title("1-1-time-trial"), "Super Mario Bros. 3");
+    assert_eq!(title("reptile-roulette"), "Donkey Kong Country");
+    assert_eq!(title("e1m1-survival"), "DOOM (shareware)");
+}
+
+#[test]
+fn the_shipped_games_group_as_the_lobby_will_show_them() {
+    let cat = shipped_catalog();
+    let ids = |g: Vec<(String, Vec<&Library>)>| -> Vec<(String, Vec<String>)> {
+        g.into_iter()
+            .map(|(k, v)| (k, v.iter().map(|l| l.game.id.0.clone()).collect()))
+            .collect()
+    };
+    assert_eq!(
+        ids(cat.grouping(Grouping::Era)),
+        [("1990s".to_string(), vec!["dkc".to_string(), "doom".into(), "smb3".into()])]
+    );
+    assert_eq!(
+        ids(cat.grouping(Grouping::Genre)),
+        [("fps".to_string(), vec!["doom".to_string()]),
+         ("platformer".into(), vec!["dkc".into(), "smb3".into()])]
+    );
+    assert_eq!(
+        ids(cat.grouping(Grouping::Console)),
+        [("dos".to_string(), vec!["doom".to_string()]),
+         ("nes".into(), vec!["smb3".into()]),
+         ("snes".into(), vec!["dkc".into()])]
+    );
 }

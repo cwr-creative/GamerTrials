@@ -1,7 +1,7 @@
 # 0023. Judge a run per attempt, end an attempt at a death, and let the session bound it
 
 Date: 2026-10-09
-Status: Proposed
+Status: Proposed. Policy settled by 0026.
 
 ## Context
 

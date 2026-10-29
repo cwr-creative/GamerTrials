@@ -9,6 +9,8 @@
 //!   worth.
 //! * [`deal`] — which challenges a session plays, in what order.
 //! * [`rank`] — how the players who ran one challenge place against each other.
+//! * [`matches`] — a series of challenges: what each round was worth, who is
+//!   out, who stands where, and when it is over (ADR 0026).
 //!
 //! Pure (invariant 1). Nothing here reads a file, a clock or a socket, and
 //! nothing here drives a [`StageRunner`](session_api::StageRunner): a run is
@@ -19,9 +21,11 @@
 #![forbid(unsafe_code)]
 
 pub mod deal;
+pub mod matches;
 pub mod rank;
 pub mod run;
 
-pub use deal::{deal, DealError, Mode};
+pub use deal::{deal, DealError, Dealer, Dealt, Mode};
+pub use matches::{Deal, Entry, Format, Match, MatchError, Round, RoundEntry, Settings, Standing};
 pub use rank::places;
 pub use run::{AttemptEnd, Ending, Next, Run, RunError, RunResult};

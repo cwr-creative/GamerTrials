@@ -67,8 +67,9 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0023 | Judge a run per attempt, end an attempt at a death, and let the session bound it | Proposed |
 | 0024 | Write the server in Rust, superseding 0011 | Accepted |
 | 0025 | Widen the challenge vocabulary additively, and let a challenge name facts that cost a life | Accepted |
+| 0026 | Score a match on placements, bound every run, and deal an open-ended series | Accepted |
 
-0003, 0009, 0013, 0014, 0015, 0016, 0017, 0018, 0019, 0020, 0023, 0024 and 0025 are written up; 0003 is
+0003, 0009, 0013, 0014, 0015, 0016, 0017, 0018, 0019, 0020, 0023, 0024, 0025 and 0026 are written up; 0003 is
 the exemplar. Fill in the rest as you implement each area; an unwritten ADR is
 fine, a wrong one is not.
 
