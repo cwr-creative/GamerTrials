@@ -54,7 +54,7 @@ pub fn window_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
 impl Overlay {
     pub fn create(app: &AppHandle, game: isize) -> Result<Overlay, Box<dyn std::error::Error>> {
         let (x, y, w, h) = client_rect(game).ok_or("cannot read the game window's rect")?;
-        let window = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("index.html".into()))
+        let window = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("overlay.html".into()))
             .title("GamerTrials")
             .transparent(true)
             .decorations(false)
@@ -84,6 +84,14 @@ impl Overlay {
     /// Whether the mouse goes through the overlay to the game window.
     pub fn set_passthrough(&self, on: bool) -> tauri::Result<()> {
         self.window.set_ignore_cursor_events(on)
+    }
+
+    /// Brings the overlay to the front, for when it has buttons to click.
+    pub fn focus(&self) {
+        unsafe {
+            winapi::um::winuser::SetForegroundWindow(self.hwnd as HWND);
+        }
+        let _ = self.window.set_focus();
     }
 
     pub fn emit(&self, payload: serde_json::Value) {

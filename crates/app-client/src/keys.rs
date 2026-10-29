@@ -33,9 +33,17 @@ const VK_RCONTROL: i32 = 0xA3;
 const VK_LMENU: i32 = 0xA4;
 const VK_RMENU: i32 = 0xA5;
 
-fn down(vk: i32) -> bool {
+pub fn down(vk: i32) -> bool {
     // High bit set: the key is down now.
     unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
+}
+
+/// Down now, or pressed and released since the last poll: for a key read as
+/// an edge once per frame, where a tap shorter than a frame would otherwise
+/// fall between two polls. The low bit is documented as unreliable across
+/// processes and is only ever an extra chance here, never the only one.
+pub fn tapped(vk: i32) -> bool {
+    unsafe { (GetAsyncKeyState(vk) as u16 & 0x8001) != 0 }
 }
 
 /// Whether one of `ours` is the foreground window.

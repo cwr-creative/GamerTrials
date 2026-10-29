@@ -3,11 +3,7 @@ name = "app-client"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-publish = false
-build = "build.rs"
-
-# The Tauri shell (ADR 0024, ADR 0027). Rust owns the game window and the
-# emulator; the webview is a transparent overlay over it, and every menu.
+description = "The GamerTrials client: a native game window under a transparent Tauri overlay (ADR 0027)."
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -17,6 +13,11 @@ session-api = { path = "../session-api" }
 session-libretro = { path = "../session-libretro" }
 challenge-core = { path = "../challenge-core" }
 challenge-library = { path = "../challenge-library" }
+protocol = { path = "../protocol" }
+# Solo play runs the server's half in-process (ADR 0009): the same crate a
+# remote server will run, over a channel instead of a socket.
+server = { path = "../server" }
+asset-store = { path = "../asset-store" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

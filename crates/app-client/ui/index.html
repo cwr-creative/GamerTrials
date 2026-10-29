@@ -2,129 +2,272 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>GamerTrials overlay</title>
+<title>GamerTrials</title>
 <style>
-  /* The page is a transparent sheet over the game window. Everything on it is
-     a placeholder: crude, but it animates on and off the way the final assets
-     will, so swapping one in is a matter of replacing an element. */
-  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
-               font-family: "Segoe UI", system-ui, sans-serif; color: #fff;
-               user-select: none; }
-  #stage { position: fixed; inset: 0; pointer-events: none; }
+  html, body { margin: 0; height: 100%; background: #14142a; color: #eee;
+               font-family: "Segoe UI", system-ui, sans-serif; user-select: none; }
+  .page { position: absolute; inset: 0; }
+  .hidden { display: none !important; }
+  button { font: inherit; font-size: 1.05em; padding: .5em 1.4em; margin: .3em;
+           border: 3px solid #ffb347; background: #2a2a55; color: #fff; cursor: pointer; }
+  button:hover:not(:disabled) { background: #3a3a77; }
+  button:disabled { opacity: .45; cursor: default; }
+  input, select { font: inherit; padding: .25em .4em; background: #22224a; color: #fff;
+                  border: 2px solid #555; }
+  input[type=number] { width: 5em; }
+  h1 { margin: .2em 0; }
+  h2, h3 { color: #ffb347; margin: .4em 0; }
 
-  /* Challenge intro: a card that drops in, holds, and slides out. */
-  #intro { position: absolute; inset: 0; display: flex; align-items: center;
-           justify-content: center; background: rgba(10, 10, 30, 0.85);
-           transform: translateY(-110%); transition: transform 500ms cubic-bezier(.2,.9,.3,1.1); }
-  #intro.in  { transform: translateY(0); }
-  #intro.out { transform: translateY(110%); transition-timing-function: ease-in; }
-  #intro .card { text-align: center; padding: 2em 3em; border: 4px solid #ffb347;
-                 background: #1d1d3a; box-shadow: 0 0 40px #000; }
-  #intro .console { font-size: 1.1em; letter-spacing: .3em; color: #ffb347; }
-  #intro .title { font-size: 2.4em; font-weight: 800; margin: .2em 0; }
-  #intro .goal { font-size: 1.4em; color: #c8f0ff; }
+  /* Main menu: a large piece of art, random every launch. */
+  #menu { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #art { width: 60vw; height: 40vh; border: 6px solid #ffb347; box-shadow: 0 0 40px #000;
+         display: flex; align-items: center; justify-content: center; font-size: 8em; }
+  #menu .buttons { margin-top: 1em; display: flex; flex-direction: column; }
+  #menu button { font-size: 1.3em; min-width: 12em; }
+  #notice { color: #ff8080; min-height: 1.5em; margin-top: .5em; }
 
-  /* Countdown: one big number that pops. */
-  #count { position: absolute; inset: 0; display: flex; align-items: center;
-           justify-content: center; font-size: 9em; font-weight: 900;
-           text-shadow: 0 0 30px #000, 0 0 6px #000; opacity: 0;
-           transform: scale(.4); }
-  #count.pop { animation: pop 900ms ease-out; }
-  @keyframes pop { 0% { opacity: 1; transform: scale(1.6); }
-                   70% { opacity: 1; transform: scale(1); }
-                   100% { opacity: 0; transform: scale(.9); } }
-
-  /* Death: a red flash, under half a second. */
-  #flash { position: absolute; inset: 0; background: rgba(200, 0, 0, 0); }
-  #flash.hit { animation: flash 450ms ease-out; }
-  @keyframes flash { 0% { background: rgba(200, 0, 0, .75); } 100% { background: rgba(200, 0, 0, 0); } }
-
-  /* Garland or skull: a badge that swings in and fades. */
-  #badge { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%) scale(0);
-           font-size: 7em; filter: drop-shadow(0 0 20px #000); }
-  #badge.show { animation: badge 2200ms ease-out forwards; }
-  @keyframes badge { 0% { transform: translate(-50%, -50%) scale(0) rotate(-30deg); opacity: 1; }
-                     25% { transform: translate(-50%, -50%) scale(1.2) rotate(5deg); }
-                     40% { transform: translate(-50%, -50%) scale(1); }
-                     80% { opacity: 1; } 100% { opacity: 0; } }
-
-  /* A corner readout so a screenshot says what the page thinks is going on. */
-  #hud { position: absolute; right: 8px; bottom: 6px; font: 12px monospace;
-         color: #ffb347; text-shadow: 0 0 4px #000; }
+  /* Lobby: settings and the tree on the left, players and start on the right. */
+  #lobby { display: grid; grid-template-columns: 1fr 22em; gap: 1em; padding: 1em; box-sizing: border-box; }
+  #lobby .left { overflow: auto; }
+  #lobby .right { display: flex; flex-direction: column; }
+  fieldset { border: 2px solid #444; margin: 0 0 1em; }
+  fieldset label { display: inline-block; margin: .3em 1em .3em 0; }
+  #tree { font-size: .95em; }
+  .cat, .game { margin-left: 0; }
+  .cat > .row { font-weight: 700; font-size: 1.1em; margin-top: .6em; }
+  .game { margin-left: 1.6em; }
+  .game > .row { font-weight: 600; }
+  .chal { margin-left: 3.2em; display: grid; grid-template-columns: 1.6em 1fr auto; gap: .4em; align-items: start; }
+  .chal.off { opacity: .45; }
+  .chal .goal { color: #aaa; font-size: .9em; }
+  .chal .tag { color: #ffb347; font-size: .8em; letter-spacing: .1em; white-space: nowrap; }
+  .row { display: flex; align-items: center; gap: .4em; cursor: pointer; }
+  .row input { cursor: pointer; }
+  #players li { list-style: none; margin: .3em 0; }
+  #players .missing { color: #ff8080; font-size: .85em; margin-left: 1em; word-break: break-all; }
+  #players .ok { color: #8f8; font-size: .85em; }
+  #blocking { color: #ffb347; font-size: .9em; min-height: 3em; }
+  #start { font-size: 1.4em; margin-top: auto; }
+  .keys { color: #888; font-size: .85em; margin-top: .5em; }
 </style>
 </head>
 <body>
-<div id="stage">
-  <div id="intro"><div class="card">
-    <div class="console" id="i-console">NES</div>
-    <div class="title" id="i-title">Super Mario Bros. 3</div>
-    <div class="goal" id="i-goal">Reach the end!</div>
-  </div></div>
-  <div id="count"></div>
-  <div id="flash"></div>
-  <div id="badge"></div>
-  <div id="hud">overlay: waiting</div>
+<div id="menu" class="page">
+  <div id="art"></div>
+  <h1>GamerTrials</h1>
+  <label>Display name <input id="name" value="Player" maxlength="24"></label>
+  <div class="buttons">
+    <button id="host">Host game</button>
+    <button disabled title="Networked lobbies come in Phase C">Join game</button>
+    <button disabled title="Settings come in Phase E">Settings</button>
+  </div>
+  <div id="notice"></div>
 </div>
+
+<div id="lobby" class="page hidden">
+  <div class="left">
+    <h2>Lobby <span id="code" style="color:#888;font-size:.7em"></span></h2>
+    <fieldset>
+      <label>Match mode
+        <select id="mode">
+          <option value="survival">Survival</option>
+          <option value="time_trial">Time trial</option>
+          <option value="combo">Combo</option>
+        </select></label>
+      <label>Duration
+        <select id="fkind">
+          <option value="challenges">Number of challenges</option>
+          <option value="strikes">Number of strikes</option>
+          <option value="wins">Number of wins</option>
+          <option value="stock">Stock</option>
+        </select>
+        <input id="fn" type="number" min="1" max="999" value="10"></label>
+      <label>Time limit per challenge <input id="limit" type="number" min="1" max="3600" value="180"> s</label>
+      <label><input id="custom" type="checkbox" checked> Allow custom challenges</label>
+      <label>Group by
+        <select id="grouping">
+          <option value="console">system</option>
+          <option value="era">era</option>
+          <option value="genre">genre</option>
+        </select></label>
+    </fieldset>
+    <h3>Games</h3>
+    <div id="tree"></div>
+  </div>
+  <div class="right">
+    <h3>Players</h3>
+    <ul id="players"></ul>
+    <div id="blocking"></div>
+    <button id="start">Start</button>
+    <div class="keys">In play: F9 gives up the run, F10 pauses, F12 quits.</div>
+  </div>
+</div>
+
 <script>
   const $ = id => document.getElementById(id);
-  const hud = s => { $('hud').textContent = 'overlay: ' + s; };
-  const replay = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
+  const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+  const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const key = r => r.game + '/' + r.challenge;
 
-  function handle(p) {
-    switch (p.kind) {
-      case 'intro':
-        $('i-console').textContent = p.console || '';
-        $('i-title').textContent = p.title || '';
-        $('i-goal').textContent = p.goal || '';
-        $('intro').classList.remove('out');
-        $('intro').classList.add('in');
-        hud('intro');
-        break;
-      case 'intro-out':
-        $('intro').classList.remove('in');
-        $('intro').classList.add('out');
-        hud('intro out');
-        break;
-      case 'countdown':
-        $('count').textContent = p.n;
-        replay($('count'), 'pop');
-        hud('countdown ' + p.n);
-        break;
-      case 'go':
-        $('count').textContent = 'GO';
-        replay($('count'), 'pop');
-        hud('playing');
-        break;
-      case 'death':
-        replay($('flash'), 'hit');
-        hud('death at frame ' + p.frame);
-        break;
-      case 'garland':
-        $('badge').textContent = '\u{1F3C6}';
-        replay($('badge'), 'show');
-        hud('cleared at frame ' + p.frame);
-        break;
-      case 'skull':
-        $('badge').textContent = '\u{1F480}';
-        replay($('badge'), 'show');
-        hud('out at frame ' + p.frame);
-        break;
-      case 'hud':
-        hud(p.text);
-        break;
+  // Placeholder art: one of a few pictures, picked at launch.
+  const ART = [['\u{1F344}', '#8b1a1a'], ['\u{1F98D}', '#1a5c2a'], ['\u{1F47E}', '#1a1a5c'],
+               ['\u{1F3AE}', '#5c3a1a'], ['\u{1F3C1}', '#3a1a5c'], ['\u{1F4A5}', '#5c1a3a']];
+  const pick = ART[Math.floor(Math.random() * ART.length)];
+  $('art').textContent = pick[0];
+  $('art').style.background = 'radial-gradient(circle at 30% 30%, #fff2 0, transparent 60%), ' + pick[1];
+
+  let cat = null;      // the library, from Rust
+  let lobby = null;    // the server's lobby state
+  let enabled = new Set();
+  let dealable = new Set();
+
+  $('host').onclick = () => { $('notice').textContent = ''; invoke('host', { name: $('name').value }); };
+
+  function settingsFromForm() {
+    return {
+      mode: $('mode').value,
+      format: { kind: $('fkind').value, n: Math.max(1, parseInt($('fn').value) || 1) },
+      default_limit_seconds: Math.max(1, parseFloat($('limit').value) || 180),
+      allow_custom: $('custom').checked,
+      grouping: $('grouping').value,
+    };
+  }
+  for (const id of ['mode', 'fkind', 'fn', 'limit', 'custom', 'grouping']) {
+    $(id).onchange = () => invoke('set_settings', { settings: settingsFromForm() });
+  }
+  $('start').onclick = () => invoke('start');
+
+  function formToLobby() {
+    const s = lobby.settings;
+    $('mode').value = s.mode;
+    $('fkind').value = s.format.kind;
+    $('fn').value = s.format.n;
+    $('limit').value = s.default_limit_seconds;
+    $('custom').checked = s.allow_custom;
+    $('grouping').value = s.grouping;
+  }
+
+  // ---- the tree -----------------------------------------------------------
+  function categoryOf(game) {
+    const g = lobby.settings.grouping;
+    return g === 'era' ? game.era : g === 'genre' ? game.genre : game.console;
+  }
+
+  function sendEnabled() {
+    invoke('set_enabled', { challenges: [...enabled].map(k => {
+      const i = k.indexOf('/');
+      return { game: k.slice(0, i), challenge: k.slice(i + 1) };
+    }) });
+  }
+
+  function setBox(box, keys) {
+    const on = keys.filter(k => enabled.has(k)).length;
+    box.checked = on === keys.length && keys.length > 0;
+    box.indeterminate = on > 0 && on < keys.length;
+  }
+
+  // Clicking a parent: indeterminate or off turns every child on; on turns them off.
+  function toggleGroup(keys) {
+    const on = keys.filter(k => enabled.has(k)).length;
+    const turnOn = on < keys.length;
+    for (const k of keys) { if (turnOn) enabled.add(k); else enabled.delete(k); }
+    sendEnabled();
+    renderTree();
+  }
+
+  function renderTree() {
+    if (!cat || !lobby) return;
+    const cats = new Map();
+    for (const g of cat.games) {
+      const c = categoryOf(g);
+      if (!cats.has(c)) cats.set(c, []);
+      cats.get(c).push(g);
+    }
+    const tree = $('tree');
+    tree.innerHTML = '';
+    for (const c of [...cats.keys()].sort()) {
+      const games = cats.get(c).sort((a, b) => a.title.localeCompare(b.title));
+      const catKeys = games.flatMap(g => g.challenges.map(ch => g.id + '/' + ch.id));
+      const catEl = document.createElement('div'); catEl.className = 'cat';
+      const catRow = document.createElement('div'); catRow.className = 'row';
+      const catBox = document.createElement('input'); catBox.type = 'checkbox';
+      setBox(catBox, catKeys);
+      catRow.appendChild(catBox);
+      catRow.appendChild(document.createTextNode(c));
+      catRow.onclick = e => { e.preventDefault(); toggleGroup(catKeys); };
+      catEl.appendChild(catRow);
+      for (const g of games) {
+        const gKeys = g.challenges.map(ch => g.id + '/' + ch.id);
+        const gEl = document.createElement('div'); gEl.className = 'game';
+        const gRow = document.createElement('div'); gRow.className = 'row';
+        const gBox = document.createElement('input'); gBox.type = 'checkbox';
+        setBox(gBox, gKeys);
+        gRow.appendChild(gBox);
+        gRow.appendChild(document.createTextNode(g.title + ' (' + g.console + ')'));
+        gRow.onclick = e => { e.preventDefault(); toggleGroup(gKeys); };
+        gEl.appendChild(gRow);
+        for (const ch of g.challenges) {
+          const k = g.id + '/' + ch.id;
+          const el = document.createElement('div');
+          el.className = 'chal' + (dealable.has(k) ? '' : ' off');
+          const box = document.createElement('input'); box.type = 'checkbox';
+          box.checked = enabled.has(k);
+          box.onchange = () => { if (box.checked) enabled.add(k); else enabled.delete(k); sendEnabled(); renderTree(); };
+          const text = document.createElement('div');
+          text.innerHTML = '<div>' + esc(ch.name) + (ch.title !== g.title ? ' <span class="tag">on ' + esc(ch.title) + '</span>' : '') +
+                           '</div><div class="goal">' + esc(ch.goal) + '</div>';
+          const tag = document.createElement('div'); tag.className = 'tag';
+          tag.textContent = (ch.kind === 'time_trial' ? 'TIME TRIAL' : 'SURVIVAL') +
+                            (ch.generated ? ' · GENERATED' : ch.custom ? ' · HACK' : '') +
+                            (dealable.has(k) || !enabled.has(k) ? '' : ' · NOT IN THIS MATCH');
+          el.appendChild(box); el.appendChild(text); el.appendChild(tag);
+          gEl.appendChild(el);
+        }
+        catEl.appendChild(gEl);
+      }
+      tree.appendChild(catEl);
     }
   }
 
-  // Tauri's event bridge; `withGlobalTauri` puts it on `window`. Listening
-  // needs the `core:default` capability in `capabilities/`; without it the
-  // call is refused, and the refusal is the only sign, so it goes on the HUD.
-  if (window.__TAURI__ && window.__TAURI__.event) {
-    hud('subscribing');
-    window.__TAURI__.event.listen('overlay', e => handle(e.payload))
-      .then(() => hud('listening'), err => hud('listen refused: ' + err));
-  } else {
-    hud('no tauri bridge');
+  function renderPlayers() {
+    const ul = $('players');
+    ul.innerHTML = '';
+    for (const p of lobby.players) {
+      const li = document.createElement('li');
+      let h = '<b>' + esc(p.name) + '</b>' + (p.host ? ' <span class="tag">HOST</span>' : '');
+      if (!p.files) h += '<div class="missing">checking files…</div>';
+      else if (p.files.missing.length === 0) h += '<div class="ok">has every file</div>';
+      else for (const m of p.files.missing) {
+        h += '<div class="missing">' + esc(m.game) + ': ' + esc(m.name) + ' — ' + esc(m.problem) +
+             (m.sha1 ? '<br>sha1 ' + esc(m.sha1) : '') + '</div>';
+      }
+      li.innerHTML = h;
+      ul.appendChild(li);
+    }
+    $('blocking').innerHTML = lobby.blocking.map(b => '⚠ ' + esc(b)).join('<br>');
+    $('start').disabled = !lobby.can_start;
+    $('code').textContent = lobby.code;
   }
+
+  function render() {
+    if (!lobby) { $('menu').classList.remove('hidden'); $('lobby').classList.add('hidden'); return; }
+    $('menu').classList.add('hidden'); $('lobby').classList.remove('hidden');
+    formToLobby();
+    renderTree();
+    renderPlayers();
+  }
+
+  async function init() {
+    cat = await invoke('catalog');
+    await window.__TAURI__.event.listen('lobby', e => {
+      lobby = e.payload;
+      enabled = new Set(lobby.enabled.map(key));
+      dealable = new Set(lobby.dealable.map(key));
+      render();
+    });
+    await window.__TAURI__.event.listen('notice', e => { $('notice').textContent = e.payload.text; });
+  }
+  init().catch(e => { $('notice').textContent = 'cannot reach the client: ' + e; });
 </script>
 </body>
 </html>

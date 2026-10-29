@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GamerTrials overlay</title>
+<style>
+  /* A transparent sheet over the game window. Everything on it is a
+     placeholder: crude, but it animates on and off the way the final assets
+     will, and the choreography — what waits for what — lives here, so a
+     final asset with another duration changes nothing in Rust. */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+               font-family: "Segoe UI", system-ui, sans-serif; color: #fff;
+               user-select: none; }
+  #stage { position: fixed; inset: 0; }
+  .sheet { position: absolute; inset: 0; display: flex; align-items: center;
+           justify-content: center; }
+  .hidden { display: none !important; }
+  .card { text-align: center; padding: 1.6em 2.4em; border: 4px solid #ffb347;
+          background: #1d1d3a; box-shadow: 0 0 40px #000; max-width: 90%;
+          max-height: 90%; overflow: auto; }
+  .card h1 { margin: 0 0 .4em; font-size: 2em; }
+  .card h2 { margin: 0 0 .4em; font-size: 1.3em; color: #ffb347; }
+  button { font: inherit; font-size: 1.1em; padding: .5em 1.4em; margin: .4em;
+           border: 3px solid #ffb347; background: #2a2a55; color: #fff; cursor: pointer; }
+  button:hover { background: #3a3a77; }
+  table { border-collapse: collapse; margin: .6em auto; font-size: 1.05em; }
+  th, td { padding: .25em .7em; text-align: left; }
+  th { color: #ffb347; border-bottom: 2px solid #ffb347; }
+  tr.me td { color: #c8f0ff; font-weight: 700; }
+  tr.out td { opacity: .55; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Challenge intro: a card that drops in, holds, and slides out. */
+  #intro { background: rgba(10, 10, 30, 0.85); transform: translateY(-110%);
+           transition: transform 500ms cubic-bezier(.2,.9,.3,1.1); }
+  #intro.in  { transform: translateY(0); }
+  #intro.out { transform: translateY(110%); transition-timing-function: ease-in; }
+  #intro .console { font-size: 1.1em; letter-spacing: .3em; color: #ffb347; }
+  #intro .title { font-size: 2.4em; font-weight: 800; margin: .2em 0; }
+  #intro .name { font-size: 1.1em; color: #aaa; margin-bottom: .6em; }
+  #intro .goal { font-size: 1.5em; color: #c8f0ff; }
+  #intro .kind { font-size: .95em; color: #ffb347; margin-top: .8em; letter-spacing: .15em; }
+
+  /* Countdown: one big number that pops. */
+  #count { font-size: 9em; font-weight: 900; text-shadow: 0 0 30px #000, 0 0 6px #000;
+           opacity: 0; transform: scale(.4); pointer-events: none; }
+  #count.pop { animation: pop 900ms ease-out; }
+  @keyframes pop { 0% { opacity: 1; transform: scale(1.6); }
+                   70% { opacity: 1; transform: scale(1); }
+                   100% { opacity: 0; transform: scale(.9); } }
+
+  /* Death: a red flash, under half a second. */
+  #flash { background: rgba(200, 0, 0, 0); pointer-events: none; }
+  #flash.hit { animation: flash 450ms ease-out; }
+  @keyframes flash { 0% { background: rgba(200, 0, 0, .75); } 100% { background: rgba(200, 0, 0, 0); } }
+
+  /* Garland or skull: a badge that swings in and fades. */
+  #badge { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%) scale(0);
+           font-size: 7em; filter: drop-shadow(0 0 20px #000); pointer-events: none;
+           text-align: center; }
+  #badge small { display: block; font-size: .22em; color: #fff; text-shadow: 0 0 8px #000; }
+  #badge.show { animation: badge 2200ms ease-out forwards; }
+  @keyframes badge { 0% { transform: translate(-50%, -50%) scale(0) rotate(-30deg); opacity: 1; }
+                     25% { transform: translate(-50%, -50%) scale(1.2) rotate(5deg); }
+                     40% { transform: translate(-50%, -50%) scale(1); }
+                     80% { opacity: 1; } 100% { opacity: 0; } }
+
+  #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
+  #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
+           background: rgba(160, 0, 0, .9); font-weight: 700; text-align: center; }
+  #waiting { position: absolute; left: 0; right: 0; bottom: 2em; text-align: center;
+             font-size: 1.3em; text-shadow: 0 0 8px #000; pointer-events: none; }
+
+  /* A corner readout so a screenshot says what the page thinks is going on. */
+  #hud { position: absolute; right: 8px; bottom: 6px; font: 12px monospace;
+         color: #ffb347; text-shadow: 0 0 4px #000; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="intro" class="sheet"><div class="card">
+    <div class="console" id="i-console"></div>
+    <div class="title" id="i-title"></div>
+    <div class="name" id="i-name"></div>
+    <div class="goal" id="i-goal"></div>
+    <div class="kind" id="i-kind"></div>
+  </div></div>
+  <div id="count" class="sheet"></div>
+  <div id="flash" class="sheet"></div>
+  <div id="badge"></div>
+  <div id="waiting" class="hidden"></div>
+  <div id="round" class="sheet hidden"><div class="card">
+    <h2 id="r-title"></h2>
+    <table id="r-entries"></table>
+    <h2>Standings</h2>
+    <table id="r-standings"></table>
+    <div id="r-note"></div>
+  </div></div>
+  <div id="score" class="sheet hidden"><div class="card">
+    <h1>Match over</h1>
+    <div id="s-format"></div>
+    <table id="s-standings"></table>
+    <div><button id="again">Play again</button><button id="lobby">Back to lobby</button></div>
+  </div></div>
+  <div id="pause" class="sheet hidden"><div class="card">
+    <h1>Paused</h1>
+    <div><button id="resume">Resume</button><button id="end">End match</button></div>
+    <div style="margin-top:.8em;color:#aaa;font-size:.9em">F9 gives up the run · F10 pauses · F12 quits</div>
+  </div></div>
+  <div id="error" class="hidden"></div>
+  <div id="hud">overlay: waiting</div>
+</div>
+<script>
+  const $ = id => document.getElementById(id);
+  const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+  const hud = s => { $('hud').textContent = 'overlay: ' + s; };
+  const show = id => $(id).classList.remove('hidden');
+  const hide = id => $(id).classList.add('hidden');
+  const replay = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
+  const now = () => performance.now();
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+  // ---- choreography -------------------------------------------------------
+  // The round card holds for ROUND_MS before the next intro may replace it;
+  // the intro holds for INTRO_MS before the countdown may start. The game
+  // begins exactly when the countdown says ("begin"), never before.
+  const ROUND_MS = 3500, INTRO_MS = 2500;
+  let roundUntil = 0;      // when the round card may go
+  let introAt = 0;         // when the intro came up
+  let introUp = false;
+  let goWanted = false;    // the server said go; waiting on the intro
+  let counting = false;
+
+  async function showIntro(p) {
+    const delay = roundUntil - now();
+    if (delay > 0) await wait(delay);
+    hide('round'); hide('waiting'); hide('error');
+    $('i-console').textContent = p.console || '';
+    $('i-title').textContent = p.title || '';
+    $('i-name').textContent = p.name || '';
+    $('i-goal').textContent = p.goal || '';
+    $('i-kind').textContent = (p.challenge_kind || '').toUpperCase() + (p.custom ? ' · CUSTOM' : '');
+    $('intro').classList.remove('out');
+    $('intro').classList.add('in');
+    introUp = true; introAt = now();
+    hud('intro');
+    tryGo();
+  }
+
+  async function tryGo() {
+    if (!goWanted || !introUp || counting) return;
+    counting = true; goWanted = false;
+    const left = introAt + INTRO_MS - now();
+    if (left > 0) await wait(left);
+    $('intro').classList.remove('in');
+    $('intro').classList.add('out');
+    hud('intro out');
+    await wait(600);
+    for (const n of [3, 2, 1]) {
+      $('count').textContent = n;
+      replay($('count'), 'pop');
+      hud('countdown ' + n);
+      await wait(900);
+    }
+    introUp = false; counting = false;
+    invoke('begin');
+    $('count').textContent = 'GO';
+    replay($('count'), 'pop');
+    hud('playing');
+  }
+
+  // ---- cards --------------------------------------------------------------
+  const endingText = e => !e ? '' :
+    e.type === 'completed' ? 'completed' :
+    e.type === 'failed' ? 'failed: ' + e.how :
+    e.type === 'timed_out' ? 'timed out' : 'gave up';
+
+  const formatText = f => !f ? '' :
+    f.kind === 'challenges' ? f.n + ' challenges' :
+    f.kind === 'strikes' ? f.n + ' strikes' :
+    f.kind === 'wins' ? 'first to ' + f.n + ' wins' : 'stock ' + f.n;
+
+  function standingsTable(el, standings, mode, format, me) {
+    const figure = mode === 'time_trial' ? 'Frames' : mode === 'survival' ? 'Completed' : 'Points';
+    const extra = !format ? null :
+      format.kind === 'strikes' ? 'Streak' : format.kind === 'wins' ? 'Wins' :
+      format.kind === 'stock' ? 'Lives' : null;
+    let h = '<tr><th>#</th><th>Player</th><th class="num">' + figure + '</th><th class="num">Rounds</th>' +
+            (extra ? '<th class="num">' + extra + '</th>' : '') + '</tr>';
+    for (const s of standings) {
+      const fig = mode === 'time_trial' ? s.frames : mode === 'survival' ? s.completions : s.points;
+      const ex = !extra ? '' : extra === 'Streak' ? s.streak : extra === 'Wins' ? s.wins :
+                 Math.max(0, format.n - s.failures);
+      h += '<tr class="' + (s.player === me ? 'me' : '') + (s.eliminated != null ? ' out' : '') + '">' +
+           '<td>' + s.rank + '</td><td>' + esc(s.player) + (s.eliminated != null ? ' (out)' : '') + '</td>' +
+           '<td class="num">' + fig + '</td><td class="num">' + s.rounds + '</td>' +
+           (extra ? '<td class="num">' + ex + '</td>' : '') + '</tr>';
+    }
+    el.innerHTML = h;
+  }
+
+  function showRound(p) {
+    hide('intro'); $('intro').classList.remove('in', 'out'); hide('waiting');
+    $('r-title').textContent = 'Round ' + (p.round + 1) + ' · ' + (p.title || '');
+    let h = '<tr><th>Place</th><th>Player</th><th>Result</th><th class="num">Frames</th><th class="num">Attempts</th></tr>';
+    for (const e of p.entries) {
+      h += '<tr class="' + (e.player === p.me ? 'me' : '') + '"><td>' + e.place + '</td><td>' + esc(e.player) +
+           '</td><td>' + endingText(e.outcome.ending) + (e.points ? ' (+' + e.points + ')' : '') +
+           '</td><td class="num">' + e.frames + '</td><td class="num">' + e.outcome.attempts + '</td></tr>';
+    }
+    $('r-entries').innerHTML = h;
+    standingsTable($('r-standings'), p.standings, p.mode, p.format, p.me);
+    $('r-note').textContent = p.eliminated.length ? 'Eliminated: ' + p.eliminated.join(', ') : '';
+    show('round');
+    // The intro sheet is display:flex again on the next showIntro.
+    $('intro').classList.remove('hidden');
+    roundUntil = now() + ROUND_MS;
+    hud('round ' + p.round + ' result');
+  }
+
+  async function showScore(p) {
+    const delay = roundUntil - now();
+    if (delay > 0) await wait(delay);
+    hide('round'); hide('waiting'); hide('pause');
+    $('s-format').textContent = formatText(p.format) + (p.mode ? ' · ' + p.mode.replace('_', ' ') : '');
+    standingsTable($('s-standings'), p.standings, p.mode, p.format, p.me);
+    show('score');
+    hud('match over');
+  }
+
+  function handle(p) {
+    switch (p.kind) {
+      case 'loading': hud('loading round ' + p.round); break;
+      case 'intro': showIntro(p); break;
+      case 'go': goWanted = true; tryGo(); break;
+      case 'death': replay($('flash'), 'hit'); hud('death at frame ' + p.frame); break;
+      case 'garland':
+      case 'skull':
+        $('badge').innerHTML = (p.kind === 'garland' ? '\u{1F3C6}' : '\u{1F480}') + '<small>' + esc(p.text || '') + '</small>';
+        replay($('badge'), 'show');
+        hud((p.kind === 'garland' ? 'cleared' : 'out') + ' at frame ' + p.frame);
+        setTimeout(() => { $('waiting').textContent = 'Waiting for the round to end…'; show('waiting'); }, 2000);
+        break;
+      case 'round': showRound(p); break;
+      case 'score': showScore(p); break;
+      case 'pause': show('pause'); hud('paused'); break;
+      case 'resume': hide('pause'); hud('playing'); break;
+      case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;
+      case 'hud': hud(p.text); break;
+    }
+  }
+
+  $('again').onclick = () => { hide('score'); hide('error'); invoke('play_again'); };
+  $('lobby').onclick = () => { hide('score'); invoke('back_to_lobby'); };
+  $('resume').onclick = () => { hide('pause'); invoke('resume'); };
+  $('end').onclick = () => { hide('pause'); invoke('end_match'); };
+
+  // Tauri's event bridge; `withGlobalTauri` puts it on `window`. Listening
+  // needs the `core:default` capability in `capabilities/`; without it the
+  // call is refused, and the refusal is the only sign, so it goes on the HUD.
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    hud('subscribing');
+    window.__TAURI__.event.listen('overlay', e => handle(e.payload))
+      .then(() => hud('listening'), err => hud('listen refused: ' + err));
+  } else {
+    hud('no tauri bridge');
+  }
+</script>
+</body>
+</html>

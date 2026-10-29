@@ -94,3 +94,16 @@ stage prep, as the harness does. The server never does (ADR 0024).
 **The harness stays.** It is the authoring tool — RAM search, probe, state
 capture — and the client's game thread is a port of its windowed loop, not a
 replacement for it.
+
+**The overlay page owns the choreography.** Rust emits facts — a round was
+dealt, the server said go, the player died, the round's result — and the
+page decides what waits for what: the round card holds, the intro drops in,
+the countdown runs, and only then does the page call `begin`, which is when
+the game thread starts the run. A final asset with another duration changes
+the page and nothing in Rust, and the game never starts before the animation
+says so.
+
+**Two pages, one shell.** The menu and lobby are an ordinary decorated
+window; the overlay is created when the game window reports in and closes
+with it. Between them the match is played; after it the score screen is on
+the overlay, where the game's last frame is still behind it.

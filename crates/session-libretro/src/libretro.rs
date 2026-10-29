@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_char, c_uint, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use libloading::{Library, Symbol};
 
@@ -409,9 +409,13 @@ static OPTION_VALUES: Mutex<BTreeMap<String, CString>> = Mutex::new(BTreeMap::ne
 static UNHANDLED_ENV: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
 
 static PIXEL_FORMAT: AtomicU32 = AtomicU32::new(PIXEL_FORMAT_0RGB1555);
-static SYSTEM_DIR: OnceLock<CString> = OnceLock::new();
-static SAVE_DIR: OnceLock<CString> = OnceLock::new();
-static CORE_PATH: OnceLock<CString> = OnceLock::new();
+/// Per core, not per process: a match loads one core after another, and the
+/// second must not inherit the first's directories (its save directory is
+/// where a DOS core keeps the guest's disk). Replaced on every `Core::load`;
+/// the pointer handed to a core stays valid for as long as that core lives.
+static SYSTEM_DIR: Mutex<Option<CString>> = Mutex::new(None);
+static SAVE_DIR: Mutex<Option<CString>> = Mutex::new(None);
+static CORE_PATH: Mutex<Option<CString>> = Mutex::new(None);
 /// Set when an option changes, cleared when the core asks. Starts set so the
 /// core reads the manifest's values on its first look.
 static VARIABLES_DIRTY: AtomicU32 = AtomicU32::new(1);
@@ -791,7 +795,7 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            match SYSTEM_DIR.get() {
+            match lock(&SYSTEM_DIR).as_ref() {
                 Some(dir) => {
                     *(data as *mut *const c_char) = dir.as_ptr();
                     true
@@ -806,7 +810,9 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            match SAVE_DIR.get().or_else(|| SYSTEM_DIR.get()) {
+            let save = lock(&SAVE_DIR);
+            let system = lock(&SYSTEM_DIR);
+            match save.as_ref().or(system.as_ref()) {
                 Some(dir) => {
                     *(data as *mut *const c_char) = dir.as_ptr();
                     true
@@ -818,7 +824,7 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            match CORE_PATH.get() {
+            match lock(&CORE_PATH).as_ref() {
                 Some(p) => {
                     *(data as *mut *const c_char) = p.as_ptr();
                     true
@@ -1288,9 +1294,19 @@ impl Core {
         // Several cores look for firmware in whatever we report as the system
         // directory. Point it at the folder the core itself lives in.
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let _ = SYSTEM_DIR.set(cpath(dir)?);
-        let _ = SAVE_DIR.set(cpath(save_dir.unwrap_or(dir))?);
-        let _ = CORE_PATH.set(cpath(path)?);
+        *lock(&SYSTEM_DIR) = Some(cpath(dir)?);
+        *lock(&SAVE_DIR) = Some(cpath(save_dir.unwrap_or(dir))?);
+        *lock(&CORE_PATH) = Some(cpath(path)?);
+        // What the previous core left behind, if there was one. A match loads
+        // one core after another in one process, and the next core's memory
+        // map, options and keyboard callback are its own to register.
+        lock(&MEMORY_MAP).clear();
+        lock(&OPTION_DEFS).clear();
+        lock(&OPTION_VALUES).clear();
+        lock(&UNHANDLED_ENV).clear();
+        *lock(&KEYBOARD_CB) = None;
+        SHUTDOWN.store(0, Ordering::Relaxed);
+        VARIABLES_DIRTY.store(1, Ordering::Relaxed);
 
         let lib = unsafe { Library::new(path) }
             .map_err(|e| format!("cannot load core {}: {e}", path.display()))?;

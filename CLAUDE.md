@@ -93,9 +93,10 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
 | `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
-| `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. |
-| `app-client` | Tauri shell, overlay, wiring. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). |
-| `server` | Rust (ADR 0024). Lobby, clock sync, telemetry aggregation, and the authority on a session: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
+| `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. Today: hashes a player's dump against the manifest's `sha1` and says what is missing. |
+| `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. |
+| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu and lobby in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). |
+| `server` | Rust (ADR 0024). Lobby, clock sync, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 
 ## Conventions
@@ -210,27 +211,44 @@ Three things learned there, in the same spirit:
 
 Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
 
+Phase B (solo client, in progress): a solo match plays end to end.
+`cargo run -p app-client` opens a menu; Host game opens a lobby of one on an
+in-process `server` (ADR 0009); Start deals a match that crosses all three
+consoles in one process, with the intro, countdown, death flash, garland or
+skull, round standings and score screen drawn by a transparent overlay over
+a native game window (ADR 0027). The rules are `challenge-core`'s: the
+server deals from a seed, judges every run from the `Frame` messages the
+client streams, and compares the client's provisional verdict with its own;
+a disagreement or an artifact-hash mismatch ends the match loudly. The wire
+is `protocol`, versioned from day one; the file check is `asset-store`.
+`--host <name> --start --mode … --format kind:n --games a,b --limit <s>`
+plays a match from the command line. Learned on the way:
+
+- **A Tauri page needs a capability to hear anything.** Without
+  `capabilities/default.json` granting `core:default`, `listen` is refused
+  and nothing says so on either side. The overlay HUD now reports it.
+- **The libretro frontend's statics are per core, not per process.** A match
+  loads one core after another; `Core::load` now resets the directories,
+  the memory map, the options table and the keyboard callback the previous
+  core left behind.
+- **The server replays the judgement from exactly the frames it is sent.**
+  The client streams a `Frame` for every frame that carried an event and for
+  the frame its own judge settled the run on, nothing else, and the server's
+  `Run` reaches the same verdict from those alone because every criterion
+  is monotone in the frame. A client that skips one disagrees with the
+  server and the match fails, which is the check working.
+
 What is *not* done, and the next things to settle:
 
-- **`challenge-core` judges a run and scores a match, but nothing runs one
-  yet.** It compares `SessionEvent`s against `complete_when`, re-enters a time
-  trial on death, deals an open-ended series from a seed (`Dealer`), places the
-  players of one challenge, and folds those places into a match (`Match`):
-  four formats, three mode standings, elimination, and a bound on every run.
-  The rules are ADR 0023 (per run) and ADR 0026 (per match); the harness
-  drives a run (`--challenge`, `--limit`, falling back to the manifest's
-  `limit_seconds`), and `crates/session-fake/tests/session.rs` plays whole
-  matches from the real manifests without a ROM. `challenge-library` reads the
-  challenge half of every manifest, plus what a lobby needs — genre, year,
-  goal text, which ROM a stage runs on — and a `Catalog` hashes a set of
-  manifests so a server and its clients can agree on one (ADR 0009). Still
-  owed:
-  - *the driver loop itself.* The loop the fake tests drive with — enter,
-    advance, observe, re-enter, and forfeit when a runner fails — is test
-    code. It belongs to `app-client`, and moves there when that crate exists
-    (ADR 0027, owed).
-  - *the lobby's default limit and the match seed* have no home: both come
-    from the server, which does not exist. The wire protocol is owed with it.
+- **Phase B is not finished.** Owed: a key or pad binding for give-up and
+  pause beyond F9/F10 on the keyboard; fullscreen (both windows borderless,
+  ADR 0027); the protocol has no word for "I cannot prepare this round" (a
+  missing dump at deal time ends the match through `EndMatch`); the
+  rolled-content seed now comes from the server, but ADR 0013 stays
+  Proposed until a remote server issues it (Phase C). Hand-tested on all
+  three games; nothing in `app-client` is covered by `cargo test`, and the
+  overlay is not a test target — the server's tests play the client's loop on
+  `session-fake` instead.
 - **`asset-store` will need to hash a bundle's members, not the container.** A
   DOS game is a zip, and its hash depends on how it was zipped (ADR 0018). That
   work also gates DOS hacks: a BPS patch against a zip is meaningless, so a PWAD
@@ -239,8 +257,9 @@ What is *not* done, and the next things to settle:
   The pipeline is end to end — dump, patch, roll, rebind, enter — and the two
   SMB3 custom challenges in `manifests/smb3.toml` have been played through to
   their criteria on rolled ROMs. ADR 0013 has the server issuing the seed and
-  comparing the artifact hashes clients report, and neither exists — today it is a
-  `--seed` flag on the harness.
+  comparing the artifact hashes clients report; the in-process server does
+  both for a lobby of one, and the harness still takes `--seed`. A remote
+  server doing it for several players is Phase C.
 - **A rolled quantity still cannot reach `complete_when`.** It is static TOML
   with no arithmetic and nothing that can name the seed, so a generator cannot
   roll a count a criterion then refers to. Both SMB3 challenges avoid it by
@@ -250,4 +269,5 @@ What is *not* done, and the next things to settle:
   table.** `manifests/smb3.toml` carries each of its two tables twice, and
   nothing stops the copies drifting. The alternative is hanging them off
   `[[stage]]`, which is a schema decision nobody has made.
-- No scoring and no head-to-head.
+- No networked lobby, no spectating, no head-to-head. Join game and Settings
+  are buttons that do nothing yet.

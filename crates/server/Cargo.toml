@@ -1,0 +1,18 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "The authority on a match: lobby, deal, judge, rank (ADR 0009). A state machine over protocol messages; the transport is whoever delivers them."
+
+# Held to ADR 0024 by this list: never session-libretro, content-gen or
+# asset-store. The server never runs a game and never holds a ROM.
+[dependencies]
+challenge-core = { path = "../challenge-core" }
+challenge-library = { path = "../challenge-library" }
+session-api = { path = "../session-api" }
+protocol = { path = "../protocol" }
+
+[dev-dependencies]
+# The tests play the client's part on scripted telemetry.
+session-fake = { path = "../session-fake" }

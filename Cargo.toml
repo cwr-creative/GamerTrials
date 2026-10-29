@@ -7,6 +7,9 @@ members = [
     "crates/session-api",
     "crates/session-fake",
     "crates/session-libretro",
+    "crates/protocol",
+    "crates/server",
+    "crates/asset-store",
     "crates/app-client",
 ]
 

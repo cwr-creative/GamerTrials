@@ -1,0 +1,11 @@
+[package]
+name = "asset-store"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Checks a player's own dumps against the hashes the manifests record. Minimal: hash a file, compare, say what is missing."
+
+[dependencies]
+# For `sha1_hex` only: one SHA-1 in the workspace, the one the artifact keys
+# already use (ADR 0013).
+content-gen = { path = "../content-gen" }

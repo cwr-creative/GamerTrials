@@ -1,48 +1,172 @@
 //! The GamerTrials client (ADR 0027): a native game window with a transparent
-//! Tauri overlay over it.
+//! Tauri overlay over it, and a menu and lobby in an ordinary window.
 //!
-//! This is the window spike that Phase B opens with. `cargo run -p app-client
-//! -- --game smb3` plays a stage behind a transparent webview that runs the
-//! placeholder intro, countdown and death flash; `--spike` adds a scripted
-//! self-test that moves and resizes the game window, injects a keypress with
-//! the overlay focused, and logs whether the overlay followed and the game
-//! heard the key.
+//! `cargo run -p app-client` opens the menu. Host game opens a lobby of one
+//! on an in-process server (ADR 0009); Start plays a match. `--host <name>`
+//! skips the menu, `--start` presses Start as soon as the lobby allows, and
+//! `--mode`, `--format kind:n`, `--games a,b` and `--limit <s>` set the
+//! match up first: a match from the
+//! command line, for playtesting and for the spike. `--spike` adds
+//! the window self-test from the first build to the first round: it moves and
+//! resizes the game window, injects a keypress with the overlay focused, and
+//! logs whether the overlay followed and the game heard the key.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod flow;
 mod game;
 mod keys;
+mod library;
+mod local;
 mod overlay;
 
-use std::sync::mpsc;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
-use tauri::Manager;
+use protocol::{ChallengeRef, LobbySettings};
+use tauri::{Manager, State};
 
-
+use flow::{Msg, UiCmd};
 
 struct Args {
-    game: String,
-    stage: Option<String>,
+    manifests: PathBuf,
     scale: usize,
     spike: bool,
+    /// Host a lobby at once, as this player, instead of showing the menu.
+    host: Option<String>,
+    /// With `--host`: start the match as soon as the lobby allows.
+    start: bool,
+    mode: Option<protocol::Mode>,
+    format: Option<protocol::Format>,
+    /// With `--host`: enable only these games' challenges.
+    games: Option<Vec<String>>,
+    /// With `--host`: the default limit per challenge, in seconds.
+    limit: Option<f64>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut args = Args { game: "smb3".into(), stage: None, scale: 2, spike: false };
+    let mut args = Args {
+        manifests: PathBuf::from("manifests"),
+        scale: 2,
+        spike: false,
+        host: None,
+        start: false,
+        mode: None,
+        format: None,
+        games: None,
+        limit: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--game" => args.game = it.next().ok_or("--game wants a name")?,
-            "--stage" => args.stage = Some(it.next().ok_or("--stage wants an id")?),
+            "--manifests" => args.manifests = PathBuf::from(it.next().ok_or("--manifests wants a directory")?),
+            "--host" => args.host = Some(it.next().ok_or("--host wants a player name")?),
+            "--start" => args.start = true,
+            "--games" => {
+                let v = it.next().ok_or("--games wants a comma-separated list of game ids")?;
+                args.games = Some(v.split(',').map(|g| g.trim().to_string()).collect());
+            }
+            "--limit" => {
+                let v = it.next().ok_or("--limit wants seconds")?;
+                args.limit = Some(v.parse().map_err(|_| format!("--limit wants seconds, got {v}"))?);
+            }
+            "--mode" => {
+                args.mode = Some(match it.next().as_deref() {
+                    Some("time_trial") => protocol::Mode::TimeTrial,
+                    Some("survival") => protocol::Mode::Survival,
+                    Some("combo") => protocol::Mode::Combo,
+                    other => return Err(format!("--mode wants time_trial, survival or combo, got {other:?}")),
+                })
+            }
+            "--format" => {
+                let v = it.next().ok_or("--format wants kind:n, e.g. challenges:3")?;
+                let (kind, n) = v.split_once(':').ok_or("--format wants kind:n, e.g. challenges:3")?;
+                let n: u32 = n.parse().map_err(|_| format!("--format: {n} is not a number"))?;
+                args.format = Some(match kind {
+                    "challenges" => protocol::Format::Challenges(n),
+                    "strikes" => protocol::Format::Strikes(n),
+                    "wins" => protocol::Format::Wins(n),
+                    "stock" => protocol::Format::Stock(n),
+                    other => return Err(format!("--format: unknown kind {other}")),
+                })
+            }
             "--scale" => {
-                args.scale = it.next().ok_or("--scale wants 1, 2 or 4")?.parse().map_err(|_| "--scale wants a number")?
+                args.scale = it
+                    .next()
+                    .ok_or("--scale wants 1, 2 or 4")?
+                    .parse()
+                    .map_err(|_| "--scale wants a number")?
             }
             "--spike" => args.spike = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
     Ok(args)
+}
+
+/// What the pages' commands reach.
+struct Shared {
+    ui: Mutex<Option<Sender<Msg>>>,
+    catalog: serde_json::Value,
+}
+
+impl Shared {
+    fn send(&self, cmd: UiCmd) {
+        if let Some(tx) = self.ui.lock().unwrap().as_ref() {
+            let _ = tx.send(Msg::Ui(cmd));
+        }
+    }
+}
+
+#[tauri::command]
+fn catalog(state: State<'_, Shared>) -> serde_json::Value {
+    state.catalog.clone()
+}
+
+#[tauri::command]
+fn host(state: State<'_, Shared>, name: String) {
+    state.send(UiCmd::Host { name });
+}
+
+#[tauri::command]
+fn set_settings(state: State<'_, Shared>, settings: LobbySettings) {
+    state.send(UiCmd::Settings(settings));
+}
+
+#[tauri::command]
+fn set_enabled(state: State<'_, Shared>, challenges: Vec<ChallengeRef>) {
+    state.send(UiCmd::Enable(challenges));
+}
+
+#[tauri::command]
+fn start(state: State<'_, Shared>) {
+    state.send(UiCmd::Start);
+}
+
+#[tauri::command]
+fn begin(state: State<'_, Shared>) {
+    state.send(UiCmd::Begin);
+}
+
+#[tauri::command]
+fn play_again(state: State<'_, Shared>) {
+    state.send(UiCmd::PlayAgain);
+}
+
+#[tauri::command]
+fn back_to_lobby(state: State<'_, Shared>) {
+    state.send(UiCmd::BackToLobby);
+}
+
+#[tauri::command]
+fn end_match(state: State<'_, Shared>) {
+    state.send(UiCmd::EndMatch);
+}
+
+#[tauri::command]
+fn resume(state: State<'_, Shared>) {
+    state.send(UiCmd::Resume);
 }
 
 fn main() {
@@ -53,108 +177,47 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let (cmd_tx, cmd_rx) = mpsc::channel::<game::Command>();
-    let (rep_tx, rep_rx) = mpsc::channel::<game::Report>();
-    let cfg = game::Config {
-        manifest: game::manifest_path(&args.game),
-        stage: args.stage.clone(),
-        scale: args.scale,
+    let library = match library::Library::load(&args.manifests) {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            eprintln!("cannot load the library: {e}");
+            std::process::exit(1);
+        }
     };
+    println!(
+        "[library] {} games, hash {}",
+        library.catalog.games().len(),
+        library.hash_hex()
+    );
+    let shared = Shared { ui: Mutex::new(None), catalog: library.ui_catalog() };
+    let scale = args.scale;
     let spike = args.spike;
+    let auto = flow::Auto {
+        host: args.host,
+        start: args.start,
+        mode: args.mode,
+        format: args.format,
+        games: args.games,
+        limit: args.limit,
+    };
 
     tauri::Builder::default()
+        .manage(shared)
+        .invoke_handler(tauri::generate_handler![
+            catalog,
+            host,
+            set_settings,
+            set_enabled,
+            start,
+            begin,
+            play_again,
+            back_to_lobby,
+            end_match,
+            resume
+        ])
         .setup(move |app| {
-            let handle = app.handle().clone();
-            std::thread::Builder::new()
-                .name("game".into())
-                .spawn(move || {
-                    if let Err(e) = game::run(cfg, cmd_rx, rep_tx) {
-                        eprintln!("[game] {e}");
-                        handle.exit(1);
-                    } else {
-                        println!("[client] game window closed");
-                        handle.exit(0);
-                    }
-                })
-                .expect("spawn game thread");
-
-            // The game window comes up once the core has loaded and the entry
-            // state is restored; a cold DOS boot can take a while.
-            let (hwnd, width, height, title, console) = loop {
-                match rep_rx.recv_timeout(Duration::from_secs(60)) {
-                    Ok(game::Report::Window { hwnd, width, height, title, console }) => {
-                        break (hwnd, width, height, title, console)
-                    }
-                    Ok(game::Report::Closed) => return Err("the game window closed before it opened".into()),
-                    Ok(other) => println!("[client] before window: {other:?}"),
-                    Err(_) => return Err("no game window after 60 s".into()),
-                }
-            };
-            println!("[client] game window {hwnd:#x}, {width}x{height} native");
-
-            let ov = overlay::Overlay::create(app.handle(), hwnd)?;
-            let _ = cmd_tx.send(game::Command::Overlay(ov.hwnd()));
-            ov.set_passthrough(true)?;
-
-            // Keep the overlay on the game window's client area.
-            {
-                let ov = ov.clone();
-                std::thread::spawn(move || ov.track());
-            }
-
-            // Forward what the game reports to the page.
-            {
-                let ov = ov.clone();
-                std::thread::spawn(move || {
-                    for r in rep_rx {
-                        match r {
-                            game::Report::Died { frame } => ov.emit(serde_json::json!({ "kind": "death", "frame": frame })),
-                            game::Report::Cleared { frame } => ov.emit(serde_json::json!({ "kind": "garland", "frame": frame })),
-                            game::Report::Exited { frame } => ov.emit(serde_json::json!({ "kind": "skull", "frame": frame })),
-                            game::Report::Input { bits, overlay_in_front } => {
-                                println!("[client] input bits {bits:#x}, overlay in front: {overlay_in_front}");
-                            }
-                            game::Report::Closed => break,
-                            game::Report::Window { .. } => {}
-                        }
-                    }
-                });
-            }
-
-            // The flow every challenge will have: intro, countdown, go.
-            {
-                let ov = ov.clone();
-                let cmd_tx = cmd_tx.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(800));
-                    ov.emit(serde_json::json!({
-                        "kind": "intro", "title": title, "console": console, "goal": "Reach the end!"
-                    }));
-                    std::thread::sleep(Duration::from_millis(2500));
-                    ov.emit(serde_json::json!({ "kind": "intro-out" }));
-                    std::thread::sleep(Duration::from_millis(600));
-                    for n in [3, 2, 1] {
-                        ov.emit(serde_json::json!({ "kind": "countdown", "n": n }));
-                        std::thread::sleep(Duration::from_millis(900));
-                    }
-                    let _ = cmd_tx.send(game::Command::Resume);
-                    ov.emit(serde_json::json!({ "kind": "go" }));
-                });
-            }
-
-            // The game thread treats a disconnected command channel as quit, so
-            // a sender lives as long as the app does; it is also how the
-            // client's own commands will reach the game.
-            app.manage(cmd_tx);
-
-            if spike {
-                let ov = ov.clone();
-                let app = app.handle().clone();
-                std::thread::spawn(move || {
-                    overlay::spike(&ov, hwnd);
-                    app.exit(0);
-                });
-            }
+            let ui = flow::Flow::spawn(app.handle().clone(), library, scale, spike, auto);
+            *app.state::<Shared>().ui.lock().unwrap() = Some(ui);
             Ok(())
         })
         .run(tauri::generate_context!())

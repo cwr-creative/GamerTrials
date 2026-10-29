@@ -73,16 +73,26 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app-client"
 version = "0.1.0"
 dependencies = [
+ "asset-store",
  "challenge-core",
  "challenge-library",
  "minifb",
+ "protocol",
  "serde",
  "serde_json",
+ "server",
  "session-api",
  "session-libretro",
  "tauri",
  "tauri-build",
  "winapi",
+]
+
+[[package]]
+name = "asset-store"
+version = "0.1.0"
+dependencies = [
+ "content-gen",
 ]
 
 [[package]]
@@ -2821,6 +2831,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "challenge-core",
+ "serde",
+ "serde_json",
+ "session-api",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3273,6 +3293,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "challenge-core",
+ "challenge-library",
+ "protocol",
+ "session-api",
+ "session-fake",
 ]
 
 [[package]]
