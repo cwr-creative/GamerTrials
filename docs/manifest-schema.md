@@ -1018,7 +1018,7 @@ else. A hack's entry states are captured on the hack.
 **Arithmetic and expressions.** A rule reads one field's transition, optionally
 guarded by one other field's current value; a `complete_when` is a conjunction
 of a closed predicate set. There is no `+`, no `or`, no `not`, no
-subexpression. Everything both shipped games needed fits; anything that does not
+subexpression. Everything the shipped games needed fits; anything that does not
 is a sign the game wants a real address found, not a cleverer manifest. The
 moment this grows an expression parser it has become a scripting language living
 in a data file, with none of a language's tooling.

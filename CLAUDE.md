@@ -40,12 +40,10 @@ any total (ADR 0026).
 Either kind may run on **vanilla** content (a stage as it originally shipped), on
 a **hack** (content a contributor authored in a level editor, carried as a BPS
 patch against the base ROM and named by the stage — ADR 0020), or on **generated**
-content (a ROM patched per attempt from a seed — ADR 0013/0015). All three are
-built, run and playtested to their criteria, but the seed a generated
-challenge needs still comes from a harness flag rather than from a session. All
-three feed the same sequencing and scoring, and the last two compose — a
-generated challenge sitting on a hack is the expected shape, not an exotic one: a
-human designs the level, the generator rerolls enemies inside it.
+content (a ROM patched per attempt from a seed — ADR 0013/0015). All three feed
+the same sequencing and scoring, and the last two compose — a generated
+challenge sitting on a hack is the expected shape, not an exotic one: a human
+designs the level, the generator rerolls enemies inside it.
 
 Head-to-head, where players share one running game, is last by choice: it needs
 synchronised netcode rather than one-way telemetry. Nothing in the slice may
@@ -137,137 +135,42 @@ rejected for non-obvious reasons.
 
 ## Current phase
 
-Phase 2 (complete): `smb3-harness` and `dkc-harness` dissolved into
-`session-libretro` + `session-api`, and both games became manifests. The schema
-is `docs/manifest-schema.md` and the decision is ADR 0016. Not core-specific:
-what varies between the two consoles is `[runner.libretro.memory]` and a pad
-layout, both per console family rather than per core.
+**Phase B — solo client, in progress.** `cargo run -p app-client` opens a
+menu; Host game opens a lobby of one on an in-process `server` (ADR 0009);
+Start deals a match across all three consoles in one process, drawn by a
+transparent overlay over a native game window (ADR 0027). The server deals
+from a seed, issues the rolled-content seed, judges every run from the `Frame`
+messages the client streams, and ends the match loudly if the client's
+provisional verdict or an artifact hash disagrees with its own.
+`--host <name> --start --mode … --format kind:n --games a,b --limit <s>` plays
+a match from the command line. Hand-tested on all three games; `app-client`
+has no `cargo test` coverage — the server's tests play the client's loop on
+`session-fake` instead.
 
-Then `schema_version = 2` (ADR 0017): challenges became contributor-authored
-`[[challenge]]` entries with declared completion criteria, rather than a closed
-Rust enum plus an eligibility list on the stage.
+Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
+games as manifests — ADR 0016), contributor-authored `[[challenge]]`
+entries (`schema_version = 2`, ADR 0017), Doom under dosbox-pure (ADR 0018), and
+`schema_version = 3` with `content-gen` (ADR 0020/0015/0013). What each phase
+learned is written down where it applies — `docs/games/`, the crate READMEs,
+and the comments in `session-libretro/src/libretro.rs` — so read those before
+changing that code.
 
-Then Doom (ADR 0018/0014): the DOS spike folded into `session-libretro` and
-`manifests/doom.toml` loads and runs. All three slice games are now manifests
-against one adapter. What DOS needed was confined to the runner half of the
-schema — `controller = "keyboard"`, `boot_seconds`,
-`[runner.libretro.options]`, `[runner.libretro.memory.scan]`, and `u32` as a
-watch width — and nothing in `[watch]`, `[[rule]]`, `[[challenge]]` or
-`SessionEvent` changed. The spike crate is deleted.
+Open, roughly in order:
 
-Five things learned there are worth not rediscovering:
-
-- **A DOS bundle carries the game's configuration, not just its files.** DOOM
-  reads its sound card out of a `DEFAULT.CFG` that `SETUP.EXE` normally writes;
-  with no such file both devices default to `snd_none` and the game boots
-  correctly, runs correctly and plays in total silence. A console ROM has no
-  equivalent — there is nothing beside it to get wrong. Two of the four members
-  of `doom-shareware-e1m1.zip` are ours rather than id's, and the state a stage
-  enters at has to be recaptured whenever any of them changes, because a DOS
-  state is the whole machine including whatever the config already
-  initialised.
-
-- **A core may publish no system RAM at all.** dosbox-pure answers
-  `retro_get_memory_data` with nothing and publishes `SET_MEMORY_MAPS`
-  descriptors instead. The runner requires *one* route, not that route.
-- **`retro_serialize_size` is not free to call.** On dosbox-pure it opens a
-  handshake that `retro_serialize` closes; calling it before
-  `retro_unserialize` deadlocks. It also is not constant — 365 KB before the
-  guest boots, 3.6 MB after — so it cannot be used to validate a state.
-- **A core options table is part of a game's identity.** `dosbox_pure_cycles`
-  changes how many emulated frames a piece of play takes, so two players on
-  different values have incomparable scores (invariant 4).
-- **Host headroom is not guest speed, and a PC has no 60 Hz.** The host spent
-  under 1 ms a frame on Doom at 26800 cycles, which proved nothing about how
-  fast the *emulated* CPU draws; and forcing 60 fps put Doom's 35 pictures a
-  second on an uneven 1-2 cadence. Both made it feel slower than RetroArch at
-  the same game speed. It now runs at 77000 and VGA's native 70.0866 Hz
-  (`docs/games/doom.md`).
-
-Then `schema_version = 3` and `content-gen` (ADR 0020/0015/0013): content
-stopped being one file per manifest. `[rom]` became `[[rom]]` with an `id`,
-`[[stage]].rom` is required everywhere, and `[[challenge]]` may carry the
-`patch_slot` table the seeded engine rolls from. `content-gen` applies a
-contributor's BPS patch and performs the value substitution; it has no emulator
-dependency and no per-game code, so its golden-hash tests are ordinary
-`cargo test`. `session-libretro::prep` is what ADR 0013 called "whatever
-prepares a stage": dump → hack → roll → bytes, and the runner below it cannot
-tell which of the three it was handed.
-
-Three things learned there, in the same spirit:
-
-- **A pool's duplicates are its weights.** `[0x72, 0x72, 0x72, 0x72, 0x81,
-  0x82, 0x86, 0x87]` is a coin flip then an even choice among four. An engine
-  that deduplicated it would make it a 20% roll and say nothing. Duplication is
-  the only way this schema can express a non-uniform roll at all.
-- **The generator is a wire contract.** Every player derives the artifact
-  locally and the server aborts on a hash mismatch, so the RNG is written out
-  by hand rather than taken from a crate, and changing it is a
-  `generator_version` bump for the whole library.
-- **A golden hash from another implementation is worth more than a round
-  trip.** The three SMB3 hashes in `docs/games/smb3.md` were recorded against a
-  Python script before the crate existed, and the crate reproducing them is
-  evidence rather than a tautology.
-
-Phase 1 (complete): single-game libretro harness, deliberately SMB3-specific.
-
-Phase B (solo client, in progress): a solo match plays end to end.
-`cargo run -p app-client` opens a menu; Host game opens a lobby of one on an
-in-process `server` (ADR 0009); Start deals a match that crosses all three
-consoles in one process, with the intro, countdown, death flash, garland or
-skull, round standings and score screen drawn by a transparent overlay over
-a native game window (ADR 0027). The rules are `challenge-core`'s: the
-server deals from a seed, judges every run from the `Frame` messages the
-client streams, and compares the client's provisional verdict with its own;
-a disagreement or an artifact-hash mismatch ends the match loudly. The wire
-is `protocol`, versioned from day one; the file check is `asset-store`.
-`--host <name> --start --mode … --format kind:n --games a,b --limit <s>`
-plays a match from the command line. Learned on the way:
-
-- **A Tauri page needs a capability to hear anything.** Without
-  `capabilities/default.json` granting `core:default`, `listen` is refused
-  and nothing says so on either side. The overlay HUD now reports it.
-- **The libretro frontend's statics are per core, not per process.** A match
-  loads one core after another; `Core::load` now resets the directories,
-  the memory map, the options table and the keyboard callback the previous
-  core left behind.
-- **The server replays the judgement from exactly the frames it is sent.**
-  The client streams a `Frame` for every frame that carried an event and for
-  the frame its own judge settled the run on, nothing else, and the server's
-  `Run` reaches the same verdict from those alone because every criterion
-  is monotone in the frame. A client that skips one disagrees with the
-  server and the match fails, which is the check working.
-
-What is *not* done, and the next things to settle:
-
-- **Phase B is not finished.** Owed: a key or pad binding for give-up and
-  pause beyond F9/F10 on the keyboard; fullscreen (both windows borderless,
-  ADR 0027); the protocol has no word for "I cannot prepare this round" (a
-  missing dump at deal time ends the match through `EndMatch`); the
-  rolled-content seed now comes from the server, but ADR 0013 stays
-  Proposed until a remote server issues it (Phase C). Hand-tested on all
-  three games; nothing in `app-client` is covered by `cargo test`, and the
-  overlay is not a test target — the server's tests play the client's loop on
-  `session-fake` instead.
-- **`asset-store` will need to hash a bundle's members, not the container.** A
-  DOS game is a zip, and its hash depends on how it was zipped (ADR 0018). That
-  work also gates DOS hacks: a BPS patch against a zip is meaningless, so a PWAD
-  arrives as a member overlay and ADR 0020 defers it until members are hashable.
-- **Generated content is playtested, but its seed has nowhere to come from.**
-  The pipeline is end to end — dump, patch, roll, rebind, enter — and the two
-  SMB3 custom challenges in `manifests/smb3.toml` have been played through to
-  their criteria on rolled ROMs. ADR 0013 has the server issuing the seed and
-  comparing the artifact hashes clients report; the in-process server does
-  both for a lobby of one, and the harness still takes `--seed`. A remote
-  server doing it for several players is Phase C.
-- **A rolled quantity still cannot reach `complete_when`.** It is static TOML
-  with no arithmetic and nothing that can name the seed, so a generator cannot
-  roll a count a criterion then refers to. Both SMB3 challenges avoid it by
-  rolling types rather than counts. It is the first real boundary a generator
-  hits and it is still unsettled.
-- **Patch slots hang off `[[challenge]]`, so two kinds on one stage duplicate the
-  table.** `manifests/smb3.toml` carries each of its two tables twice, and
-  nothing stops the copies drifting. The alternative is hanging them off
-  `[[stage]]`, which is a schema decision nobody has made.
-- No networked lobby, no spectating, no head-to-head. Join game and Settings
-  are buttons that do nothing yet.
+- **Phase B owes:** a pad binding for give-up and pause (only F9/F10 on the
+  keyboard today); fullscreen (both windows borderless, ADR 0027); a protocol
+  word for "I cannot prepare this round" (a missing dump at deal time ends the
+  match through `EndMatch`). Join game and Settings do nothing yet.
+- **ADR 0013 stays Proposed** until a remote server issues seeds and compares
+  hashes for several players (Phase C), along with the networked lobby and
+  spectating. Head-to-head comes last.
+- **`asset-store` must hash a bundle's members, not the container.** A DOS
+  zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
+  a member overlay — wait on it (ADR 0020).
+- **A rolled quantity cannot reach `complete_when`.** Criteria are static TOML
+  that cannot name the seed, so a generator cannot roll a count a criterion
+  refers to. Both SMB3 generated challenges roll types instead. Unsettled.
+- **Patch slots hang off `[[challenge]]`**, so two kinds on one stage duplicate
+  the table (`manifests/smb3.toml` carries each of its two twice) and nothing
+  stops the copies drifting. Hanging them off `[[stage]]` is the undecided
+  alternative.

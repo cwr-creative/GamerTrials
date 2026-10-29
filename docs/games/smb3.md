@@ -5,11 +5,6 @@ document is the part that does not belong in it: where each address came from,
 what is playtested and what is only documented, and the reasoning behind the
 completion rule.
 
-This used to be `crates/smb3-harness`, the Phase 1 harness — ~900 lines of
-deliberately SMB3-specific Rust. ADR 0016 turned all of it into the manifest;
-the code that runs it is `session-libretro`, which has no idea which game it is
-running.
-
 ## Prerequisites
 
 1. **Rust toolchain.** `rustup` from <https://rustup.rs>, plus the MSVC linker —
@@ -276,8 +271,7 @@ cd vendor/smb3-disassembly/smb3-master && ./nesasm.exe smb3.asm
 
 Output is identical to `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes`,
 `sha1 6bd518e85eb46a4252af07910f61036e84b020d1`. That is stronger provenance
-than a database lookup, and `[rom].sha1` in the manifest is still empty — a
-loose end.
+than a database lookup, and it is the hash the base `[[rom]]` declares.
 
 **The disassembly is still what supplies the pool**, and that is the part a diff
 cannot give you. A diff yields an offset, a width and exactly one sample value;
@@ -478,131 +472,9 @@ hashes were first taken with.
 
 ### The manifest block
 
-Both slot tables are now in `manifests/smb3.toml`, along with the `[[rom]]` array
-and the two stages, and the loader reads them. What follows is the same thing,
-kept here because this document is where the offsets and pools are argued for and
-a reader should not have to hold two files open.
-
-```toml
-schema_version = 3
-
-[[rom]]
-id = "base"
-name = "Super Mario Bros. 3 (USA) (Rev 1)"
-path = "assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes"
-sha1 = "6bd518e85eb46a4252af07910f61036e84b020d1"
-header = "ines"
-
-[[rom]]
-id = "hack3"
-name = "SMB3: Gamer Trials"
-from = "base"
-patch = "assets/patches/smb3-rom-hack3.bps"
-sha1 = "0c963c375888d3b94690f703cd4a1b297c2551f6"
-
-# Every existing [[stage]] also gained `rom = "base"` — twelve one-line changes
-# across the three manifests, which is what made this a breaking change.
-#
-# The shipped manifest still leaves [[rom]].sha1 off the *base*, and that stays a
-# loose end: prep enforces a declared hash, and no dump has been verified to
-# declare one against. The disassembly reassembling to 6bd518e8… is the strongest
-# evidence there is, and it is evidence about this checkout, not about a player's.
-
-[[stage]]
-id = "sun-storm"
-name = "Sun Storm"
-rom = "hack3"
-entry = { state = "assets/states/smb3_sun-storm-hack3.state" }
-note = "captured on hack3, on the World 1 map, on the tile that enters W2_32"
-
-[[stage]]
-id = "bro-roulette"
-name = "Bro Roulette"
-rom = "hack3"
-entry = { state = "assets/states/smb3_bro-roulette-hack3.state" }
-note = "captured on hack3, on the World 1 map, on the tile that enters W1_03"
-
-# --- Sun Storm -------------------------------------------------------------
-# One to three Angry Suns. The two kinds duplicate the table rather than share
-# it: patch_slot hangs off [[challenge]], so the copies can drift. Unresolved,
-# and the strongest argument for hanging it off [[stage]] instead.
-
-[[challenge]]
-id = "sun-storm-survival"
-name = "Sun Storm"
-stage = "sun-storm"
-kind = "survival"
-complete_when = { cleared = true }
-generator_version = 1
-
-[[challenge.patch_slot]]
-offset = 0xC6BD                      # slot A, column $01
-width = "u8"
-values = { pool = [0xAF, 0xBB] }     # a sun, or nothing at all
-
-[[challenge.patch_slot]]
-offset = 0xC6C0                      # slot B, column $03
-width = "u8"
-values = { pool = [0xAF, 0xBB] }
-
-[[challenge.patch_slot]]
-offset = 0xC6C3                      # slot C, column $05 — always a sun
-width = "u8"
-values = { pool = [0xAF] }
-
-[[challenge]]
-id = "sun-storm-time-trial"
-name = "Sun Storm"
-stage = "sun-storm"
-kind = "time_trial"
-complete_when = { cleared = true }
-generator_version = 1
-
-# ... the same three patch_slot entries again.
-
-# --- Bro Roulette ----------------------------------------------------------
-# Four goombas, each independently a goomba or one of four bros. The repeated
-# 0x72 entries are the weighting, and are not a mistake.
-
-[[challenge]]
-id = "bro-roulette-time-trial"
-name = "Bro Roulette"
-stage = "bro-roulette"
-kind = "time_trial"
-complete_when = { counts = { score_award = 4 } }
-generator_version = 2
-note = "the clock stops on the fourth kill, by any means; reaching the card is not required"
-
-[[challenge.patch_slot]]
-offset = 0xC6CB                      # goomba 1, column $02
-width = "u8"
-values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
-
-[[challenge.patch_slot]]
-offset = 0xC6CE                      # goomba 2, column $0A
-width = "u8"
-values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
-
-[[challenge.patch_slot]]
-offset = 0xC6D1                      # goomba 3, column $0D
-width = "u8"
-values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
-
-[[challenge.patch_slot]]
-offset = 0xC6D4                      # goomba 4, column $0D
-width = "u8"
-values = { pool = [0x72, 0x72, 0x72, 0x72, 0x81, 0x82, 0x86, 0x87] }
-
-[[challenge]]
-id = "bro-roulette-survival"
-name = "Bro Roulette"
-stage = "bro-roulette"
-kind = "survival"
-complete_when = { counts = { score_award = 4 } }
-generator_version = 2
-
-# ... the same four patch_slot entries again.
-```
+Both slot tables, the `[[rom]]` array and the two stages are in
+[`manifests/smb3.toml`](../../manifests/smb3.toml); the offsets and pools are
+argued for above, and the manifest's comments point back here.
 
 Both levels award an end-level card, so `cleared = true` is available on either —
 which the base-ROM tables could not offer, and which is why neither challenge

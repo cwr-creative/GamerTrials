@@ -5,12 +5,6 @@ is the part that does not belong in it: where each address came from, what is
 playtested and what is only documented, and the reasoning behind the completion
 rule.
 
-This used to be `crates/dkc-harness`, written as a deliberate sibling of the
-SMB3 harness so that ADR 0012's interface could be read off two independent
-implementations rather than guessed at from one. ADR 0016 is what came of that
-comparison: both harnesses' game knowledge is now data, and the code that runs
-it is `session-libretro`, which has no idea which game it is running.
-
 ## Prerequisites
 
 1. **Rust toolchain.** `rustup` from <https://rustup.rs>, plus the MSVC linker —
