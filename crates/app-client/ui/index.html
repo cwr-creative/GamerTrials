@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GamerTrials overlay</title>
+<style>
+  /* The page is a transparent sheet over the game window. Everything on it is
+     a placeholder: crude, but it animates on and off the way the final assets
+     will, so swapping one in is a matter of replacing an element. */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+               font-family: "Segoe UI", system-ui, sans-serif; color: #fff;
+               user-select: none; }
+  #stage { position: fixed; inset: 0; pointer-events: none; }
+
+  /* Challenge intro: a card that drops in, holds, and slides out. */
+  #intro { position: absolute; inset: 0; display: flex; align-items: center;
+           justify-content: center; background: rgba(10, 10, 30, 0.85);
+           transform: translateY(-110%); transition: transform 500ms cubic-bezier(.2,.9,.3,1.1); }
+  #intro.in  { transform: translateY(0); }
+  #intro.out { transform: translateY(110%); transition-timing-function: ease-in; }
+  #intro .card { text-align: center; padding: 2em 3em; border: 4px solid #ffb347;
+                 background: #1d1d3a; box-shadow: 0 0 40px #000; }
+  #intro .console { font-size: 1.1em; letter-spacing: .3em; color: #ffb347; }
+  #intro .title { font-size: 2.4em; font-weight: 800; margin: .2em 0; }
+  #intro .goal { font-size: 1.4em; color: #c8f0ff; }
+
+  /* Countdown: one big number that pops. */
+  #count { position: absolute; inset: 0; display: flex; align-items: center;
+           justify-content: center; font-size: 9em; font-weight: 900;
+           text-shadow: 0 0 30px #000, 0 0 6px #000; opacity: 0;
+           transform: scale(.4); }
+  #count.pop { animation: pop 900ms ease-out; }
+  @keyframes pop { 0% { opacity: 1; transform: scale(1.6); }
+                   70% { opacity: 1; transform: scale(1); }
+                   100% { opacity: 0; transform: scale(.9); } }
+
+  /* Death: a red flash, under half a second. */
+  #flash { position: absolute; inset: 0; background: rgba(200, 0, 0, 0); }
+  #flash.hit { animation: flash 450ms ease-out; }
+  @keyframes flash { 0% { background: rgba(200, 0, 0, .75); } 100% { background: rgba(200, 0, 0, 0); } }
+
+  /* Garland or skull: a badge that swings in and fades. */
+  #badge { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%) scale(0);
+           font-size: 7em; filter: drop-shadow(0 0 20px #000); }
+  #badge.show { animation: badge 2200ms ease-out forwards; }
+  @keyframes badge { 0% { transform: translate(-50%, -50%) scale(0) rotate(-30deg); opacity: 1; }
+                     25% { transform: translate(-50%, -50%) scale(1.2) rotate(5deg); }
+                     40% { transform: translate(-50%, -50%) scale(1); }
+                     80% { opacity: 1; } 100% { opacity: 0; } }
+
+  /* A corner readout so a screenshot says what the page thinks is going on. */
+  #hud { position: absolute; right: 8px; bottom: 6px; font: 12px monospace;
+         color: #ffb347; text-shadow: 0 0 4px #000; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="intro"><div class="card">
+    <div class="console" id="i-console">NES</div>
+    <div class="title" id="i-title">Super Mario Bros. 3</div>
+    <div class="goal" id="i-goal">Reach the end!</div>
+  </div></div>
+  <div id="count"></div>
+  <div id="flash"></div>
+  <div id="badge"></div>
+  <div id="hud">overlay: waiting</div>
+</div>
+<script>
+  const $ = id => document.getElementById(id);
+  const hud = s => { $('hud').textContent = 'overlay: ' + s; };
+  const replay = (el, cls) => { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); };
+
+  function handle(p) {
+    switch (p.kind) {
+      case 'intro':
+        $('i-console').textContent = p.console || '';
+        $('i-title').textContent = p.title || '';
+        $('i-goal').textContent = p.goal || '';
+        $('intro').classList.remove('out');
+        $('intro').classList.add('in');
+        hud('intro');
+        break;
+      case 'intro-out':
+        $('intro').classList.remove('in');
+        $('intro').classList.add('out');
+        hud('intro out');
+        break;
+      case 'countdown':
+        $('count').textContent = p.n;
+        replay($('count'), 'pop');
+        hud('countdown ' + p.n);
+        break;
+      case 'go':
+        $('count').textContent = 'GO';
+        replay($('count'), 'pop');
+        hud('playing');
+        break;
+      case 'death':
+        replay($('flash'), 'hit');
+        hud('death at frame ' + p.frame);
+        break;
+      case 'garland':
+        $('badge').textContent = '\u{1F3C6}';
+        replay($('badge'), 'show');
+        hud('cleared at frame ' + p.frame);
+        break;
+      case 'skull':
+        $('badge').textContent = '\u{1F480}';
+        replay($('badge'), 'show');
+        hud('out at frame ' + p.frame);
+        break;
+      case 'hud':
+        hud(p.text);
+        break;
+    }
+  }
+
+  // Tauri's event bridge; `withGlobalTauri` puts it on `window`. Listening
+  // needs the `core:default` capability in `capabilities/`; without it the
+  // call is refused, and the refusal is the only sign, so it goes on the HUD.
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    hud('subscribing');
+    window.__TAURI__.event.listen('overlay', e => handle(e.payload))
+      .then(() => hud('listening'), err => hud('listen refused: ' + err));
+  } else {
+    hud('no tauri bridge');
+  }
+</script>
+</body>
+</html>

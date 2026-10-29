@@ -8,3 +8,6 @@
 # derived per seed; neither artifact belongs in the repository, and neither is
 # ours to distribute (ADR 0013, ADR 0020).
 /build/derived
+
+# tauri-build regenerates these on every build of app-client.
+/crates/app-client/gen

@@ -1,0 +1,26 @@
+[package]
+name = "app-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+
+# The Tauri shell (ADR 0024, ADR 0027). Rust owns the game window and the
+# emulator; the webview is a transparent overlay over it, and every menu.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+session-api = { path = "../session-api" }
+session-libretro = { path = "../session-libretro" }
+challenge-core = { path = "../challenge-core" }
+challenge-library = { path = "../challenge-library" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+minifb = "0.27"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["winuser", "windef", "basetsd", "minwindef"] }

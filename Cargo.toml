@@ -7,6 +7,7 @@ members = [
     "crates/session-api",
     "crates/session-fake",
     "crates/session-libretro",
+    "crates/app-client",
 ]
 
 [workspace.package]
