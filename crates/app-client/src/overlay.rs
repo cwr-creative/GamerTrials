@@ -65,9 +65,12 @@ impl Overlay {
             .focused(false)
             .position(x as f64, y as f64)
             .inner_size(w as f64, h as f64)
-            // A spectator's sound starts without a click (ADR 0032): the
-            // sheet is never clicked before the first chunk arrives.
-            .additional_browser_args("--autoplay-policy=no-user-gesture-required")
+            // No `additional_browser_args` here: WebView2 runs one browser
+            // process per app, with the arguments of the first webview made
+            // (the main window's), and refuses a second webview whose
+            // arguments differ (0x8007139F). wry's defaults already include
+            // `--autoplay-policy=no-user-gesture-required`, which is what a
+            // spectator's sound needs to start without a click (ADR 0032).
             .build()?;
         let hwnd = window.hwnd()?.0 as isize;
         unsafe {

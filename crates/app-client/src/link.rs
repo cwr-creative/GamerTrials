@@ -98,14 +98,27 @@ impl Link {
     /// follows. Dropping the link closes the socket quietly.
     pub fn connect(server: &str, generation: u64, out: Sender<Msg>) -> Result<Link, String> {
         let server = Server::parse(server);
-        let addr = server
-            .addr
-            .to_socket_addrs()
-            .map_err(|e| format!("{}: {e}", server.addr))?
-            .next()
-            .ok_or_else(|| format!("{}: no address", server.addr))?;
-        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
-            .map_err(|e| format!("cannot reach {}: {e}", server.display()))?;
+        // A name may resolve to several addresses — `localhost` is `::1`
+        // before `127.0.0.1` on Windows, and the server may listen on one
+        // family only — so the first that answers is the one.
+        let addrs: Vec<_> = server.addr.to_socket_addrs().map_err(|e| format!("{}: {e}", server.addr))?.collect();
+        if addrs.is_empty() {
+            return Err(format!("{}: no address", server.addr));
+        }
+        let mut last = None;
+        let mut stream = None;
+        for addr in &addrs {
+            match TcpStream::connect_timeout(addr, Duration::from_secs(3)) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        let stream = stream.ok_or_else(|| {
+            format!("cannot reach {}: {}", server.display(), last.map(|e| e.to_string()).unwrap_or_default())
+        })?;
         let _ = stream.set_nodelay(true);
         // `client_tls` reads the scheme: `ws://` leaves the socket plain,
         // `wss://` wraps it in TLS against `host`'s certificate.

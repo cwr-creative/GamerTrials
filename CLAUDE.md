@@ -173,13 +173,15 @@ changing that code.
 
 Open, roughly in order:
 
-- **Not yet hand-tested:** a networked match between two clients, spectating
-  (picture, sound, switching, the eliminated watching from the deal), a
-  voided round, the lobby's file re-check, Settings in a match, and `wss://`
-  against a real proxy. Borderless fullscreen is hand-tested (alt-tab,
-  Win+Down, a monitor move), as is Doom on a pad and on mouse and keyboard.
-  The encoder and the ADPCM coder have unit tests; the relay is tested
-  in-process and over the wire.
+- **Hand-tested:** a networked match between two clients on one machine,
+  with each player spectating the other in turn — picture and sound, and
+  the sound starting without a click. Also borderless fullscreen (alt-tab,
+  Win+Down, a monitor move), and Doom on a pad and on mouse and keyboard.
+  **Not yet:** switching between several watched players, the eliminated
+  watching from the deal, a voided round, the lobby's file re-check,
+  Settings in a match, and `wss://` against a real proxy. The encoder and
+  the ADPCM coder have unit tests; the relay is tested in-process and over
+  the wire.
 - **Phase C owes:** the two-machine match (`docs/server.md`), on which
   **ADR 0013 stays Proposed**. Head-to-head comes last.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
