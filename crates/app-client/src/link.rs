@@ -6,15 +6,19 @@
 //! A server is named `[ws://|wss://]host[:port]`. `wss://` is TLS, ended by
 //! whatever stands in front of the server (ADR 0033); the port is 443 for it
 //! and `server-net`'s otherwise, when none is written.
+//!
+//! A socket that goes quiet is a server that has gone: the link pings it and
+//! gives up after [`Liveness::silence`] with nothing heard, as the server
+//! does with each client.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Sender, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use challenge_library::Catalog;
-use protocol::{ToClient, ToServer};
+use protocol::{Beat, Heartbeat, Liveness, ToClient, ToServer};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
@@ -120,6 +124,11 @@ impl Link {
             format!("cannot reach {}: {}", server.display(), last.map(|e| e.to_string()).unwrap_or_default())
         })?;
         let _ = stream.set_nodelay(true);
+        // A handshake, or later a write, that cannot finish in `silence` is
+        // a server that has gone.
+        let silence = Liveness::DEFAULT.silence;
+        stream.set_write_timeout(Some(silence)).map_err(|e| e.to_string())?;
+        stream.set_read_timeout(Some(silence)).map_err(|e| e.to_string())?;
         // `client_tls` reads the scheme: `ws://` leaves the socket plain,
         // `wss://` wraps it in TLS against `host`'s certificate.
         let (mut ws, _): (Socket, _) = tungstenite::client_tls(server.url(), stream)
@@ -129,8 +138,9 @@ impl Link {
         thread::Builder::new()
             .name("server-link".into())
             .spawn(move || {
+                let mut heart = Heartbeat::new(Liveness::DEFAULT, Instant::now());
                 let reason = loop {
-                    match pump_once(&mut ws, &out) {
+                    match pump_once(&mut ws, &mut heart, &out) {
                         Ok(true) => {}
                         Ok(false) => return,
                         Err(reason) => break reason,
@@ -156,6 +166,15 @@ impl Link {
                         let _ = ws.flush();
                         return;
                     }
+                    match heart.check(Instant::now()) {
+                        Beat::Wait => {}
+                        Beat::Ping => {
+                            if let Err(e) = ws.send(Message::Ping(Default::default())) {
+                                break e.to_string();
+                            }
+                        }
+                        Beat::Silent => break format!("nothing heard in {}s", heart.silence().as_secs()),
+                    }
                 };
                 let _ = out.send(Msg::Disconnected { generation, reason });
             })
@@ -180,8 +199,12 @@ fn set_read_timeout(ws: &mut Socket, t: Option<Duration>) -> Result<(), String> 
 
 /// Reads at most one frame. `Ok(false)` when the flow has gone, `Err` when
 /// the server has.
-fn pump_once(ws: &mut Socket, out: &Sender<Msg>) -> Result<bool, String> {
-    match ws.read() {
+fn pump_once(ws: &mut Socket, heart: &mut Heartbeat, out: &Sender<Msg>) -> Result<bool, String> {
+    let read = ws.read();
+    if read.is_ok() {
+        heart.heard(Instant::now());
+    }
+    match read {
         Ok(Message::Text(text)) => {
             let m: ToClient = protocol::decode(text.as_str()).map_err(|e| e.to_string())?;
             Ok(out.send(Msg::Server(m)).is_ok())

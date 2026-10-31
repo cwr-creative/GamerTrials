@@ -12,7 +12,10 @@
 //!   lobby's rules are the state machine's, so a lobby here behaves exactly
 //!   like the client's in-process one (ADR 0009).
 //!
-//! A lobby ends when its last connection does. Nothing is stored.
+//! A lobby ends when its last connection does. Nothing is stored. A
+//! connection ends when its socket closes, or when nothing has come from it
+//! for [`Liveness::silence`]: a player whose link dropped leaves as one who
+//! closed it does, in seconds rather than whenever TCP gives up.
 
 #![forbid(unsafe_code)]
 
@@ -24,10 +27,10 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use challenge_library::Catalog;
-use protocol::{ToClient, ToServer};
+use protocol::{Beat, Heartbeat, Liveness, ToClient, ToServer};
 use server::{ConnId, Server};
 use tungstenite::{Message, WebSocket};
 
@@ -68,6 +71,7 @@ enum LobbyMsg {
 
 struct Router {
     catalog: Catalog,
+    liveness: Liveness,
     lobbies: Mutex<HashMap<String, Sender<LobbyMsg>>>,
     /// Stepped for every code and seed.
     entropy: Mutex<u64>,
@@ -158,13 +162,15 @@ fn lobby(router: Arc<Router>, code: String, seed: u64, rx: Receiver<LobbyMsg>) {
 }
 
 /// Serves until the listener fails. Each connection gets a thread.
-pub fn serve(listener: TcpListener, catalog: Catalog) -> io::Result<()> {
+/// `liveness` is [`Liveness::DEFAULT`] but for tests that cannot wait for it.
+pub fn serve(listener: TcpListener, catalog: Catalog, liveness: Liveness) -> io::Result<()> {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5EED);
     let router = Arc::new(Router {
         catalog,
+        liveness,
         lobbies: Mutex::new(HashMap::new()),
         entropy: Mutex::new(seed),
     });
@@ -186,12 +192,12 @@ pub fn serve(listener: TcpListener, catalog: Catalog) -> io::Result<()> {
 
 /// Binds and serves on a thread; the address it bound. For tests, and for
 /// anything else that wants a server without owning the accept loop.
-pub fn spawn(addr: &str, catalog: Catalog) -> io::Result<std::net::SocketAddr> {
+pub fn spawn(addr: &str, catalog: Catalog, liveness: Liveness) -> io::Result<std::net::SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     thread::Builder::new()
         .name("accept".into())
-        .spawn(move || serve(listener, catalog))
+        .spawn(move || serve(listener, catalog, liveness))
         .expect("spawn the accept thread");
     Ok(bound)
 }
@@ -204,7 +210,13 @@ enum Seat {
 }
 
 fn connection(stream: TcpStream, router: &Arc<Router>) -> Result<(), String> {
+    let silence = router.liveness.silence;
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
+    // A peer that stops reading is as gone as one that stops writing: a
+    // write that cannot finish in `silence` ends the connection too. So does
+    // a handshake that never does.
+    stream.set_write_timeout(Some(silence)).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(silence)).map_err(|e| e.to_string())?;
     let mut ws = tungstenite::accept(stream).map_err(|e| format!("handshake: {e}"))?;
     ws.get_ref().set_read_timeout(Some(POLL)).map_err(|e| e.to_string())?;
     let (reply_tx, reply_rx) = mpsc::channel::<ToClient>();
@@ -218,7 +230,7 @@ fn connection(stream: TcpStream, router: &Arc<Router>) -> Result<(), String> {
     result
 }
 
-/// Reads frames and writes replies until the socket closes.
+/// Reads frames and writes replies until the socket closes or goes silent.
 fn pump(
     ws: &mut WebSocket<TcpStream>,
     router: &Arc<Router>,
@@ -226,8 +238,13 @@ fn pump(
     reply_tx: &Sender<ToClient>,
     reply_rx: &Receiver<ToClient>,
 ) -> Result<(), String> {
+    let mut heart = Heartbeat::new(router.liveness, Instant::now());
     loop {
-        match ws.read() {
+        let read = ws.read();
+        if read.is_ok() {
+            heart.heard(Instant::now());
+        }
+        match read {
             Ok(Message::Text(text)) => {
                 let msg = match protocol::decode::<ToServer>(text.as_str()) {
                     Ok(m) => m,
@@ -256,6 +273,11 @@ fn pump(
         }
         while let Ok(m) = reply_rx.try_recv() {
             send(ws, &m)?;
+        }
+        match heart.check(Instant::now()) {
+            Beat::Wait => {}
+            Beat::Ping => ws.send(Message::Ping(Default::default())).map_err(|e| e.to_string())?,
+            Beat::Silent => return Err(format!("nothing heard in {}s", heart.silence().as_secs())),
         }
     }
 }

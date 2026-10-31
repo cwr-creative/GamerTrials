@@ -13,6 +13,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::time::{Duration, Instant};
+
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use session_api::{ChallengeKind, ExitReason, SessionEvent};
 
@@ -528,9 +530,87 @@ pub fn from_base64(text: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD.decode(text).map_err(|e| e.to_string())
 }
 
+/// How each end of a socket notices the other has gone. TCP alone does not:
+/// a peer whose link dropped without a close is silent, not closed, for as
+/// long as the operating system cares to wait. So each end pings every
+/// `ping_every` and gives up after `silence` with nothing heard — a ping, a
+/// pong, or a message. The pings are WebSocket control frames, not packets,
+/// so they need no version: every WebSocket answers them.
+///
+/// The two ends agree only in that each pings well inside the other's
+/// `silence`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Liveness {
+    pub ping_every: Duration,
+    pub silence: Duration,
+}
+
+impl Liveness {
+    /// Rides out a Wi-Fi blip; ends a dead match in seconds, not minutes.
+    pub const DEFAULT: Liveness = Liveness { ping_every: Duration::from_secs(2), silence: Duration::from_secs(10) };
+}
+
+/// What a socket's loop should do now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Beat {
+    Wait,
+    Ping,
+    /// Nothing heard for `silence`: the peer is gone.
+    Silent,
+}
+
+/// One socket's [`Liveness`], kept by its loop.
+#[derive(Clone, Debug)]
+pub struct Heartbeat {
+    rules: Liveness,
+    heard: Instant,
+    pinged: Instant,
+}
+
+impl Heartbeat {
+    pub fn new(rules: Liveness, now: Instant) -> Heartbeat {
+        Heartbeat { rules, heard: now, pinged: now }
+    }
+
+    /// Anything arrived from the peer.
+    pub fn heard(&mut self, now: Instant) {
+        self.heard = now;
+    }
+
+    pub fn check(&mut self, now: Instant) -> Beat {
+        if now.duration_since(self.heard) >= self.rules.silence {
+            Beat::Silent
+        } else if now.duration_since(self.pinged) >= self.rules.ping_every {
+            self.pinged = now;
+            Beat::Ping
+        } else {
+            Beat::Wait
+        }
+    }
+
+    pub fn silence(&self) -> Duration {
+        self.rules.silence
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_heartbeat_pings_on_its_beat_and_gives_up_after_silence() {
+        let rules = Liveness { ping_every: Duration::from_secs(2), silence: Duration::from_secs(10) };
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut h = Heartbeat::new(rules, t0);
+        assert_eq!(h.check(at(1)), Beat::Wait);
+        assert_eq!(h.check(at(2)), Beat::Ping);
+        assert_eq!(h.check(at(3)), Beat::Wait, "one ping per beat");
+        assert_eq!(h.check(at(4)), Beat::Ping);
+        h.heard(at(9));
+        assert_eq!(h.check(at(18)), Beat::Ping, "hearing anything puts silence off");
+        assert_eq!(h.check(at(19)), Beat::Silent);
+    }
 
     #[test]
     fn packets_round_trip_and_carry_the_version() {

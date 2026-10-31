@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use challenge_core::{Next, Run};
-use protocol::{FileReport, Format, LobbySettings, LobbyState, ToClient, ToServer};
+use protocol::{FileReport, Format, Liveness, LobbySettings, LobbyState, ToClient, ToServer};
 use session_api::{ChallengeSpec, StageRunner};
 use session_fake::{stage_for, Attempt, FakeRunner};
 use tungstenite::{Message, WebSocket};
@@ -16,9 +16,13 @@ fn manifests() -> std::path::PathBuf {
 }
 
 fn start() -> (SocketAddr, String) {
+    start_with(Liveness::DEFAULT)
+}
+
+fn start_with(liveness: Liveness) -> (SocketAddr, String) {
     let catalog = server_net::load_catalog(&manifests()).unwrap();
     let hash = format!("{:016x}", catalog.hash());
-    (server_net::spawn("127.0.0.1:0", catalog).unwrap(), hash)
+    (server_net::spawn("127.0.0.1:0", catalog, liveness).unwrap(), hash)
 }
 
 struct Peer {
@@ -93,7 +97,10 @@ impl Peer {
 
 /// A host and a guest in one lobby, both with their files reported.
 fn table() -> (Peer, Peer) {
-    let (addr, hash) = start();
+    table_on(start())
+}
+
+fn table_on((addr, hash): (SocketAddr, String)) -> (Peer, Peer) {
     let mut host = Peer::connect(addr);
     host.hello("host", &hash, None);
     let code = host.welcome().code;
@@ -254,6 +261,21 @@ fn a_guest_leaving_mid_match_ends_it_for_the_host() {
     });
     assert_eq!(message, "guest left the match");
     host.until(|m| matches!(m, ToClient::MatchOver { .. }).then_some(()));
+}
+
+#[test]
+fn a_guest_gone_silent_mid_match_ends_it_for_the_host() {
+    // A link that drops without a close: the guest's socket stays open but
+    // nothing reads it, so the server's pings go unanswered.
+    let quick = Liveness { ping_every: Duration::from_millis(100), silence: Duration::from_secs(1) };
+    let (mut host, _guest) = table_on(start_with(quick));
+    host.send(&ToServer::Start);
+    host.until(|m| matches!(m, ToClient::Dealt { .. }).then_some(()));
+    let message = host.until(|m| match m {
+        ToClient::Error { message } => Some(message.clone()),
+        _ => None,
+    });
+    assert_eq!(message, "guest left the match", "and the host, who answers its pings, stays");
 }
 
 #[test]

@@ -46,7 +46,11 @@ with `Restart=always` is enough; it holds nothing between lobbies.
 ## What to expect
 
 - A lobby lives as long as one connection does. Nothing is stored.
-- A player leaving mid-match ends the match for everyone (ADR 0030).
+- A player leaving mid-match ends the match for everyone (ADR 0030). So
+  does one whose link drops without closing: each end pings every 2 s and
+  gives up on the other after 10 s with nothing heard, or a write that
+  cannot finish in 10 s (`protocol::Liveness`). A blip shorter than that
+  is ridden out.
 - Each spectated run costs the server about a megabit per watcher in and
   out (ADR 0032). A small virtual machine serves a few lobbies of friends.
 - The server prints each lobby's code and seed as it opens, and each
