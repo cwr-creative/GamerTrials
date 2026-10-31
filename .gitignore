@@ -11,3 +11,6 @@
 
 # tauri-build regenerates these on every build of app-client.
 /crates/app-client/gen
+
+# Portable builds from tools/package.ps1.
+/dist
