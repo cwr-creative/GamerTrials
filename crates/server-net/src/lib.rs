@@ -4,8 +4,10 @@
 //! Three kinds of thread:
 //!
 //! * **Accept.** [`serve`] takes connections and gives each its own thread.
-//! * **Connection.** Speaks WebSocket to one client: each text frame is one
-//!   [`protocol`] packet. Its first message must be a `Hello`, and
+//! * **Connection.** Speaks WebSocket to one client through [`transport`]'s
+//!   loop, which sends the match before a spectator's stream and drops a
+//!   stream the client's link cannot keep up with (ADR 0034). Its first
+//!   message must be a `Hello`, and
 //!   `Hello.lobby` picks the lobby: `None` makes a new one, a code joins it.
 //! * **Lobby.** One per lobby, owning its `Server`. Connections send it what
 //!   they read; it hands each reply to the connection it is addressed to. A
@@ -14,8 +16,8 @@
 //!
 //! A lobby ends when its last connection does. Nothing is stored. A
 //! connection ends when its socket closes, or when nothing has come from it
-//! for [`Liveness::silence`]: a player whose link dropped leaves as one who
-//! closed it does, in seconds rather than whenever TCP gives up.
+//! for [`protocol::Liveness::silence`]: a player whose link dropped leaves
+//! as one who closed it does, in seconds rather than whenever TCP gives up.
 
 #![forbid(unsafe_code)]
 
@@ -27,19 +29,15 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use challenge_library::Catalog;
-use protocol::{Beat, Heartbeat, Liveness, ToClient, ToServer};
+use protocol::{Lane, Message, ToClient, ToServer};
 use server::{ConnId, Server};
-use tungstenite::{Message, WebSocket};
+use transport::{End, Ends, Next, Rules};
 
 /// The port a client assumes when an invite code names none.
 pub const DEFAULT_PORT: u16 = 7878;
-
-/// How long a connection waits for a frame before it looks for replies to
-/// send. Bounds the latency the server adds to a reply.
-const POLL: Duration = Duration::from_millis(5);
 
 /// Reads every manifest in `dir`, as `app-client`'s `Library::load` does, so
 /// the two hash the same texts and a client holding the same library agrees.
@@ -71,7 +69,7 @@ enum LobbyMsg {
 
 struct Router {
     catalog: Catalog,
-    liveness: Liveness,
+    rules: Rules,
     lobbies: Mutex<HashMap<String, Sender<LobbyMsg>>>,
     /// Stepped for every code and seed.
     entropy: Mutex<u64>,
@@ -162,15 +160,15 @@ fn lobby(router: Arc<Router>, code: String, seed: u64, rx: Receiver<LobbyMsg>) {
 }
 
 /// Serves until the listener fails. Each connection gets a thread.
-/// `liveness` is [`Liveness::DEFAULT`] but for tests that cannot wait for it.
-pub fn serve(listener: TcpListener, catalog: Catalog, liveness: Liveness) -> io::Result<()> {
+/// `rules` is [`Rules::DEFAULT`] but for tests that cannot wait for it.
+pub fn serve(listener: TcpListener, catalog: Catalog, rules: Rules) -> io::Result<()> {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x5EED);
     let router = Arc::new(Router {
         catalog,
-        liveness,
+        rules,
         lobbies: Mutex::new(HashMap::new()),
         entropy: Mutex::new(seed),
     });
@@ -181,7 +179,7 @@ pub fn serve(listener: TcpListener, catalog: Catalog, liveness: Liveness) -> io:
         thread::Builder::new()
             .name(format!("conn-{peer}"))
             .spawn(move || {
-                if let Err(e) = connection(stream, &router) {
+                if let Err(e) = connection(stream, &router, &peer) {
                     println!("[conn {peer}] {e}");
                 }
             })
@@ -192,12 +190,12 @@ pub fn serve(listener: TcpListener, catalog: Catalog, liveness: Liveness) -> io:
 
 /// Binds and serves on a thread; the address it bound. For tests, and for
 /// anything else that wants a server without owning the accept loop.
-pub fn spawn(addr: &str, catalog: Catalog, liveness: Liveness) -> io::Result<std::net::SocketAddr> {
+pub fn spawn(addr: &str, catalog: Catalog, rules: Rules) -> io::Result<std::net::SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     thread::Builder::new()
         .name("accept".into())
-        .spawn(move || serve(listener, catalog, liveness))
+        .spawn(move || serve(listener, catalog, rules))
         .expect("spawn the accept thread");
     Ok(bound)
 }
@@ -209,81 +207,38 @@ enum Seat {
     In { lobby: Sender<LobbyMsg>, id: ConnId },
 }
 
-fn connection(stream: TcpStream, router: &Arc<Router>) -> Result<(), String> {
-    let silence = router.liveness.silence;
-    stream.set_nodelay(true).map_err(|e| e.to_string())?;
-    // A peer that stops reading is as gone as one that stops writing: a
-    // write that cannot finish in `silence` ends the connection too. So does
-    // a handshake that never does.
-    stream.set_write_timeout(Some(silence)).map_err(|e| e.to_string())?;
-    stream.set_read_timeout(Some(silence)).map_err(|e| e.to_string())?;
+fn connection(stream: TcpStream, router: &Arc<Router>, peer: &str) -> Result<(), String> {
+    // A handshake that never finishes ends the connection as silence would.
+    stream.set_read_timeout(Some(router.rules.liveness.silence)).map_err(|e| e.to_string())?;
     let mut ws = tungstenite::accept(stream).map_err(|e| format!("handshake: {e}"))?;
-    ws.get_ref().set_read_timeout(Some(POLL)).map_err(|e| e.to_string())?;
+    transport::prepare(ws.get_ref()).map_err(|e| e.to_string())?;
     let (reply_tx, reply_rx) = mpsc::channel::<ToClient>();
     let mut seat = Seat::New;
-    let result = pump(&mut ws, router, &mut seat, &reply_tx, &reply_rx);
+    let label = format!("conn {peer}");
+    let mut incoming = |msg: ToServer| match route(router, &mut seat, &reply_tx, msg) {
+        true => Next::Go,
+        false => Next::Stop,
+    };
+    let end = transport::run(
+        &mut ws,
+        router.rules,
+        &reply_rx,
+        Ends { incoming: &mut incoming, key_wanted: &mut || {}, label: &label },
+    );
     if let Seat::In { lobby, id } = seat {
         let _ = lobby.send(LobbyMsg::Closed(id));
     }
-    let _ = ws.close(None);
-    let _ = ws.flush();
-    result
-}
-
-/// Reads frames and writes replies until the socket closes or goes silent.
-fn pump(
-    ws: &mut WebSocket<TcpStream>,
-    router: &Arc<Router>,
-    seat: &mut Seat,
-    reply_tx: &Sender<ToClient>,
-    reply_rx: &Receiver<ToClient>,
-) -> Result<(), String> {
-    let mut heart = Heartbeat::new(router.liveness, Instant::now());
-    loop {
-        let read = ws.read();
-        if read.is_ok() {
-            heart.heard(Instant::now());
-        }
-        match read {
-            Ok(Message::Text(text)) => {
-                let msg = match protocol::decode::<ToServer>(text.as_str()) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        // A peer on another version cannot read this either,
-                        // but its own decode says why.
-                        send(ws, &ToClient::Refused { reason: e.to_string() })?;
-                        return Err(e.to_string());
-                    }
-                };
-                if !route(router, seat, reply_tx, msg) {
-                    while let Ok(m) = reply_rx.try_recv() {
-                        send(ws, &m)?;
-                    }
-                    return Ok(());
-                }
-            }
-            Ok(Message::Close(_)) => return Ok(()),
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e))
-                if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                return Ok(())
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-        while let Ok(m) = reply_rx.try_recv() {
-            send(ws, &m)?;
-        }
-        match heart.check(Instant::now()) {
-            Beat::Wait => {}
-            Beat::Ping => ws.send(Message::Ping(Default::default())).map_err(|e| e.to_string())?,
-            Beat::Silent => return Err(format!("nothing heard in {}s", heart.silence().as_secs())),
-        }
+    // What is still owed goes before the close: a refusal, chiefly. A peer
+    // on another version cannot read this either, but its own decode says why.
+    let mut last: Vec<ToClient> = reply_rx.try_iter().filter(|m| m.lane() == Lane::Control).collect();
+    if let End::Malformed(e) = &end {
+        last.push(ToClient::Refused { reason: e.to_string() });
     }
-}
-
-fn send(ws: &mut WebSocket<TcpStream>, m: &ToClient) -> Result<(), String> {
-    ws.send(Message::Text(protocol::encode(m).into())).map_err(|e| e.to_string())
+    transport::close_with(&mut ws, last, Duration::from_secs(1));
+    match end {
+        End::Closed | End::Done => Ok(()),
+        e => Err(e.to_string()),
+    }
 }
 
 /// Hands a message to the connection's lobby, finding or making the lobby on

@@ -467,7 +467,7 @@ impl Flow {
                 if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
                     self.emit(json!({
                         "kind": "video", "player": player, "frame": frame, "key": key,
-                        "width": width, "height": height, "aspect": aspect, "data": data,
+                        "width": width, "height": height, "aspect": aspect, "data": protocol::to_base64(&data.0),
                     }));
                 }
             }
@@ -475,7 +475,22 @@ impl Flow {
                 if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
                     self.emit(json!({
                         "kind": "audio", "player": player, "frame": frame,
-                        "rate": rate, "channels": channels, "data": data,
+                        "rate": rate, "channels": channels, "data": protocol::to_base64(&data.0),
+                    }));
+                }
+            }
+            ToClient::Progress { round, player, frame, attempt, clock, events } => {
+                if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
+                    // Frames on the wire; the page shows them at the game's own rate.
+                    let fps = self
+                        .dealt
+                        .get(&round)
+                        .and_then(|c| self.library.catalog.game(&c.game))
+                        .map_or(60.0, |g| g.game.framerate.0);
+                    let said: Vec<String> = events.iter().map(|e| said(&e.to_session())).collect();
+                    self.emit(json!({
+                        "kind": "progress", "player": player, "frame": frame, "attempt": attempt,
+                        "clock": clock, "fps": fps, "events": said,
                     }));
                 }
             }
@@ -606,12 +621,10 @@ impl Flow {
                 }
             }
             Report::Video { round, frame, key, width, height, aspect, data } => {
-                let data = protocol::to_base64(&data);
-                self.send(ToServer::Video { round, frame, key, width, height, aspect, data });
+                self.send(ToServer::Video { round, frame, key, width, height, aspect, data: data.into() });
             }
             Report::Audio { round, frame, rate, channels, data } => {
-                let data = protocol::to_base64(&data);
-                self.send(ToServer::Audio { round, frame, rate, channels, data });
+                self.send(ToServer::Audio { round, frame, rate, channels, data: data.into() });
             }
             Report::Paused => {
                 let actions = self.settings.lock().unwrap().input.actions.clone();
@@ -874,5 +887,22 @@ impl Flow {
             },
             "custom": ch.is_custom(),
         })
+    }
+}
+
+/// A watched player's event in a few words, for the panel a watcher sees
+/// when the picture cannot reach them (ADR 0034).
+fn said(e: &session_api::SessionEvent) -> String {
+    use session_api::SessionEvent;
+    match e {
+        SessionEvent::StageEntered { .. } => "entered the stage".into(),
+        SessionEvent::StageCleared { .. } => "cleared the stage".into(),
+        SessionEvent::StageExited { .. } => "left the stage".into(),
+        SessionEvent::Died { .. } => "died".into(),
+        SessionEvent::Damaged { .. } => "took a hit".into(),
+        SessionEvent::EnemyDefeated { .. } => "defeated an enemy".into(),
+        SessionEvent::ItemCollected { item, .. } => format!("got {}", item.replace('_', " ")),
+        SessionEvent::Counted { counter, .. } => counter.replace('_', " "),
+        SessionEvent::ObjectiveReached { objective, .. } => format!("reached {}", objective.replace('-', " ")),
     }
 }

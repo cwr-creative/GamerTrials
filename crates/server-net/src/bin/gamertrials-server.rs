@@ -51,7 +51,7 @@ fn main() -> ExitCode {
         catalog.hash(),
         protocol::VERSION
     );
-    match server_net::serve(listener, catalog, protocol::Liveness::DEFAULT) {
+    match server_net::serve(listener, catalog, transport::Rules::DEFAULT) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");

@@ -433,7 +433,11 @@ fn step(
         });
     }
     let next = l.run.observe(frame, &events);
-    if !events.is_empty() || next != Next::Continue {
+    // While watched, a frame twice a second besides: the server relays where
+    // the run stands, and a watcher whose link cannot carry the picture
+    // still sees the clock move (ADR 0034).
+    let heartbeat = l.streaming() && frame % 30 == 0;
+    if !events.is_empty() || next != Next::Continue || heartbeat {
         let _ = reports.send(Report::Frame { round: l.round, frame, events });
     }
     l.done = matches!(next, Next::Finished(_));

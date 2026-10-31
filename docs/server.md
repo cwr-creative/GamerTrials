@@ -47,14 +47,19 @@ with `Restart=always` is enough; it holds nothing between lobbies.
 
 - A lobby lives as long as one connection does. Nothing is stored.
 - A player leaving mid-match ends the match for everyone (ADR 0030). So
-  does one whose link drops without closing: each end pings every 2 s and
-  gives up on the other after 10 s with nothing heard, or a write that
-  cannot finish in 10 s (`protocol::Liveness`). A blip shorter than that
-  is ridden out.
-- Each spectated run costs the server about a megabit per watcher in and
-  out (ADR 0032). A small virtual machine serves a few lobbies of friends.
+  does one whose link drops without closing: each end pings every second
+  and gives up on the other after 10 s with nothing heard
+  (`protocol::Liveness`). A blip shorter than that is ridden out.
+- Each spectated run costs the server about 0.6 Mbit/s per watcher in and
+  out (ADR 0034). A small virtual machine serves a few lobbies of friends.
+- A link too slow for that loses pictures, not the match: each connection
+  sends the match first and drops a stream it cannot deliver fresh, and a
+  watcher whose picture cannot keep up is shown the run instead (ADR 0034).
 - The server prints each lobby's code and seed as it opens, and each
-  connection's reason as it closes. There is no other log.
+  connection's reason as it closes. While a stream flows, each connection
+  carrying it logs a line every five seconds: kbit/s sent, pictures and
+  sound sent and dropped, and the link's round trip. A client's log has the
+  same line for its own uplink, as `[link]`.
 
 ## Checking it from two machines
 

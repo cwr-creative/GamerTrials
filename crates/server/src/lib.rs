@@ -490,20 +490,33 @@ impl Server {
         if seat.verdict.is_some() {
             return Vec::new();
         }
-        let events: Vec<_> = events.iter().map(|e| e.to_session()).collect();
-        match seat.run.observe(frame, &events) {
-            Next::Continue => Vec::new(),
-            Next::Reenter => {
-                seat.run.enter();
-                Vec::new()
-            }
+        let session: Vec<_> = events.iter().map(|e| e.to_session()).collect();
+        let next = seat.run.observe(frame, &session);
+        if matches!(next, Next::Reenter) {
+            seat.run.enter();
+        }
+        // Whoever watches hears where the run stands, in a few bytes that
+        // reach them when the picture cannot (ADR 0034).
+        let (attempt, clock) = (seat.run.attempts(), seat.run.frames());
+        let mut out = self.relay(&player, round, |p| ToClient::Progress {
+            round,
+            player: p,
+            frame,
+            attempt,
+            clock,
+            events: events.clone(),
+        });
+        match next {
+            Next::Continue | Next::Reenter => out,
             Next::Finished(result) => {
-                seat.verdict = Some(result.clone());
-                let mut out = self.broadcast(ToClient::PlayerFinished {
+                if let Some(seat) = self.seat_run(round, &player) {
+                    seat.verdict = Some(result.clone());
+                }
+                out.extend(self.broadcast(ToClient::PlayerFinished {
                     round,
                     player: player.0.clone(),
                     outcome: (&result).into(),
-                });
+                }));
                 out.extend(self.maybe_record());
                 out
             }

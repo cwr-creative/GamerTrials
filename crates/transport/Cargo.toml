@@ -1,0 +1,13 @@
+[package]
+name = "transport"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "One WebSocket's loop for both ends of the protocol (ADR 0034): control before stream, a stale stream dropped, liveness kept."
+
+# Held to the server's fence (ADR 0024) because `server-net` links it: this
+# crate moves protocol messages and learns no game.
+[dependencies]
+protocol = { path = "../protocol" }
+tungstenite = "0.29.0"
+socket2 = "0.6"

@@ -7,20 +7,21 @@
 //! whatever stands in front of the server (ADR 0033); the port is 443 for it
 //! and `server-net`'s otherwise, when none is written.
 //!
-//! A socket that goes quiet is a server that has gone: the link pings it and
-//! gives up after [`Liveness::silence`] with nothing heard, as the server
-//! does with each client.
+//! The socket runs `transport`'s loop, as each of the server's connections
+//! does: the match goes before this player's stream, a stream the uplink
+//! cannot keep up with is dropped rather than queued, and a server silent
+//! for [`protocol::Liveness::silence`] has gone (ADR 0034).
 
-use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::mpsc::{self, Sender, TryRecvError};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use challenge_library::Catalog;
-use protocol::{Beat, Heartbeat, Liveness, ToClient, ToServer};
+use protocol::{ToClient, ToServer};
+use transport::{End, Ends, Next, Rules};
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
+use tungstenite::WebSocket;
 
 use crate::flow::Msg;
 use crate::local;
@@ -29,9 +30,6 @@ use crate::local;
 pub const DEFAULT_PORT: u16 = 7878;
 /// And for `wss://`, where a proxy in front of the server answers.
 pub const TLS_PORT: u16 = 443;
-
-/// How long the socket thread waits for a frame before sending what is queued.
-const POLL: Duration = Duration::from_millis(5);
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -123,58 +121,37 @@ impl Link {
         let stream = stream.ok_or_else(|| {
             format!("cannot reach {}: {}", server.display(), last.map(|e| e.to_string()).unwrap_or_default())
         })?;
-        let _ = stream.set_nodelay(true);
-        // A handshake, or later a write, that cannot finish in `silence` is
-        // a server that has gone.
-        let silence = Liveness::DEFAULT.silence;
+        // A handshake that cannot finish in `silence` is a server that has gone.
+        let silence = Rules::DEFAULT.liveness.silence;
         stream.set_write_timeout(Some(silence)).map_err(|e| e.to_string())?;
         stream.set_read_timeout(Some(silence)).map_err(|e| e.to_string())?;
         // `client_tls` reads the scheme: `ws://` leaves the socket plain,
         // `wss://` wraps it in TLS against `host`'s certificate.
         let (mut ws, _): (Socket, _) = tungstenite::client_tls(server.url(), stream)
             .map_err(|e| format!("{} ({}): {e}", server.display(), server.host()))?;
-        set_read_timeout(&mut ws, Some(POLL))?;
+        transport::prepare(tcp(&ws)?).map_err(|e| e.to_string())?;
         let (tx, rx) = mpsc::channel::<ToServer>();
         thread::Builder::new()
             .name("server-link".into())
             .spawn(move || {
-                let mut heart = Heartbeat::new(Liveness::DEFAULT, Instant::now());
-                let reason = loop {
-                    match pump_once(&mut ws, &mut heart, &out) {
-                        Ok(true) => {}
-                        Ok(false) => return,
-                        Err(reason) => break reason,
-                    }
-                    let mut gone = false;
-                    loop {
-                        match rx.try_recv() {
-                            Ok(m) => {
-                                if let Err(e) = ws.send(Message::Text(protocol::encode(&m).into())) {
-                                    let _ = out.send(Msg::Disconnected { generation, reason: e.to_string() });
-                                    return;
-                                }
-                            }
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => {
-                                gone = true;
-                                break;
-                            }
-                        }
-                    }
-                    if gone {
-                        let _ = ws.close(None);
-                        let _ = ws.flush();
+                let mut incoming = |m: ToClient| match out.send(Msg::Server(m)) {
+                    Ok(()) => Next::Go,
+                    Err(_) => Next::Stop,
+                };
+                let end = transport::run(
+                    &mut ws,
+                    Rules::DEFAULT,
+                    &rx,
+                    Ends { incoming: &mut incoming, key_wanted: &mut crate::stream::want_key, label: "link" },
+                );
+                let reason = match end {
+                    // The flow let go of the link: close quietly.
+                    End::Done => {
+                        transport::close_with(&mut ws, Vec::<ToServer>::new(), Duration::from_secs(1));
                         return;
                     }
-                    match heart.check(Instant::now()) {
-                        Beat::Wait => {}
-                        Beat::Ping => {
-                            if let Err(e) = ws.send(Message::Ping(Default::default())) {
-                                break e.to_string();
-                            }
-                        }
-                        Beat::Silent => break format!("nothing heard in {}s", heart.silence().as_secs()),
-                    }
+                    End::Closed => "the server closed the connection".to_string(),
+                    e => e.to_string(),
                 };
                 let _ = out.send(Msg::Disconnected { generation, reason });
             })
@@ -188,33 +165,12 @@ impl Link {
     }
 }
 
-fn set_read_timeout(ws: &mut Socket, t: Option<Duration>) -> Result<(), String> {
-    let stream = match ws.get_ref() {
-        MaybeTlsStream::Plain(s) => s,
-        MaybeTlsStream::NativeTls(s) => s.get_ref(),
-        _ => return Err("an unexpected stream".into()),
-    };
-    stream.set_read_timeout(t).map_err(|e| e.to_string())
-}
-
-/// Reads at most one frame. `Ok(false)` when the flow has gone, `Err` when
-/// the server has.
-fn pump_once(ws: &mut Socket, heart: &mut Heartbeat, out: &Sender<Msg>) -> Result<bool, String> {
-    let read = ws.read();
-    if read.is_ok() {
-        heart.heard(Instant::now());
-    }
-    match read {
-        Ok(Message::Text(text)) => {
-            let m: ToClient = protocol::decode(text.as_str()).map_err(|e| e.to_string())?;
-            Ok(out.send(Msg::Server(m)).is_ok())
-        }
-        Ok(Message::Close(_)) => Err("the server closed the connection".into()),
-        Ok(_) => Ok(true),
-        Err(tungstenite::Error::Io(e)) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
-            Ok(true)
-        }
-        Err(e) => Err(e.to_string()),
+/// The TCP stream under the WebSocket, TLS or not.
+fn tcp(ws: &Socket) -> Result<&TcpStream, String> {
+    match ws.get_ref() {
+        MaybeTlsStream::Plain(s) => Ok(s),
+        MaybeTlsStream::NativeTls(s) => Ok(s.get_ref()),
+        _ => Err("an unexpected stream".into()),
     }
 }
 

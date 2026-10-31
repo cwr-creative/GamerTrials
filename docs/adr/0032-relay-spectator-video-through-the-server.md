@@ -1,7 +1,7 @@
 # 0032. Relay spectator video through the server, superseding the media path of ADR 0003
 
 Date: 2026-10-31
-Status: Accepted
+Status: Superseded by 0034
 
 ## Context
 

@@ -6,9 +6,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use challenge_core::{Next, Run};
-use protocol::{FileReport, Format, Liveness, LobbySettings, LobbyState, ToClient, ToServer};
+use protocol::{FileReport, Format, Liveness, LobbySettings, LobbyState, ToClient, ToServer, Wire};
 use session_api::{ChallengeSpec, StageRunner};
 use session_fake::{stage_for, Attempt, FakeRunner};
+use transport::Rules;
 use tungstenite::{Message, WebSocket};
 
 fn manifests() -> std::path::PathBuf {
@@ -16,13 +17,13 @@ fn manifests() -> std::path::PathBuf {
 }
 
 fn start() -> (SocketAddr, String) {
-    start_with(Liveness::DEFAULT)
+    start_with(Rules::DEFAULT)
 }
 
-fn start_with(liveness: Liveness) -> (SocketAddr, String) {
+fn start_with(rules: Rules) -> (SocketAddr, String) {
     let catalog = server_net::load_catalog(&manifests()).unwrap();
     let hash = format!("{:016x}", catalog.hash());
-    (server_net::spawn("127.0.0.1:0", catalog, liveness).unwrap(), hash)
+    (server_net::spawn("127.0.0.1:0", catalog, rules).unwrap(), hash)
 }
 
 struct Peer {
@@ -39,7 +40,11 @@ impl Peer {
     }
 
     fn send(&mut self, m: &ToServer) {
-        self.ws.send(Message::Text(protocol::encode(m).into())).unwrap();
+        let frame = match protocol::to_wire(m.clone()) {
+            Wire::Text(t) => Message::Text(t.into()),
+            Wire::Binary(b) => Message::Binary(b.into()),
+        };
+        self.ws.send(frame).unwrap();
     }
 
     fn hello(&mut self, name: &str, hash: &str, lobby: Option<&str>) {
@@ -58,19 +63,23 @@ impl Peer {
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            match self.ws.read() {
-                Ok(Message::Text(t)) => {
-                    let m: ToClient = protocol::decode(t.as_str()).unwrap();
+            let read = match self.ws.read() {
+                Ok(Message::Text(t)) => Ok(protocol::decode::<ToClient>(t.as_str()).unwrap()),
+                Ok(Message::Binary(b)) => Ok(protocol::decode_binary::<ToClient>(&b).unwrap()),
+                other => Err(other),
+            };
+            match read {
+                Ok(m) => {
                     let hit = want(&m);
                     self.inbox.push(m);
                     if let Some(t) = hit {
                         return t;
                     }
                 }
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e))
+                Err(Ok(_)) => {}
+                Err(Err(tungstenite::Error::Io(e)))
                     if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-                Err(e) => panic!("socket: {e}; got {:?}", self.inbox),
+                Err(Err(e)) => panic!("socket: {e}; got {:?}", self.inbox),
             }
         }
         panic!("timed out; got {:?}", self.inbox);
@@ -267,7 +276,10 @@ fn a_guest_leaving_mid_match_ends_it_for_the_host() {
 fn a_guest_gone_silent_mid_match_ends_it_for_the_host() {
     // A link that drops without a close: the guest's socket stays open but
     // nothing reads it, so the server's pings go unanswered.
-    let quick = Liveness { ping_every: Duration::from_millis(100), silence: Duration::from_secs(1) };
+    let quick = Rules {
+        liveness: Liveness { ping_every: Duration::from_millis(100), silence: Duration::from_secs(1) },
+        ..Rules::DEFAULT
+    };
     let (mut host, _guest) = table_on(start_with(quick));
     host.send(&ToServer::Start);
     host.until(|m| matches!(m, ToClient::Dealt { .. }).then_some(()));
@@ -307,9 +319,9 @@ fn a_finished_player_watches_the_other_over_the_wire() {
     });
     assert_eq!(watchers, 1);
     guest.send(&ToServer::Video {
-        round, frame: 42, key: true, width: 256, height: 240, aspect: 1.0, data: "AAAB".into(),
+        round, frame: 42, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into(),
     });
-    guest.send(&ToServer::Audio { round, frame: 42, rate: 32040, channels: 2, data: "AA==".into() });
+    guest.send(&ToServer::Audio { round, frame: 42, rate: 32040, channels: 2, data: vec![0].into() });
     let (player, frame) = host.until(|m| match m {
         ToClient::Video { player, frame, .. } => Some((player.clone(), *frame)),
         _ => None,

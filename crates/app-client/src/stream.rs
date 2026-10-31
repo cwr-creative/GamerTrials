@@ -9,25 +9,47 @@
 //!
 //! The picture is H.264 (openh264, built from source) in Annex B form with
 //! the parameter sets on every key frame, which is what the overlay's
-//! `VideoDecoder` takes without a description. The sound is IMA ADPCM, four
-//! bits a sample, with the coder's state at the head of every chunk so a
-//! lost chunk is a gap and the next one still decodes.
+//! `VideoDecoder` takes without a description. A key frame comes every
+//! [`KEY_EVERY`] pictures, and sooner when the link dropped some, so a
+//! watcher who lost pictures is not left waiting. The sound is mixed to
+//! mono near [`SOUND_RATE`] and coded as IMA ADPCM, four bits a sample,
+//! with the coder's state at the head of every chunk so a lost chunk is a
+//! gap and the next one still decodes. Together they cost about 0.6 Mbit/s;
+//! a link that carries less drops what it cannot send (ADR 0034).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, RateControlMode};
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode};
 use openh264::formats::{ArgbSliceU32, YUVBuffer};
 use openh264::{OpenH264API, Timestamp};
 
 use crate::game::Report;
 
-/// What the picture costs the sender's uplink. A megabit carries a retro
-/// picture at its own rate with room to spare; sound adds a quarter of it.
-const BITRATE: u32 = 1_000_000;
+/// What the picture costs the sender's uplink. Half a megabit carries a
+/// retro picture at its own rate; a home uplink has room for it, and a
+/// phone's drops what it cannot carry rather than falling behind.
+const BITRATE: u32 = 500_000;
+
+/// A key frame every two seconds at 60 Hz: the longest a watcher who lost
+/// pictures waits for the next one that decodes on its own.
+const KEY_EVERY: u32 = 120;
+
+/// The sound's rate, roughly: the core's own divided down to the nearest
+/// whole step above it. A retro core's sound loses little at 16 kHz mono,
+/// and costs a sixth of 48 kHz stereo.
+const SOUND_RATE: u32 = 16_000;
+
+/// Set when the link dropped pictures: the next one encoded is a key frame.
+static KEY_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// For the link: pictures were dropped, so start a new group (ADR 0034).
+pub fn want_key() {
+    KEY_WANTED.store(true, Ordering::Release);
+}
 
 /// One core frame, as the core drew it: `0x00RRGGBB`, unscaled.
 pub struct Picture {
@@ -70,11 +92,13 @@ impl Streamer {
             .name("encoder".into())
             .spawn(move || {
                 let mut video = Video::default();
+                let mut thin = Thin::default();
                 let mut sound = Adpcm::default();
                 let mut complained = false;
                 for input in rx {
                     match input {
-                        Input::Picture(p) => {
+                        Input::Picture(mut p) => {
+                            p.key |= KEY_WANTED.swap(false, Ordering::AcqRel);
                             let encoded = video.encode(&p);
                             in_hand.store(0, Ordering::Release);
                             match encoded {
@@ -102,14 +126,12 @@ impl Streamer {
                             if s.samples.len() < 2 {
                                 continue;
                             }
-                            let data = sound.encode(&s.samples, 2);
-                            let _ = reports.send(Report::Audio {
-                                round: s.round,
-                                frame: s.frame,
-                                rate: s.rate,
-                                channels: 2,
-                                data,
-                            });
+                            let (rate, mono) = thin.mono(&s.samples, s.rate);
+                            if mono.is_empty() {
+                                continue;
+                            }
+                            let data = sound.encode(&mono, 1);
+                            let _ = reports.send(Report::Audio { round: s.round, frame: s.frame, rate, channels: 1, data });
                         }
                     }
                 }
@@ -165,6 +187,7 @@ impl Video {
                 let config = EncoderConfig::new()
                     .bitrate(BitRate::from_bps(BITRATE))
                     .max_frame_rate(FrameRate::from_hz(60.0))
+                    .intra_frame_period(IntraFramePeriod::from_num_frames(KEY_EVERY))
                     .rate_control_mode(RateControlMode::Bitrate);
                 let e = Encoder::with_api_config(OpenH264API::from_source(), config).map_err(|e| e.to_string())?;
                 self.started = Some(Instant::now());
@@ -184,6 +207,36 @@ impl Video {
 }
 
 // ------------------------------------------------------------------- sound
+
+/// Interleaved stereo at the core's rate to mono at about [`SOUND_RATE`]:
+/// each output sample the mean of `factor` input frames, which also keeps
+/// most of what would alias. A frame left over waits for the next chunk.
+#[derive(Default)]
+struct Thin {
+    rate: u32,
+    sum: i32,
+    count: u32,
+}
+
+impl Thin {
+    fn mono(&mut self, stereo: &[i16], rate: u32) -> (u32, Vec<i16>) {
+        if rate != self.rate {
+            *self = Thin { rate, ..Thin::default() };
+        }
+        let factor = (rate / SOUND_RATE).max(1);
+        let mut out = Vec::with_capacity(stereo.len() / 2 / factor as usize + 1);
+        for frame in stereo.chunks_exact(2) {
+            self.sum += frame[0] as i32 + frame[1] as i32;
+            self.count += 1;
+            if self.count == factor {
+                out.push((self.sum / (2 * factor as i32)) as i16);
+                self.sum = 0;
+                self.count = 0;
+            }
+        }
+        (rate / factor, out)
+    }
+}
 
 const STEPS: [i32; 89] = [
     7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80,
@@ -334,6 +387,21 @@ mod tests {
         // The second chunk decodes on its own: its header carries the state.
         let alone = decode(&second, 2);
         assert_eq!(alone, &back[1600..]);
+    }
+
+    #[test]
+    fn sound_thins_to_mono_near_sixteen_kilohertz() {
+        let mut t = Thin::default();
+        // 48 kHz: three frames to a sample. Seven frames give two, and the
+        // seventh waits for the next chunk.
+        let stereo: Vec<i16> = (0..7).flat_map(|i| [i * 100, i * 100 + 50]).collect();
+        let (rate, mono) = t.mono(&stereo, 48_000);
+        assert_eq!((rate, mono.len()), (16_000, 2));
+        assert_eq!(mono[0], (50 + 100 + 150 + 200 + 250) / 6, "the first three frames, both channels");
+        let (_, more) = t.mono(&[700, 750, 800, 850], 48_000);
+        assert_eq!(more, [(600 + 650 + 700 + 750 + 800 + 850) / 6]);
+        // SNES: 32040 halves.
+        assert_eq!(Thin::default().mono(&[0; 8], 32_040).0, 16_020);
     }
 
     #[test]

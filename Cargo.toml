@@ -8,6 +8,7 @@ members = [
     "crates/session-fake",
     "crates/session-libretro",
     "crates/protocol",
+    "crates/transport",
     "crates/server",
     "crates/server-net",
     "crates/asset-store",

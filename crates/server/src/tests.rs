@@ -590,7 +590,7 @@ fn a_player_leaving_mid_match_ends_it() {
 // ------------------------------------------------------------- spectating
 
 fn video(round: u64, frame: u64) -> ToServer {
-    ToServer::Video { round, frame, key: true, width: 256, height: 240, aspect: 1.0, data: "AAAB".into() }
+    ToServer::Video { round, frame, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into() }
 }
 
 fn videos_from(t: &Table, who: usize) -> Vec<(String, u64)> {
@@ -652,7 +652,7 @@ fn a_finished_player_watches_one_still_playing() {
     assert_eq!(watched(&t, 1), [1], "the guest is told they have a watcher");
     assert!(watched(&t, 0).is_empty());
     t.send(1, video(round, 10));
-    t.send(1, ToServer::Audio { round, frame: 10, rate: 32040, channels: 2, data: "AA==".into() });
+    t.send(1, ToServer::Audio { round, frame: 10, rate: 32040, channels: 2, data: vec![0].into() });
     assert_eq!(videos_from(&t, 0), [("guest".to_string(), 10)]);
     assert!(videos_from(&t, 1).is_empty(), "a stream never comes back to its sender");
     assert!(
@@ -668,6 +668,23 @@ fn a_finished_player_watches_one_still_playing() {
     // Watch again, then the round ends under it.
     t.send(0, ToServer::Watch { round, player: Some("guest".into()) });
     t.play(1, round, &spec, limit);
+    // Every frame the guest reported reached the watcher as where the run
+    // stood, the last one with the server's own clock (ADR 0034).
+    let progress: Vec<(u64, u32, u64)> = t.clients[0]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Progress { player, frame, attempt, clock, .. } if player == "guest" => Some((*frame, *attempt, *clock)),
+            _ => None,
+        })
+        .collect();
+    let finished = t.clients[0].inbox.iter().find_map(|m| match m {
+        ToClient::PlayerFinished { player, outcome, .. } if player == "guest" => Some(outcome.clone()),
+        _ => None,
+    });
+    let (_, attempt, clock) = *progress.last().expect("progress reached the watcher");
+    let outcome = finished.expect("the guest finished");
+    assert_eq!((attempt, clock), (outcome.attempts, outcome.frames));
     t.take(0);
     t.send(1, video(round, 12));
     assert!(videos_from(&t, 0).is_empty(), "a chunk from an ended round goes nowhere");

@@ -14,6 +14,8 @@ session-libretro = { path = "../session-libretro" }
 challenge-core = { path = "../challenge-core" }
 challenge-library = { path = "../challenge-library" }
 protocol = { path = "../protocol" }
+# The socket loop the server runs too (ADR 0034).
+transport = { path = "../transport" }
 # Solo play runs the server's half in-process (ADR 0009): the same crate a
 # remote server will run, over a channel instead of a socket.
 server = { path = "../server" }

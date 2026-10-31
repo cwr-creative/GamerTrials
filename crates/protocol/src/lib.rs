@@ -20,8 +20,10 @@ use session_api::{ChallengeKind, ExitReason, SessionEvent};
 
 /// 2 added `Unprepared` and `Voided` (ADR 0029) and `Hello.lobby` (ADR 0030).
 /// 3 added `Watch`, `Video`, `Audio` and `Watched`: spectating rides this
-/// socket (ADR 0032).
-pub const VERSION: u32 = 3;
+/// socket (ADR 0032). 4 carries a picture's and a sound's bytes in a binary
+/// frame after the packet rather than as base64 inside it, and added
+/// `Progress` (ADR 0034).
+pub const VERSION: u32 = 4;
 
 /// A versioned message. `v` is read before anything else.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -62,6 +64,121 @@ pub fn decode<M: DeserializeOwned>(text: &str) -> Result<M, ProtocolError> {
         return Err(ProtocolError::Version { got: packet.v, want: VERSION });
     }
     Ok(packet.body)
+}
+
+/// A picture's or a sound's bytes. Inside a JSON packet they are base64; on
+/// a socket they follow the packet in a binary frame (see [`to_wire`]), and
+/// the packet's copy is empty.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Payload(pub Vec<u8>);
+
+impl std::fmt::Debug for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Payload({} bytes)", self.0.len())
+    }
+}
+
+impl From<Vec<u8>> for Payload {
+    fn from(v: Vec<u8>) -> Self {
+        Payload(v)
+    }
+}
+
+impl Serialize for Payload {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&to_base64(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Payload {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        from_base64(&text).map(Payload).map_err(serde::de::Error::custom)
+    }
+}
+
+/// How a message fares on a slow link (ADR 0034). Control is the match
+/// itself and is never dropped; a picture or a sound is a spectator's
+/// stream, worth sending only while it is fresh.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lane {
+    Control,
+    /// A picture; `key` when it decodes without the ones before it.
+    Picture { key: bool },
+    Sound,
+}
+
+/// A message as a socket carries it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Wire {
+    Text(String),
+    /// The packet's length (u32 LE), the packet, then its payload's bytes.
+    Binary(Vec<u8>),
+}
+
+/// Either direction's messages, as a socket needs to know them.
+pub trait Message: Serialize + DeserializeOwned {
+    fn lane(&self) -> Lane;
+    fn payload_mut(&mut self) -> Option<&mut Payload>;
+}
+
+impl Message for ToServer {
+    fn lane(&self) -> Lane {
+        match self {
+            ToServer::Video { key, .. } => Lane::Picture { key: *key },
+            ToServer::Audio { .. } => Lane::Sound,
+            _ => Lane::Control,
+        }
+    }
+    fn payload_mut(&mut self) -> Option<&mut Payload> {
+        match self {
+            ToServer::Video { data, .. } | ToServer::Audio { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+}
+
+impl Message for ToClient {
+    fn lane(&self) -> Lane {
+        match self {
+            ToClient::Video { key, .. } => Lane::Picture { key: *key },
+            ToClient::Audio { .. } => Lane::Sound,
+            _ => Lane::Control,
+        }
+    }
+    fn payload_mut(&mut self) -> Option<&mut Payload> {
+        match self {
+            ToClient::Video { data, .. } | ToClient::Audio { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+}
+
+/// A message as it goes on a socket: text, or for one with a payload a
+/// binary frame that spares the payload base64's third.
+pub fn to_wire<M: Message>(mut m: M) -> Wire {
+    let Some(payload) = m.payload_mut().map(std::mem::take) else {
+        return Wire::Text(encode(&m));
+    };
+    let packet = encode(&m);
+    let mut out = Vec::with_capacity(4 + packet.len() + payload.0.len());
+    out.extend_from_slice(&(packet.len() as u32).to_le_bytes());
+    out.extend_from_slice(packet.as_bytes());
+    out.extend_from_slice(&payload.0);
+    Wire::Binary(out)
+}
+
+/// The inverse of [`to_wire`] for a binary frame; text goes to [`decode`].
+pub fn decode_binary<M: Message>(bytes: &[u8]) -> Result<M, ProtocolError> {
+    let malformed = |why: &str| ProtocolError::Malformed(why.to_string());
+    let head: [u8; 4] = bytes.get(..4).and_then(|b| b.try_into().ok()).ok_or_else(|| malformed("a short frame"))?;
+    let len = u32::from_le_bytes(head) as usize;
+    let packet = bytes.get(4..4 + len).ok_or_else(|| malformed("a packet longer than its frame"))?;
+    let text = std::str::from_utf8(packet).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
+    let mut m: M = decode(text)?;
+    let slot = m.payload_mut().ok_or_else(|| malformed("a binary frame for a message with no payload"))?;
+    *slot = Payload(bytes[4 + len..].to_vec());
+    Ok(m)
 }
 
 // ------------------------------------------------------------------- lobby
@@ -449,17 +566,17 @@ pub enum ToServer {
     /// (ADR 0026); the server refuses the rest. Whoever is watched hears
     /// `Watched` (ADR 0032).
     Watch { round: u64, player: Option<String> },
-    /// One encoded picture: an H.264 access unit in Annex B form, base64 in
-    /// `data`, with its parameter sets in-band when `key`. `frame` is the
+    /// One encoded picture: an H.264 access unit in Annex B form in `data`,
+    /// with its parameter sets in-band when `key`. `frame` is the
     /// emulated frame it shows (ADR 0005); `aspect` is the picture's shape as
     /// the core reports it. Sent only while watched, and relayed to each
     /// watcher as `ToClient::Video`.
-    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: String },
-    /// The sound under one or more pictures: IMA ADPCM, base64 in `data`, at
+    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Payload },
+    /// The sound under one or more pictures: IMA ADPCM in `data`, at
     /// the core's own `rate`, `channels` interleaved. Each chunk carries its
     /// own predictor, so a lost chunk is a gap and not a glitch. `frame` is
     /// the emulated frame the chunk begins on.
-    Audio { round: u64, frame: u64, rate: u32, channels: u8, data: String },
+    Audio { round: u64, frame: u64, rate: u32, channels: u8, data: Payload },
 }
 
 /// Server to client.
@@ -513,10 +630,16 @@ pub enum ToClient {
         width: u32,
         height: u32,
         aspect: f32,
-        data: String,
+        data: Payload,
     },
     /// A watched player's sound, relayed as it was sent.
-    Audio { round: u64, player: String, frame: u64, rate: u32, channels: u8, data: String },
+    Audio { round: u64, player: String, frame: u64, rate: u32, channels: u8, data: Payload },
+    /// Where a watched player's run stands, as the server judges it: sent
+    /// to each watcher with every `Frame` the player reports. A few bytes,
+    /// so it reaches a watcher whose link cannot carry the picture (ADR
+    /// 0034). `clock` is the frames on a time trial's clock, every attempt
+    /// counted; `events` are the ones reported on `frame`.
+    Progress { round: u64, player: String, frame: u64, attempt: u32, clock: u64, events: Vec<Event> },
 }
 
 /// `data` on the wire: standard base64, padded.
@@ -547,7 +670,9 @@ pub struct Liveness {
 
 impl Liveness {
     /// Rides out a Wi-Fi blip; ends a dead match in seconds, not minutes.
-    pub const DEFAULT: Liveness = Liveness { ping_every: Duration::from_secs(2), silence: Duration::from_secs(10) };
+    /// A ping a second also times the link often enough to notice it
+    /// queueing (ADR 0034).
+    pub const DEFAULT: Liveness = Liveness { ping_every: Duration::from_secs(1), silence: Duration::from_secs(10) };
 }
 
 /// What a socket's loop should do now.
@@ -615,20 +740,19 @@ mod tests {
     #[test]
     fn packets_round_trip_and_carry_the_version() {
         let text = encode(&ToServer::Start);
-        assert!(text.contains("\"v\":3"), "{text}");
+        assert!(text.contains("\"v\":4"), "{text}");
         assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
     }
 
     #[test]
     fn another_version_is_refused_before_the_body_is_read() {
         let text = r#"{"v":99,"body":{"type":"start"}}"#;
-        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 3 }));
+        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 4 }));
     }
 
     #[test]
     fn a_stream_survives_the_wire() {
-        let data = to_base64(&[0, 0, 0, 1, 0x67, 0xff]);
-        assert_eq!(from_base64(&data).unwrap(), vec![0, 0, 0, 1, 0x67, 0xff]);
+        let data = Payload(vec![0, 0, 0, 1, 0x67, 0xff]);
         let up = ToServer::Video {
             round: 2, frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data: data.clone(),
         };
@@ -637,12 +761,38 @@ mod tests {
             round: 2, player: "B".into(), frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data,
         };
         assert_eq!(decode::<ToClient>(&encode(&down)).unwrap(), down);
-        let sound = ToServer::Audio { round: 2, frame: 300, rate: 32040, channels: 2, data: "AA==".into() };
+        let sound = ToServer::Audio { round: 2, frame: 300, rate: 32040, channels: 2, data: vec![0].into() };
         assert_eq!(decode::<ToServer>(&encode(&sound)).unwrap(), sound);
         let watch = ToServer::Watch { round: 2, player: None };
         assert_eq!(decode::<ToServer>(&encode(&watch)).unwrap(), watch);
         let watched = ToClient::Watched { round: 2, watchers: 1 };
         assert_eq!(decode::<ToClient>(&encode(&watched)).unwrap(), watched);
+    }
+
+    #[test]
+    fn a_payload_rides_a_binary_frame_and_nothing_else_does() {
+        let up = ToServer::Video {
+            round: 2, frame: 300, key: false, width: 256, height: 240, aspect: 1.0, data: vec![9; 1000].into(),
+        };
+        assert_eq!(up.lane(), Lane::Picture { key: false });
+        let Wire::Binary(bytes) = to_wire(up.clone()) else { panic!("a picture goes binary") };
+        assert!(bytes.len() < 1000 + 200, "the bytes ride once, unencoded: {}", bytes.len());
+        assert_eq!(decode_binary::<ToServer>(&bytes).unwrap(), up);
+
+        let Wire::Text(text) = to_wire(ToServer::Start) else { panic!("control goes as text") };
+        assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
+
+        assert!(decode_binary::<ToServer>(&[1, 0]).is_err());
+        let Wire::Binary(mut cut) = to_wire(ToServer::Audio { round: 1, frame: 1, rate: 1, channels: 1, data: vec![].into() })
+        else {
+            panic!("a sound goes binary")
+        };
+        cut.truncate(10);
+        assert!(decode_binary::<ToServer>(&cut).is_err(), "a packet cut short is refused");
+
+        let progress = ToClient::Progress { round: 1, player: "B".into(), frame: 9, attempt: 2, clock: 700, events: vec![] };
+        assert_eq!(progress.lane(), Lane::Control);
+        assert_eq!(decode::<ToClient>(&encode(&progress)).unwrap(), progress);
     }
 
     #[test]

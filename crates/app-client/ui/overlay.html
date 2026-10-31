@@ -84,6 +84,18 @@
   #sp-name { min-width: 10em; text-align: center; font-weight: 700; }
   #sp-note { color: #aaa; font-size: .9em; min-height: 1.2em; }
 
+  /* Where the watched run stands, from the server's own judging (ADR 0034):
+     a line under the picture, and the whole view when the picture cannot
+     keep up -- then the last frame dims and the run takes over. */
+  #sp-view { position: relative; }
+  #sp-slow { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             text-align: center; padding: 1em; font-weight: 700; text-shadow: 0 0 8px #000; }
+  #spectate.slow #feed { opacity: .25; }
+  #sp-run { display: flex; gap: 1.2em; align-items: baseline; font-variant-numeric: tabular-nums; min-height: 1.4em; }
+  #sp-clock { font-size: 1.4em; font-weight: 800; }
+  #sp-events { color: #ccc; font-size: .9em; }
+  #spectate.slow #sp-run { font-size: 1.6em; }
+
   #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
   #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
            background: rgba(160, 0, 0, .9); font-weight: 700; text-align: center; }
@@ -109,7 +121,11 @@
   <div id="clock" class="hidden"></div>
   <div id="badge"></div>
   <div id="spectate" class="sheet hidden">
-    <canvas id="feed" width="256" height="240"></canvas>
+    <div id="sp-view">
+      <canvas id="feed" width="256" height="240"></canvas>
+      <div id="sp-slow" class="hidden">Connection too slow for live video.<br>Following the run instead.</div>
+    </div>
+    <div id="sp-run"><span id="sp-clock"></span><span id="sp-attempt"></span><span id="sp-events"></span></div>
     <div id="sp-bar"><button id="sp-prev">&#9664;</button><span id="sp-name"></span><button id="sp-next">&#9654;</button></div>
     <div id="sp-note"></div>
   </div>
@@ -290,10 +306,13 @@
   // piling up as latency.
   const LEAD_MS = 150;
   const spec = { players: [], player: null, decoder: null, size: null, needKey: true,
-                 frames: [], raf: null, audio: null, nextTime: 0, timer: null, padWas: null };
+                 frames: [], raf: null, audio: null, nextTime: 0, timer: null, padWas: null,
+                 painted: [], since: 0, slow: false, run: null, said: [] };
   const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
   function closeFeed() {
+    spec.painted = []; spec.since = now(); spec.run = null; spec.said = [];
+    setSlow(false); showRun();
     if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} spec.decoder = null; }
     spec.size = null; spec.needKey = true;
     for (const f of spec.frames) f.frame.close();
@@ -318,7 +337,7 @@
     $('sp-note').textContent = '';
     if (!('VideoDecoder' in window)) $('sp-note').textContent = 'This webview cannot decode video.';
     show('spectate'); hide('waiting');
-    if (!spec.timer) spec.timer = setInterval(pollSpectatePad, 50);
+    if (!spec.timer) spec.timer = setInterval(() => { pollSpectatePad(); checkFeed(); showRun(); }, 50);
     if (!spec.raf) spec.raf = requestAnimationFrame(paintDue);
     hud(p.player ? 'watching ' + p.player : 'nobody to watch');
   }
@@ -379,6 +398,49 @@
     const c = $('feed');
     c.getContext('2d').drawImage(last.frame, 0, 0, c.width, c.height);
     last.frame.close();
+    spec.painted.push(t);
+  }
+
+  // The picture is healthy while it paints at a watchable rate. Below that
+  // the run panel takes over, and it hands back only once the picture has
+  // held a better rate, so a link at the edge does not flicker between them.
+  const SLOW_FPS = 8, GOOD_FPS = 15, WINDOW_MS = 3000;
+  function checkFeed() {
+    if (!spec.player) return;
+    const t = now();
+    while (spec.painted.length && spec.painted[0] < t - WINDOW_MS) spec.painted.shift();
+    if (t - spec.since < WINDOW_MS) return;
+    const fps = spec.painted.length * 1000 / WINDOW_MS;
+    if (!spec.slow && fps < SLOW_FPS) setSlow(true);
+    else if (spec.slow && fps >= GOOD_FPS) setSlow(false);
+  }
+  function setSlow(slow) {
+    if (spec.slow === slow) return;
+    spec.slow = slow;
+    $('spectate').classList.toggle('slow', slow);
+    $('sp-slow').classList.toggle('hidden', !slow);
+    if (spec.player) hud(slow ? 'feed too slow: following the run' : 'feed back');
+  }
+
+  // A Progress report: the clock as the server judged it on `frame`. It
+  // runs on between reports at the game's rate, but never more than a
+  // second past the last one, so a stalled link does not invent time.
+  function onProgress(p) {
+    if (!spec.player || p.player !== spec.player) return;
+    spec.run = { clock: p.clock, fps: p.fps, attempt: p.attempt, at: now() };
+    for (const e of p.events || []) spec.said.push(e);
+    spec.said = spec.said.slice(-3);
+    showRun();
+  }
+  function showRun() {
+    const r = spec.run;
+    if (!r) { $('sp-clock').textContent = ''; $('sp-attempt').textContent = ''; $('sp-events').textContent = ''; return; }
+    const ahead = Math.min(now() - r.at, 1000) * r.fps / 1000;
+    const tenths = Math.floor((r.clock + ahead) * 10 / r.fps);
+    const m = Math.floor(tenths / 600), sec = Math.floor(tenths / 10) % 60;
+    $('sp-clock').textContent = m + ':' + String(sec).padStart(2, '0') + '.' + tenths % 10;
+    $('sp-attempt').textContent = 'attempt ' + r.attempt;
+    $('sp-events').textContent = spec.said.join(' · ');
   }
 
   // IMA ADPCM, as `stream.rs` writes it: per channel a predictor (i16 LE)
@@ -463,6 +525,7 @@
       case 'spectate': showSpectate(p); break;
       case 'video': onVideo(p); break;
       case 'audio': onAudio(p); break;
+      case 'progress': onProgress(p); break;
       case 'loading': playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
       case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;

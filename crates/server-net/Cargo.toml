@@ -11,6 +11,7 @@ description = "The server on a socket (ADR 0030): lobbies by invite code over We
 server = { path = "../server" }
 protocol = { path = "../protocol" }
 challenge-library = { path = "../challenge-library" }
+transport = { path = "../transport" }
 tungstenite = "0.29.0"
 
 [dev-dependencies]
