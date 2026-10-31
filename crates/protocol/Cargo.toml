@@ -12,3 +12,4 @@ serde_json = "1"
 # shared type is a deliberate change here rather than a silent one on the wire.
 session-api = { path = "../session-api" }
 challenge-core = { path = "../challenge-core" }
+base64 = "0.22"

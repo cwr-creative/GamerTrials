@@ -75,6 +75,15 @@
            pointer-events: none; }
   #clock.stopped { color: #ffb347; }
 
+  /* Spectating (ADR 0032): another player's picture, decoded here, over an
+     opaque sheet — the game window behind holds this player's last frame. */
+  #spectate { background: #000; flex-direction: column; }
+  #feed { image-rendering: pixelated; background: #000; }
+  #sp-bar { display: flex; align-items: center; gap: .6em; margin-top: .4em; font-size: 1.2em; }
+  #sp-bar button { padding: .2em .8em; margin: 0; }
+  #sp-name { min-width: 10em; text-align: center; font-weight: 700; }
+  #sp-note { color: #aaa; font-size: .9em; min-height: 1.2em; }
+
   #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
   #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
            background: rgba(160, 0, 0, .9); font-weight: 700; text-align: center; }
@@ -99,6 +108,11 @@
   <div id="flash" class="sheet"></div>
   <div id="clock" class="hidden"></div>
   <div id="badge"></div>
+  <div id="spectate" class="sheet hidden">
+    <canvas id="feed" width="256" height="240"></canvas>
+    <div id="sp-bar"><button id="sp-prev">&#9664;</button><span id="sp-name"></span><button id="sp-next">&#9654;</button></div>
+    <div id="sp-note"></div>
+  </div>
   <div id="waiting" class="hidden"></div>
   <div id="round" class="sheet hidden"><div class="card">
     <h2 id="r-title"></h2>
@@ -267,9 +281,189 @@
     hud('match over');
   }
 
+  // ---- spectating (ADR 0032) -----------------------------------------------
+  // Picture and sound arrive as the sender made them, over the same socket
+  // as everything else. Both are shown LEAD_MS after they arrive: the two
+  // left the sender together and travelled together, so one fixed delay
+  // keeps them together here and absorbs the socket's jitter. Sound that
+  // falls further behind than that is dropped to catch up rather than
+  // piling up as latency.
+  const LEAD_MS = 150;
+  const spec = { players: [], player: null, decoder: null, size: null, needKey: true,
+                 frames: [], raf: null, audio: null, nextTime: 0, timer: null, padWas: null };
+  const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+  function closeFeed() {
+    if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} spec.decoder = null; }
+    spec.size = null; spec.needKey = true;
+    for (const f of spec.frames) f.frame.close();
+    spec.frames = [];
+    if (spec.audio) { try { spec.audio.close(); } catch (e) {} spec.audio = null; }
+    spec.nextTime = 0;
+  }
+  function closeSpectate() {
+    closeFeed();
+    hide('spectate');
+    clearInterval(spec.timer); spec.timer = null;
+    if (spec.raf) { cancelAnimationFrame(spec.raf); spec.raf = null; }
+  }
+
+  function showSpectate(p) {
+    if (spec.player !== p.player) closeFeed();
+    spec.player = p.player; spec.players = p.players || [];
+    $('sp-name').textContent = p.player ? 'Watching ' + p.player : 'Nobody left to watch';
+    const several = spec.players.length > 1;
+    $('sp-prev').classList.toggle('hidden', !several);
+    $('sp-next').classList.toggle('hidden', !several);
+    $('sp-note').textContent = '';
+    if (!('VideoDecoder' in window)) $('sp-note').textContent = 'This webview cannot decode video.';
+    show('spectate'); hide('waiting');
+    if (!spec.timer) spec.timer = setInterval(pollSpectatePad, 50);
+    if (!spec.raf) spec.raf = requestAnimationFrame(paintDue);
+    hud(p.player ? 'watching ' + p.player : 'nobody to watch');
+  }
+
+  function switchPlayer(step) {
+    if (spec.players.length < 2) return;
+    const i = Math.max(0, spec.players.indexOf(spec.player));
+    const next = spec.players[(i + step + spec.players.length) % spec.players.length];
+    if (next && next !== spec.player) invoke('watch', { player: next });
+  }
+
+  function fitFeed(w, h, aspect) {
+    const c = $('feed');
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const availW = window.innerWidth, availH = window.innerHeight - 70;
+    const ar = aspect > 0 ? aspect : w / h;
+    let ch = Math.min(availH, availW / ar), cw = ch * ar;
+    c.style.width = Math.floor(cw) + 'px'; c.style.height = Math.floor(ch) + 'px';
+  }
+
+  async function onVideo(p) {
+    if (!('VideoDecoder' in window) || !spec.player || p.player !== spec.player) return;
+    const size = p.width + 'x' + p.height;
+    if (!spec.decoder || spec.size !== size) {
+      if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} }
+      const config = { codec: 'avc1.42E01E', optimizeForLatency: true };
+      try {
+        const ok = await VideoDecoder.isConfigSupported(config);
+        if (!ok.supported) { $('sp-note').textContent = 'This webview cannot decode H.264.'; return; }
+      } catch (e) { $('sp-note').textContent = 'Cannot decode: ' + e.message; return; }
+      spec.decoder = new VideoDecoder({
+        output: frame => { spec.frames.push({ frame, due: now() + LEAD_MS }); },
+        error: e => { hud('decode error: ' + e.message); spec.needKey = true; },
+      });
+      spec.decoder.configure(config);
+      spec.size = size; spec.needKey = true;
+      fitFeed(p.width, p.height, p.aspect);
+    }
+    if (spec.needKey && !p.key) return;
+    spec.needKey = false;
+    try {
+      spec.decoder.decode(new EncodedVideoChunk({
+        type: p.key ? 'key' : 'delta', timestamp: p.frame * 16667, data: b64(p.data),
+      }));
+    } catch (e) { hud('decode: ' + e.message); spec.needKey = true; }
+  }
+
+  // Paints the newest frame that is due, and lets the older ones go.
+  function paintDue() {
+    spec.raf = requestAnimationFrame(paintDue);
+    const t = now();
+    let last = null;
+    while (spec.frames.length && spec.frames[0].due <= t) {
+      if (last) last.frame.close();
+      last = spec.frames.shift();
+    }
+    if (!last) return;
+    const c = $('feed');
+    c.getContext('2d').drawImage(last.frame, 0, 0, c.width, c.height);
+    last.frame.close();
+  }
+
+  // IMA ADPCM, as `stream.rs` writes it: per channel a predictor (i16 LE)
+  // and step index, then the sample count (u32 LE), then nibbles in sample
+  // order, channels interleaved, low nibble first.
+  const STEPS = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,
+    130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,
+    1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,
+    9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
+  const INDEX_STEPS = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
+  function adpcmDecode(bytes, channels) {
+    const coders = [];
+    let at = 0;
+    for (let c = 0; c < channels; c++) {
+      const predictor = (bytes[at] | (bytes[at + 1] << 8)) << 16 >> 16;
+      coders.push({ predictor, index: bytes[at + 2] });
+      at += 3;
+    }
+    const count = bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16) | (bytes[at + 3] << 24);
+    at += 4;
+    const frames = Math.floor(count / channels);
+    const out = []; for (let c = 0; c < channels; c++) out.push(new Float32Array(frames));
+    for (let i = 0; i < frames * channels; i++) {
+      const byte = bytes[at + (i >> 1)];
+      const n = (i & 1) ? (byte >> 4) : (byte & 15);
+      const k = coders[i % channels];
+      const step = STEPS[k.index];
+      let delta = step >> 3;
+      if (n & 4) delta += step;
+      if (n & 2) delta += step >> 1;
+      if (n & 1) delta += step >> 2;
+      k.predictor += (n & 8) ? -delta : delta;
+      if (k.predictor > 32767) k.predictor = 32767; else if (k.predictor < -32768) k.predictor = -32768;
+      k.index += INDEX_STEPS[n];
+      if (k.index < 0) k.index = 0; else if (k.index > 88) k.index = 88;
+      out[i % channels][Math.floor(i / channels)] = k.predictor / 32768;
+    }
+    return out;
+  }
+
+  function onAudio(p) {
+    if (!spec.player || p.player !== spec.player) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!spec.audio) { spec.audio = new AC(); spec.nextTime = 0; }
+    const ctx = spec.audio;
+    if (ctx.state === 'suspended') ctx.resume();
+    const pcm = adpcmDecode(b64(p.data), p.channels);
+    const frames = pcm[0].length;
+    if (!frames) return;
+    const buf = ctx.createBuffer(p.channels, frames, p.rate);
+    for (let c = 0; c < p.channels; c++) buf.copyToChannel(pcm[c], c);
+    const lead = LEAD_MS / 1000, t = ctx.currentTime;
+    // Ran dry, or just started: begin again a lead ahead. Too far ahead:
+    // this chunk is dropped so the lead does not grow into latency.
+    if (spec.nextTime < t + lead / 2) spec.nextTime = t + lead;
+    else if (spec.nextTime > t + lead * 2) return;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    src.start(spec.nextTime);
+    spec.nextTime += buf.duration;
+  }
+
+  function pollSpectatePad() {
+    const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+    const cur = { left: false, right: false };
+    for (const g of pads) {
+      const b = i => g.buttons[i] && g.buttons[i].pressed;
+      cur.left ||= b(14) || g.axes[0] < -0.5; cur.right ||= b(15) || g.axes[0] > 0.5;
+    }
+    const was = spec.padWas || cur;
+    spec.padWas = cur;
+    if (cur.left && !was.left) switchPlayer(-1);
+    if (cur.right && !was.right) switchPlayer(1);
+  }
+  $('sp-prev').onclick = () => switchPlayer(-1);
+  $('sp-next').onclick = () => switchPlayer(1);
+  window.addEventListener('resize', () => { if (spec.size) { const c = $('feed'); fitFeed(c.width, c.height, c.width / c.height); } });
+
   function handle(p) {
     switch (p.kind) {
-      case 'loading': playing = []; hideClock(); hud('loading round ' + p.round); break;
+      case 'spectate': showSpectate(p); break;
+      case 'video': onVideo(p); break;
+      case 'audio': onAudio(p); break;
+      case 'loading': playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
       case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;
       case 'go': goWanted = true; tryGo(); break;
@@ -279,8 +473,11 @@
         $('badge').innerHTML = (p.kind === 'garland' ? '\u{1F3C6}' : '\u{1F480}') + '<small>' + esc(p.text || '') + '</small>';
         replay($('badge'), 'show');
         hud((p.kind === 'garland' ? 'cleared' : 'out') + ' at frame ' + p.frame);
-        // Not once the round card is up: a solo round is over by then.
-        setTimeout(() => { if ($('round').classList.contains('hidden') && !introUp) showWaiting(waitingText()); }, 2000);
+        // Not once the round card is up: a solo round is over by then. Nor
+        // over the spectate sheet, which says who is left itself.
+        setTimeout(() => {
+          if ($('round').classList.contains('hidden') && $('spectate').classList.contains('hidden') && !introUp) showWaiting(waitingText());
+        }, 2000);
         break;
       case 'playing':
         playing = p.players || [];
@@ -293,12 +490,12 @@
         hud('eliminated, round ' + p.round);
         break;
       case 'voided':
-        dropRound(); hideClock();
+        dropRound(); hideClock(); closeSpectate();
         showWaiting(esc(p.text));
         hud('round ' + p.round + ' void');
         break;
-      case 'round': hideClock(); showRound(p); break;
-      case 'score': hideClock(); showScore(p); break;
+      case 'round': hideClock(); closeSpectate(); showRound(p); break;
+      case 'score': hideClock(); closeSpectate(); showScore(p); break;
       case 'pause': showPause(p); break;
       case 'resume': hidePause(); hud('playing'); break;
       case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;

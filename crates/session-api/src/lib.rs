@@ -449,6 +449,15 @@ pub trait Presentable {
     /// behind a lock the adapter owns, and handing that lifetime out would make
     /// every implementation contort around it.
     fn present(&self, since: u64, f: &mut dyn FnMut(VideoFrame<'_>)) -> u64;
+
+    /// Start or stop keeping the sound the machine makes, for a spectator
+    /// (ADR 0032). Off until asked; a runner with no sound ignores it.
+    fn tap_audio(&self, _on: bool) {}
+
+    /// Hands `f` the interleaved stereo samples made since the last call, at
+    /// the machine's own rate, and forgets them. Nothing while the tap is
+    /// off.
+    fn take_audio(&self, _f: &mut dyn FnMut(&[i16], u32)) {}
 }
 
 #[cfg(test)]

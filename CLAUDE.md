@@ -92,9 +92,9 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. Today: hashes a player's dump against the manifest's `sha1` and says what is missing. |
-| `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. |
-| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). |
-| `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
+| `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. Since ADR 0032 it also carries a watched player's picture and sound (`Video`, `Audio`) for the server to relay. |
+| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). While another player watches, encodes its own picture (H.264) and sound (ADPCM) off the game thread; when done or out, shows theirs on the overlay (ADR 0032). |
+| `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Relays a watched player's stream to their watchers, and refuses a watch from a player still playing (ADR 0032). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `server-net` | The transport (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (sync `tungstenite`, a thread per socket and per lobby), each lobby a `server::Server`. Held to the same dependency fence as `server`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 
@@ -136,7 +136,8 @@ rejected for non-obvious reasons.
 
 ## Current phase
 
-**Phase B — the client — is built; Phase C has begun.** `cargo run -p
+**Phase B — the client — is built; Phase C — spectating and a server beyond
+the LAN — is built and not yet hand-tested.** `cargo run -p
 app-client` opens a menu. Host game opens a lobby on the `gamertrials-server`
 named in Settings › Profile, or a lobby of one on an in-process `server` when
 none is (ADR 0009). Join game takes an invite, `host[:port]/CODE` (ADR 0030).
@@ -149,7 +150,12 @@ provisional verdict or an artifact hash disagrees with its own.
 `--host <name> [--server <addr>] --start --mode … --format kind:n --games a,b
 --limit <s>` plays a match from the command line, and `--join <invite> --name
 <name>` joins one. A round a client cannot prepare is voided for everyone
-(ADR 0029). Settings binds keyboard, mouse and gamepad to the RetroPad once, overridable per core and per game, and sets video the
+(ADR 0029). A player whose run is over, or who is out of the match, watches
+another's picture and hears their sound on the overlay, relayed by the
+server over the same socket (ADR 0032); ◀ ▶ or the pad switches players.
+The sender encodes only while watched. `wss://host` in Settings › Profile
+or an invite reaches a server behind a TLS proxy (ADR 0033,
+`docs/server.md`). Settings binds keyboard, mouse and gamepad to the RetroPad once, overridable per core and per game, and sets video the
 same way; nothing in it reaches a core option or the frame clock (ADR 0028).
 Hand-tested on all three games before Settings; Settings itself is not yet
 hand-tested in a match. `app-client`'s `cargo test` covers only its pure
@@ -167,14 +173,15 @@ changing that code.
 
 Open, roughly in order:
 
-- **Not yet hand-tested:** a networked match between two clients, a voided
-  round, the lobby's file re-check, and Settings in a match. Borderless
-  fullscreen is hand-tested (alt-tab, Win+Down, a monitor move), as is Doom on
-  a pad and on mouse and keyboard.
-- **Phase C owes:** spectating (ADR 0003). A finished or eliminated player
-  sees a waiting line. Also a server somewhere other than localhost or a LAN,
-  and `wss://`. **ADR 0013 stays Proposed** until a networked match has run on
-  two machines. Head-to-head comes last.
+- **Not yet hand-tested:** a networked match between two clients, spectating
+  (picture, sound, switching, the eliminated watching from the deal), a
+  voided round, the lobby's file re-check, Settings in a match, and `wss://`
+  against a real proxy. Borderless fullscreen is hand-tested (alt-tab,
+  Win+Down, a monitor move), as is Doom on a pad and on mouse and keyboard.
+  The encoder and the ADPCM coder have unit tests; the relay is tested
+  in-process and over the wire.
+- **Phase C owes:** the two-machine match (`docs/server.md`), on which
+  **ADR 0013 stays Proposed**. Head-to-head comes last.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
   zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
   a member overlay — wait on it (ADR 0020).

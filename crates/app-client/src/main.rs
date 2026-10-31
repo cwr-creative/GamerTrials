@@ -29,6 +29,7 @@ mod link;
 mod local;
 mod overlay;
 mod settings;
+mod stream;
 mod video;
 
 use std::path::PathBuf;
@@ -217,6 +218,12 @@ fn give_up(state: State<'_, Shared>) {
     state.send(UiCmd::GiveUp);
 }
 
+/// From the spectate sheet: watch this player instead (ADR 0032).
+#[tauri::command]
+fn watch(state: State<'_, Shared>, player: String) {
+    state.send(UiCmd::Watch { player });
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, Shared>) -> serde_json::Value {
     serde_json::json!({
@@ -339,6 +346,7 @@ fn main() {
             end_match,
             resume,
             give_up,
+            watch,
             get_settings,
             put_settings,
             settings_meta,

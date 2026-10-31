@@ -26,6 +26,7 @@ use session_libretro::runner::LibretroRunner;
 use session_libretro::{input, prep};
 
 use crate::keys;
+use crate::stream::{Picture, Sound, Streamer};
 use crate::settings::{self, Display, ResolvedInput, VideoPrefs};
 use crate::video::{self, Canvas};
 
@@ -59,6 +60,9 @@ pub enum Command {
     Unload,
     /// The overlay's window handle, so keys typed into it count as ours.
     Overlay(isize),
+    /// How many are watching this run (ADR 0032). Above zero, the picture
+    /// and sound are encoded and reported; a rise starts on a key frame.
+    Stream(u32),
     Quit,
 }
 
@@ -85,6 +89,11 @@ pub enum Report {
     Finished { round: u64, result: RunResult, forfeited_at: Option<u64> },
     /// The player pressed the pause key; the game is held.
     Paused,
+    /// One encoded picture for whoever is watching (ADR 0032): the bytes
+    /// `ToServer::Video` carries.
+    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Vec<u8> },
+    /// The sound under the pictures, likewise.
+    Audio { round: u64, frame: u64, rate: u32, channels: u8, data: Vec<u8> },
     Closed,
 }
 
@@ -115,6 +124,17 @@ struct Loaded {
     audio_target: Option<usize>,
     next_deadline: Instant,
     last_seq: u64,
+    /// Who is watching, by count; the picture is encoded while above zero.
+    watchers: u32,
+    /// The next picture sent starts a group: a watcher just arrived.
+    want_key: bool,
+}
+
+impl Loaded {
+    /// Sending to a spectator right now.
+    fn streaming(&self) -> bool {
+        self.watchers > 0 && self.live && !self.done
+    }
 }
 
 pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), String> {
@@ -143,6 +163,9 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
     let mut loaded: Option<Loaded> = None;
     let mut held = false;
     let mut ours = vec![hwnd];
+    let streamer = Streamer::spawn(reports.clone());
+    // Watchers can arrive before the round has loaded.
+    let mut watchers = 0u32;
     let mut pause_edge = settings::Edge::default();
     let mut give_up_edge = settings::Edge::default();
     let mut canvas = Canvas::default();
@@ -160,9 +183,12 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     // statics are per core.
                     loaded = None;
                     match load(*l, &mut window) {
-                        Ok(x) => {
+                        Ok(mut x) => {
                             place_window(hwnd, &x.0, &mut borderless, &mut sized_for);
                             let _ = reports.send(Report::Loaded { round, artifact: x.1 });
+                            x.0.watchers = watchers;
+                            x.0.want_key = watchers > 0;
+                            x.0.runner.tap_audio(watchers > 0);
                             loaded = Some(x.0);
                             held = false;
                         }
@@ -192,8 +218,23 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                         forfeit(l, &reports);
                     }
                 }
-                Ok(Command::Unload) => loaded = None,
+                Ok(Command::Unload) => {
+                    if let Some(l) = loaded.as_ref() {
+                        l.runner.tap_audio(false);
+                    }
+                    loaded = None;
+                }
                 Ok(Command::Overlay(h)) => ours = vec![hwnd, h],
+                Ok(Command::Stream(n)) => {
+                    if let Some(l) = loaded.as_mut() {
+                        if n > l.watchers {
+                            l.want_key = true;
+                        }
+                        l.watchers = n;
+                        l.runner.tap_audio(n > 0);
+                    }
+                    watchers = n;
+                }
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
                     let _ = reports.send(Report::Closed);
                     return Ok(());
@@ -244,14 +285,14 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 // Present whatever is there, pump the window, wait a frame.
                 if !l.live {
                     // The entry frame, if the core drew one on entering.
-                    present(l, &mut window, &mut canvas)?;
+                    present(l, &mut window, &mut canvas, &streamer)?;
                 } else {
                     window.update();
                 }
                 std::thread::sleep(l.frame_time);
             }
             Some(l) => {
-                step(l, &mut window, &mut canvas, in_front, &pad, &reports)?;
+                step(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
             }
         }
     }
@@ -328,6 +369,8 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             audio_target,
             next_deadline: Instant::now(),
             last_seq: 0,
+            watchers: 0,
+            want_key: false,
         },
         artifact,
     ))
@@ -341,6 +384,7 @@ fn step(
     in_front: bool,
     pad: &PadState,
     reports: &Sender<Report>,
+    streamer: &Streamer,
 ) -> Result<(), String> {
     match l.audio_target {
         Some(target) => {
@@ -378,6 +422,16 @@ fn step(
 
     let events = l.runner.advance().map_err(|e| e.to_string())?.to_vec();
     let frame = l.runner.frame();
+    // The sound this frame made, for a spectator. Taken whenever the tap is
+    // on so it never piles up; sent only while the run is theirs to watch.
+    if l.watchers > 0 {
+        let (round, send) = (l.round, l.streaming());
+        l.runner.take_audio(&mut |samples, rate| {
+            if send {
+                streamer.sound(Sound { round, frame, rate, samples: samples.to_vec() });
+            }
+        });
+    }
     let next = l.run.observe(frame, &events);
     if !events.is_empty() || next != Next::Continue {
         let _ = reports.send(Report::Frame { round: l.round, frame, events });
@@ -401,7 +455,7 @@ fn step(
             let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: None });
         }
     }
-    present(l, window, canvas)
+    present(l, window, canvas, streamer)
 }
 
 /// Shown to the player only; the run is scored in frames, never in these.
@@ -428,18 +482,37 @@ fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
     let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: Some(frame) });
 }
 
-fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas) -> Result<(), String> {
+fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &Streamer) -> Result<(), String> {
     let mut painted = false;
     let mut paint_error = None;
     let client = window.get_size();
     let (video, aspect) = (l.video, l.core_aspect);
+    // For a spectator: the core's own picture, before the player's settings
+    // shape it (ADR 0032). One copy here; the encoder runs on its own thread
+    // and a picture it has no time for is simply not offered.
+    let (streaming, want_key, round, frame) = (l.streaming(), l.want_key, l.round, l.runner.frame());
+    let mut keyed = false;
     l.last_seq = l.runner.present(l.last_seq, &mut |f| {
         painted = true;
+        if streaming {
+            keyed |= streamer.offer(|| Picture {
+                round,
+                frame,
+                width: f.width,
+                height: f.height,
+                aspect,
+                pixels: f.pixels.to_vec(),
+                key: want_key,
+            });
+        }
         let (buf, w, h) = canvas.draw(&f, client, aspect, &video);
         if let Err(e) = window.update_with_buffer(buf, w, h) {
             paint_error = Some(e.to_string());
         }
     });
+    if keyed {
+        l.want_key = false;
+    }
     if let Some(e) = paint_error {
         return Err(format!("cannot present frame: {e}"));
     }

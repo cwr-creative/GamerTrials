@@ -1,7 +1,7 @@
 # 0003. Stream video for spectating rather than replicating inputs
 
 Date: 2026-08-20
-Status: Accepted
+Status: Superseded by 0032
 
 ## Context
 

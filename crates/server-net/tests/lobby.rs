@@ -255,3 +255,50 @@ fn a_guest_leaving_mid_match_ends_it_for_the_host() {
     assert_eq!(message, "guest left the match");
     host.until(|m| matches!(m, ToClient::MatchOver { .. }).then_some(()));
 }
+
+#[test]
+fn a_finished_player_watches_the_other_over_the_wire() {
+    let (mut host, mut guest) = table();
+    host.send(&ToServer::Settings(LobbySettings { format: Format::Challenges(1), ..Default::default() }));
+    host.send(&ToServer::Start);
+    let (round, cref, limit) = host.until(|m| match m {
+        ToClient::Dealt { round, challenge, limit_frames, .. } => Some((*round, challenge.clone(), *limit_frames)),
+        _ => None,
+    });
+    guest.until(|m| matches!(m, ToClient::Dealt { .. }).then_some(()));
+    for p in [&mut host, &mut guest] {
+        p.send(&ToServer::Prepared { round, artifact: "same".into() });
+    }
+    for p in [&mut host, &mut guest] {
+        p.until(|m| matches!(m, ToClient::Go { round: r } if *r == round).then_some(()));
+    }
+    let catalog = server_net::load_catalog(&manifests()).unwrap();
+    let lib = catalog.game(&cref.game).unwrap();
+    let spec = lib.challenge(&cref.challenge).unwrap().spec(&lib.game.id);
+    play(&mut host, round, &spec, limit);
+    host.until(|m| matches!(m, ToClient::PlayerFinished { .. }).then_some(()));
+
+    host.send(&ToServer::Watch { round, player: Some("guest".into()) });
+    let watchers = guest.until(|m| match m {
+        ToClient::Watched { watchers, .. } => Some(*watchers),
+        _ => None,
+    });
+    assert_eq!(watchers, 1);
+    guest.send(&ToServer::Video {
+        round, frame: 42, key: true, width: 256, height: 240, aspect: 1.0, data: "AAAB".into(),
+    });
+    guest.send(&ToServer::Audio { round, frame: 42, rate: 32040, channels: 2, data: "AA==".into() });
+    let (player, frame) = host.until(|m| match m {
+        ToClient::Video { player, frame, .. } => Some((player.clone(), *frame)),
+        _ => None,
+    });
+    assert_eq!((player.as_str(), frame), ("guest", 42));
+    host.until(|m| matches!(m, ToClient::Audio { player, .. } if player == "guest").then_some(()));
+
+    play(&mut guest, round, &spec, limit);
+    for p in [&mut host, &mut guest] {
+        p.until(|m| matches!(m, ToClient::RoundResult { .. }).then_some(()));
+        assert!(!p.inbox.iter().any(|m| matches!(m, ToClient::Error { .. })), "{:?}", p.inbox);
+    }
+    assert!(!guest.inbox.iter().any(|m| matches!(m, ToClient::Video { .. })), "a stream never comes back to its sender");
+}

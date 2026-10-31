@@ -373,6 +373,15 @@ pub static AUDIO: Mutex<AudioRing> = Mutex::new(AudioRing {
     last: (0.0, 0.0),
 });
 
+/// The machine's own sound, kept for a spectator (ADR 0032): interleaved
+/// stereo i16 at the core's rate, `None` while nobody is listening. Filled
+/// beside `AUDIO`, never from it, so a machine with no output device still
+/// streams sound and the ring that paces the game is never touched for it.
+pub static AUDIO_TAP: Mutex<Option<Vec<i16>>> = Mutex::new(None);
+
+/// A tap nobody drains stops growing here, about two seconds at 48 kHz.
+const AUDIO_TAP_CAP: usize = 1 << 18;
+
 /// Core sample rate divided by device sample rate, stored as f64 bits.
 pub static RESAMPLE_STEP: AtomicU64 = AtomicU64::new(0);
 /// Zero when there is no audio device; the batch callback then drops audio.
@@ -1182,6 +1191,12 @@ fn push_sample(ring: &mut AudioRing, left: f32, right: f32) {
 }
 
 unsafe extern "C" fn cb_audio_sample(left: i16, right: i16) {
+    if let Some(tap) = lock(&AUDIO_TAP).as_mut() {
+        if tap.len() < AUDIO_TAP_CAP {
+            tap.push(left);
+            tap.push(right);
+        }
+    }
     if !audio_enabled() {
         return;
     }
@@ -1190,7 +1205,18 @@ unsafe extern "C" fn cb_audio_sample(left: i16, right: i16) {
 }
 
 unsafe extern "C" fn cb_audio_sample_batch(data: *const i16, frames: usize) -> usize {
-    if !audio_enabled() || data.is_null() {
+    if data.is_null() {
+        return frames;
+    }
+    if let Some(tap) = lock(&AUDIO_TAP).as_mut() {
+        if tap.len() < AUDIO_TAP_CAP {
+            tap.reserve(frames * 2);
+            for i in 0..frames * 2 {
+                tap.push(data.add(i).read_unaligned());
+            }
+        }
+    }
+    if !audio_enabled() {
         return frames;
     }
     let mut ring = lock(&AUDIO);

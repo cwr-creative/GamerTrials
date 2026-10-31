@@ -482,6 +482,31 @@ impl Presentable for LibretroRunner {
         }
         video.seq
     }
+
+    fn tap_audio(&self, on: bool) {
+        let mut tap = match crate::libretro::AUDIO_TAP.lock() {
+            Ok(t) => t,
+            Err(e) => e.into_inner(),
+        };
+        if on {
+            tap.get_or_insert_with(Vec::new);
+        } else {
+            *tap = None;
+        }
+    }
+
+    fn take_audio(&self, f: &mut dyn FnMut(&[i16], u32)) {
+        let mut tap = match crate::libretro::AUDIO_TAP.lock() {
+            Ok(t) => t,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(samples) = tap.as_mut() {
+            if !samples.is_empty() {
+                f(samples, self.av.timing.sample_rate.round() as u32);
+                samples.clear();
+            }
+        }
+    }
 }
 
 /// Where a core is told to persist what the guest writes.

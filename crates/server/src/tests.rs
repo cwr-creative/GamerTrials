@@ -586,3 +586,137 @@ fn a_player_leaving_mid_match_ends_it() {
     let players: Vec<String> = t.lobby(0).players.iter().map(|p| p.id.clone()).collect();
     assert_eq!(players, ["host"]);
 }
+
+// ------------------------------------------------------------- spectating
+
+fn video(round: u64, frame: u64) -> ToServer {
+    ToServer::Video { round, frame, key: true, width: 256, height: 240, aspect: 1.0, data: "AAAB".into() }
+}
+
+fn videos_from(t: &Table, who: usize) -> Vec<(String, u64)> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Video { player, frame, .. } => Some((player.clone(), *frame)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn watched(t: &Table, who: usize) -> Vec<u32> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Watched { watchers, .. } => Some(*watchers),
+            _ => None,
+        })
+        .collect()
+}
+
+fn refusals(t: &Table, who: usize) -> Vec<String> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Refused { reason } => Some(reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A two-seat table with the host's run over and the guest's not begun.
+fn host_done() -> (Table, u64, ChallengeSpec, u64) {
+    let mut t = Table::new(42);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.settings(LobbySettings { format: Format::Challenges(1), ..Default::default() });
+    t.start();
+    let (round, cref, limit) = t.last_dealt(0).unwrap();
+    let spec = t.spec(&cref);
+    for who in 0..2 {
+        t.send(who, ToServer::Prepared { round, artifact: "abc".into() });
+    }
+    t.play(0, round, &spec, limit);
+    for who in 0..2 {
+        t.take(who);
+    }
+    (t, round, spec, limit)
+}
+
+#[test]
+fn a_finished_player_watches_one_still_playing() {
+    let (mut t, round, spec, limit) = host_done();
+    t.send(0, ToServer::Watch { round, player: Some("guest".into()) });
+    assert_eq!(watched(&t, 1), [1], "the guest is told they have a watcher");
+    assert!(watched(&t, 0).is_empty());
+    t.send(1, video(round, 10));
+    t.send(1, ToServer::Audio { round, frame: 10, rate: 32040, channels: 2, data: "AA==".into() });
+    assert_eq!(videos_from(&t, 0), [("guest".to_string(), 10)]);
+    assert!(videos_from(&t, 1).is_empty(), "a stream never comes back to its sender");
+    assert!(
+        t.clients[0].inbox.iter().any(|m| matches!(m, ToClient::Audio { player, frame: 10, rate: 32040, channels: 2, .. } if player == "guest")),
+        "{:?}",
+        t.clients[0].inbox
+    );
+    t.take(0);
+    t.send(0, ToServer::Watch { round, player: None });
+    assert_eq!(watched(&t, 1), [1, 0], "and told when the watcher leaves");
+    t.send(1, video(round, 11));
+    assert!(videos_from(&t, 0).is_empty(), "nobody watching, nothing relayed");
+    // Watch again, then the round ends under it.
+    t.send(0, ToServer::Watch { round, player: Some("guest".into()) });
+    t.play(1, round, &spec, limit);
+    t.take(0);
+    t.send(1, video(round, 12));
+    assert!(videos_from(&t, 0).is_empty(), "a chunk from an ended round goes nowhere");
+    assert!(refusals(&t, 1).is_empty(), "and is not an error: {:?}", refusals(&t, 1));
+    assert!(t.errors(0).is_empty());
+}
+
+#[test]
+fn only_a_player_whose_run_is_over_may_watch() {
+    let (mut t, round, _, _) = host_done();
+    t.send(1, ToServer::Watch { round, player: Some("host".into()) });
+    assert_eq!(refusals(&t, 1), ["you are still playing this round"]);
+    t.send(0, ToServer::Watch { round, player: Some("host".into()) });
+    assert_eq!(refusals(&t, 0), ["you cannot watch yourself"]);
+    t.take(0);
+    t.send(0, ToServer::Watch { round, player: Some("nobody".into()) });
+    assert_eq!(refusals(&t, 0), ["nobody is not playing this round"]);
+    t.take(0);
+    t.send(0, ToServer::Watch { round: round + 7, player: Some("guest".into()) });
+    assert!(refusals(&t, 0).is_empty(), "a round that is not live is ignored, not refused");
+    assert!(watched(&t, 1).is_empty());
+}
+
+#[test]
+fn an_eliminated_player_watches_from_the_deal() {
+    let mut t = Table::new(7);
+    t.join("host", ace);
+    t.join("guest", reckless);
+    // A third seat: with two, one elimination would end the match.
+    t.join("other", ace);
+    t.settings(LobbySettings { mode: Mode::Survival, format: Format::Strikes(1), ..Default::default() });
+    t.start();
+    t.play_round();
+    let (round, cref, limit) = t.last_dealt(0).expect("a second round for the two survivors");
+    let spec = t.spec(&cref);
+    for who in 0..3 {
+        t.take(who);
+    }
+    // The guest is out and prepares nothing; they may watch before `Go`.
+    t.send(1, ToServer::Watch { round, player: Some("host".into()) });
+    assert_eq!(watched(&t, 0), [1]);
+    assert!(refusals(&t, 1).is_empty(), "{:?}", refusals(&t, 1));
+    for who in [0, 2] {
+        t.send(who, ToServer::Prepared { round, artifact: "abc".into() });
+    }
+    t.send(0, video(round, 1));
+    assert_eq!(videos_from(&t, 1), [("host".to_string(), 1)]);
+    assert!(videos_from(&t, 2).is_empty(), "only the watcher gets it");
+    t.play(0, round, &spec, limit);
+    t.play(2, round, &spec, limit);
+    assert!(t.errors(1).is_empty());
+}

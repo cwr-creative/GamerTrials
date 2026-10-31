@@ -60,6 +60,8 @@ pub enum UiCmd {
     GiveUp,
     /// The lobby's periodic file check is due.
     Recheck,
+    /// Watch another player, from the spectate sheet (ADR 0032).
+    Watch { player: String },
 }
 
 /// How often the lobby checks this machine's files again.
@@ -89,6 +91,15 @@ struct Current {
     playing: Vec<String>,
 }
 
+/// A round this player is watching rather than playing (ADR 0032): their
+/// run is over, or they are out of the match.
+struct Spectate {
+    round: u64,
+    /// Who can still be watched: still playing, and not this player.
+    players: Vec<String>,
+    watching: Option<String>,
+}
+
 pub struct Flow {
     app: AppHandle,
     library: Arc<Library>,
@@ -111,6 +122,7 @@ pub struct Flow {
     /// A round dealt before the game window was up.
     waiting_load: Option<Load>,
     current: Option<Current>,
+    spectate: Option<Spectate>,
     /// Which challenge each dealt round was, for the cards.
     dealt: BTreeMap<u64, ChallengeRef>,
     spiked: bool,
@@ -163,6 +175,7 @@ impl Flow {
                     overlay: None,
                     waiting_load: None,
                     current: None,
+                    spectate: None,
                     dealt: BTreeMap::new(),
                     spiked: false,
                     auto,
@@ -228,7 +241,7 @@ impl Flow {
                     Ok(v) => v,
                     Err(e) => return self.notice(&e),
                 };
-                match self.connect(&server) {
+                match self.connect(&server.url()) {
                     Ok(l) => self.hello(l, name, Some(code)),
                     Err(e) => self.notice(&e),
                 }
@@ -277,6 +290,7 @@ impl Flow {
                 }
                 self.passthrough(true);
             }
+            UiCmd::Watch { player } => self.watch(Some(player)),
         }
     }
 
@@ -287,7 +301,7 @@ impl Flow {
             ToClient::Welcome { player, lobby } => {
                 println!("[lobby] joined {} as {player}", lobby.code);
                 self.player = Some(player.clone());
-                let invite = self.link.as_ref().and_then(|l| l.server.as_deref()).map(|s| link::invite(s, &lobby.code));
+                let invite = self.link.as_ref().and_then(|l| l.server.as_ref()).map(|s| link::invite(s, &lobby.code));
                 let _ = self.app.emit_to("main", "session", &json!({ "me": player, "invite": invite }));
                 if !lobby.players.first().is_some_and(|p| p.id == player) {
                     // A guest: the lobby's settings are the host's to set.
@@ -341,13 +355,15 @@ impl Flow {
                 );
                 self.dealt.insert(round, challenge.clone());
                 let me = self.player.clone().unwrap_or_default();
+                self.stop_spectating();
                 if !players.contains(&me) {
-                    // Out of the match: nothing to play. Spectating goes here.
+                    // Out of the match: nothing to play, so watch (ADR 0032).
                     if let Some(g) = &self.game {
                         let _ = g.send(Command::Unload);
                     }
                     self.current = None;
                     self.emit(json!({ "kind": "eliminated", "round": round, "players": players }));
+                    self.start_spectating(round, players);
                     return;
                 }
                 self.current = Some(Current { round, playing: players.clone() });
@@ -416,6 +432,7 @@ impl Flow {
                 if self.is_current(round) {
                     self.current = None;
                 }
+                self.stop_spectating();
                 let who = if self.player.as_deref() == Some(player.as_str()) { "you".to_string() } else { player };
                 self.emit(json!({
                     "kind": "voided", "round": round,
@@ -429,12 +446,45 @@ impl Flow {
                     let playing = c.playing.clone();
                     self.emit(json!({ "kind": "playing", "round": round, "players": playing }));
                 }
+                if let Some(s) = self.spectate.as_mut().filter(|s| s.round == round) {
+                    s.players.retain(|p| p != &player);
+                    if s.watching.as_deref() == Some(player.as_str()) {
+                        // Whoever is still going, or nobody.
+                        let next = s.players.first().cloned();
+                        self.watch(next);
+                    } else {
+                        self.emit_spectate();
+                    }
+                }
+            }
+            ToClient::Watched { round, watchers } => {
+                println!("[match] round {round}: {watchers} watching");
+                if let Some(g) = &self.game {
+                    let _ = g.send(Command::Stream(watchers));
+                }
+            }
+            ToClient::Video { round, player, frame, key, width, height, aspect, data } => {
+                if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
+                    self.emit(json!({
+                        "kind": "video", "player": player, "frame": frame, "key": key,
+                        "width": width, "height": height, "aspect": aspect, "data": data,
+                    }));
+                }
+            }
+            ToClient::Audio { round, player, frame, rate, channels, data } => {
+                if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
+                    self.emit(json!({
+                        "kind": "audio", "player": player, "frame": frame,
+                        "rate": rate, "channels": channels, "data": data,
+                    }));
+                }
             }
             ToClient::RoundResult { round, entries, eliminated, standings } => {
                 println!("[match] round {round} result:");
                 for e in &entries {
                     println!("         {:>2}. {} {:?}", e.place, e.player, e.outcome.ending);
                 }
+                self.stop_spectating();
                 let challenge = self.dealt.get(&round).cloned();
                 let title = challenge.as_ref().map(|c| self.describe(c)).unwrap_or_default();
                 let mode = self.lobby.as_ref().map(|l| l.settings.mode);
@@ -454,6 +504,7 @@ impl Flow {
                     let _ = g.send(Command::Unload);
                 }
                 self.current = None;
+                self.stop_spectating();
                 let mode = self.lobby.as_ref().map(|l| l.settings.mode);
                 let format = self.lobby.as_ref().map(|l| l.settings.format);
                 self.emit(json!({
@@ -542,6 +593,25 @@ impl Flow {
                     "frame": result.frames,
                     "text": result.ending.to_string(),
                 }));
+                // Done, and others are not: watch them (ADR 0032).
+                let me = self.player.clone().unwrap_or_default();
+                let others: Vec<String> = self
+                    .current
+                    .as_ref()
+                    .filter(|c| c.round == round)
+                    .map(|c| c.playing.iter().filter(|p| **p != me).cloned().collect())
+                    .unwrap_or_default();
+                if !others.is_empty() {
+                    self.start_spectating(round, others);
+                }
+            }
+            Report::Video { round, frame, key, width, height, aspect, data } => {
+                let data = protocol::to_base64(&data);
+                self.send(ToServer::Video { round, frame, key, width, height, aspect, data });
+            }
+            Report::Audio { round, frame, rate, channels, data } => {
+                let data = protocol::to_base64(&data);
+                self.send(ToServer::Audio { round, frame, rate, channels, data });
             }
             Report::Paused => {
                 let actions = self.settings.lock().unwrap().input.actions.clone();
@@ -580,6 +650,53 @@ impl Flow {
 
     fn is_current(&self, round: u64) -> bool {
         self.current.as_ref().is_some_and(|c| c.round == round)
+    }
+
+    // ---------------------------------------------------------- spectating
+
+    /// This player's part in the round is over while others play on: watch
+    /// the first of them. The sheet is interactive, so the mouse is ours.
+    fn start_spectating(&mut self, round: u64, players: Vec<String>) {
+        let me = self.player.clone().unwrap_or_default();
+        let players: Vec<String> = players.into_iter().filter(|p| *p != me).collect();
+        let first = players.first().cloned();
+        self.spectate = Some(Spectate { round, players, watching: None });
+        self.passthrough(false);
+        self.watch(first);
+    }
+
+    /// Watch `player`, or nobody, in the round being spectated.
+    fn watch(&mut self, player: Option<String>) {
+        let Some(s) = self.spectate.as_mut() else { return };
+        if let Some(p) = &player {
+            if !s.players.contains(p) {
+                return;
+            }
+        }
+        s.watching = player.clone();
+        let round = s.round;
+        self.send(ToServer::Watch { round, player });
+        self.emit_spectate();
+    }
+
+    fn emit_spectate(&self) {
+        if let Some(s) = &self.spectate {
+            self.emit(json!({
+                "kind": "spectate", "round": s.round, "player": s.watching, "players": s.players,
+            }));
+        }
+    }
+
+    /// The round is over, or the match: nothing to watch, nothing to send.
+    fn stop_spectating(&mut self) {
+        if let Some(s) = self.spectate.take() {
+            if s.watching.is_some() {
+                self.send(ToServer::Watch { round: s.round, player: None });
+            }
+        }
+        if let Some(g) = &self.game {
+            let _ = g.send(Command::Stream(0));
+        }
     }
 
     /// This client cannot run the round; the server voids it (ADR 0029).
@@ -728,6 +845,7 @@ impl Flow {
             let _ = g.send(Command::Quit);
         }
         self.current = None;
+        self.spectate = None;
         // `Report::Closed` follows and shows the lobby again.
     }
 

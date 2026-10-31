@@ -17,7 +17,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use session_api::{ChallengeKind, ExitReason, SessionEvent};
 
 /// 2 added `Unprepared` and `Voided` (ADR 0029) and `Hello.lobby` (ADR 0030).
-pub const VERSION: u32 = 2;
+/// 3 added `Watch`, `Video`, `Audio` and `Watched`: spectating rides this
+/// socket (ADR 0032).
+pub const VERSION: u32 = 3;
 
 /// A versioned message. `v` is read before anything else.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -440,6 +442,22 @@ pub enum ToServer {
     PlayAgain,
     /// Host only, from the score screen.
     BackToLobby,
+    /// Watch `player`'s picture for this round, or stop with `None`. Only a
+    /// player whose own run is over, or who is not in the round, may watch
+    /// (ADR 0026); the server refuses the rest. Whoever is watched hears
+    /// `Watched` (ADR 0032).
+    Watch { round: u64, player: Option<String> },
+    /// One encoded picture: an H.264 access unit in Annex B form, base64 in
+    /// `data`, with its parameter sets in-band when `key`. `frame` is the
+    /// emulated frame it shows (ADR 0005); `aspect` is the picture's shape as
+    /// the core reports it. Sent only while watched, and relayed to each
+    /// watcher as `ToClient::Video`.
+    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: String },
+    /// The sound under one or more pictures: IMA ADPCM, base64 in `data`, at
+    /// the core's own `rate`, `channels` interleaved. Each chunk carries its
+    /// own predictor, so a lost chunk is a gap and not a glitch. `frame` is
+    /// the emulated frame the chunk begins on.
+    Audio { round: u64, frame: u64, rate: u32, channels: u8, data: String },
 }
 
 /// Server to client.
@@ -480,6 +498,34 @@ pub enum ToClient {
     /// server disagree on, or a protocol breach. Fatal to the match, not to
     /// the lobby; a `MatchOver` follows.
     Error { message: String },
+    /// How many are watching this client's run now. Encode and send while
+    /// it is above zero, and start on a key frame whenever it rises (ADR
+    /// 0032).
+    Watched { round: u64, watchers: u32 },
+    /// A watched player's picture, relayed as it was sent.
+    Video {
+        round: u64,
+        player: String,
+        frame: u64,
+        key: bool,
+        width: u32,
+        height: u32,
+        aspect: f32,
+        data: String,
+    },
+    /// A watched player's sound, relayed as it was sent.
+    Audio { round: u64, player: String, frame: u64, rate: u32, channels: u8, data: String },
+}
+
+/// `data` on the wire: standard base64, padded.
+pub fn to_base64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+pub fn from_base64(text: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(text).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -489,14 +535,34 @@ mod tests {
     #[test]
     fn packets_round_trip_and_carry_the_version() {
         let text = encode(&ToServer::Start);
-        assert!(text.contains("\"v\":2"), "{text}");
+        assert!(text.contains("\"v\":3"), "{text}");
         assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
     }
 
     #[test]
     fn another_version_is_refused_before_the_body_is_read() {
         let text = r#"{"v":99,"body":{"type":"start"}}"#;
-        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 2 }));
+        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 3 }));
+    }
+
+    #[test]
+    fn a_stream_survives_the_wire() {
+        let data = to_base64(&[0, 0, 0, 1, 0x67, 0xff]);
+        assert_eq!(from_base64(&data).unwrap(), vec![0, 0, 0, 1, 0x67, 0xff]);
+        let up = ToServer::Video {
+            round: 2, frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data: data.clone(),
+        };
+        assert_eq!(decode::<ToServer>(&encode(&up)).unwrap(), up);
+        let down = ToClient::Video {
+            round: 2, player: "B".into(), frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data,
+        };
+        assert_eq!(decode::<ToClient>(&encode(&down)).unwrap(), down);
+        let sound = ToServer::Audio { round: 2, frame: 300, rate: 32040, channels: 2, data: "AA==".into() };
+        assert_eq!(decode::<ToServer>(&encode(&sound)).unwrap(), sound);
+        let watch = ToServer::Watch { round: 2, player: None };
+        assert_eq!(decode::<ToServer>(&encode(&watch)).unwrap(), watch);
+        let watched = ToClient::Watched { round: 2, watchers: 1 };
+        assert_eq!(decode::<ToClient>(&encode(&watched)).unwrap(), watched);
     }
 
     #[test]

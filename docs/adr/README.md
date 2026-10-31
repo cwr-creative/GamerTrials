@@ -44,7 +44,7 @@ What becomes easier. What becomes harder. What we have to live with.
 |---|---|---|
 | 0001 | Embed libretro cores directly rather than driving RetroArch | Accepted |
 | 0002 | Use savestates for stage entry | Accepted |
-| [0003](0003-stream-video-for-spectating.md) | Stream video for spectating rather than replicating inputs | Accepted |
+| [0003](0003-stream-video-for-spectating.md) | Stream video for spectating rather than replicating inputs | Superseded by 0032 |
 | 0004 | Delegate head-to-head netcode to external per-game solutions | Accepted |
 | 0005 | Measure timing in emulated frames rather than wall-clock | Accepted |
 | 0006 | Adopt ports and adapters with a pure challenge core | Accepted |
@@ -73,6 +73,8 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0029](0029-void-a-round-a-player-cannot-prepare.md) | Void a round a player cannot prepare | Accepted |
 | [0030](0030-carry-the-protocol-over-websockets-to-a-separate-server-process.md) | Carry the protocol over WebSockets to a separate server process | Accepted |
 | [0031](0031-a-keyboard-games-stick-direction-sends-a-key-of-its-own.md) | A keyboard game's stick direction sends a key of its own | Accepted |
+| [0032](0032-relay-spectator-video-through-the-server.md) | Relay spectator video through the server, superseding the media path of 0003 | Accepted |
+| [0033](0033-terminate-tls-in-front-of-the-server.md) | Terminate TLS in front of the server, and let the client dial wss:// | Accepted |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is
