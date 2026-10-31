@@ -44,8 +44,8 @@ base = 0x0000
 size = 0x0800
 system_ram_bytes = 2048
 default_width = "u8"
-# The map first, and this is load-bearing rather than a preference: the card
-# counter at $7D9C is in cartridge WRAM, Mesen does not publish that as save
+# The map first, and this is load-bearing rather than a preference: the end
+# card flag at $7974 is in cartridge WRAM, Mesen does not publish that as save
 # RAM (it is not battery-backed on this cart), and the memory map the core
 # publishes through SET_MEMORY_MAPS is the only route to it. A core that
 # publishes no map still resolves $0000-$07FF through the fallback, and
@@ -94,9 +94,34 @@ note = "Data Crystal: pipe transit countdown. Not playtested here"
 at = 0x05F4
 note = "Data Crystal: stomp kills only - fireball/shell/star do not touch it"
 
-[watch.cards]
+# Inventory_Cards is three slots, $7D9C-$7D9E, each holding a card's type, and
+# it is not a count. A new card goes in the first empty slot, so $7D9C moves
+# only when the player held no cards, and three cards empty all three. That is
+# why it was a clear signal for a player with no cards and silent otherwise.
+# Shown on the overlay, never ruled on.
+[watch.card_1]
 at = 0x7D9C
-note = "verified: card count, in cartridge WRAM. Needs the core's memory map"
+note = "disassembly: Inventory_Cards, first slot's type. In cartridge WRAM"
+
+# EndCard_Flag: set to $81 on the frame the end-of-level card is grabbed, and
+# cleared by the level's initialisation (PRG005, "clear a bunch of stuff").
+[watch.end_card]
+at = 0x7974
+note = "disassembly: EndCard_Flag, in cartridge WRAM. Needs the core's memory map"
+
+# Player_IsDying: 1 for an ordinary death, 2 for falling off the screen, 3 for
+# time up. Set the frame the death animation starts, seconds before $0014 moves.
+# It is in the context-shared zero page ($75-$F3), so on the map it is some
+# other variable; only its rise inside a level is meaningful.
+[watch.dying]
+at = 0x00F1
+note = "disassembly: Player_IsDying. Zero-page, shared with the map's context"
+
+# Map_ReturnStatus: written on the same frame $0014 rises, 1 for a death and 0
+# for a clear. Watched for the overlay and for playtests.
+[watch.return_status]
+at = 0x0713
+note = "disassembly: Map_ReturnStatus, 0 = cleared, nonzero = died"
 
 # Player_Score is three bytes, most significant first, holding the displayed
 # score / 10 — the trailing zero on screen is not stored. A watch cannot read
@@ -129,6 +154,12 @@ note = "verified: Player_Score, low byte. A 100-point stomp took it 00 -> 0A"
 0x06 = "world 7"
 0x07 = "world 8"
 
+[label.card_1]
+0x00 = "none"
+0x01 = "mushroom"
+0x02 = "flower"
+0x03 = "star"
+
 [label.powerup]
 0x00 = "small"
 0x01 = "super"
@@ -139,38 +170,48 @@ note = "verified: Player_Score, low byte. A 100-point stomp took it 00 -> 0A"
 0x06 = "hammer"
 
 [display]
-fields = ["world", "map_x", "map_y", "object_set", "lives", "powerup", "cards"]
+fields = ["world", "map_x", "map_y", "object_set", "lives", "powerup", "card_1", "end_card", "dying"]
 
 # --------------------------------------------------------------- what it means
 
-# A card is an early, unambiguous win signal for the levels that award one. It
-# fires seconds before $0014 moves — 348 frames, measured — and it never fires
-# on a death, so there is no lives check to disambiguate it. Declared first, so
-# that on a frame where both could fire, the card is the verdict.
+# Grabbing the end card is an early, unambiguous win signal for the levels that
+# have one, whatever cards the player already holds. It fires seconds before
+# $0014 moves, and a death never sets it. Declared first, so that on a frame
+# where two could fire, the card is the verdict.
 [[rule]]
-field = "cards"
-edge = "increases"
+field = "end_card"
+edge = "leaves"
+value = 0
 emit = "stage_cleared"
-log = "a card was awarded"
+log = "the end card was grabbed"
 
-# A decrease in lives means the player died
+# The death animation starting. Lives are no use here: SMB3 takes the life on
+# the map, after $0014 has already ended the attempt as `unknown`.
 [[rule]]
-field = "lives"
-edge = "decreases"
+field = "dying"
+edge = "leaves"
+value = 0
 emit = "died"
-log = "you suck at mario 3"
 
-# Everything else that leaves the level. $0014 alone cannot tell a death from a
-# card-less level (fortress, castle, airship) cleared normally, so the reason is
-# `unknown` and it is honestly unknown — not a placeholder. ADR 0014 is where
-# that gap has to be closed.
+[[rule]]
+field = "dying"
+edge = "leaves"
+value = 0
+emit = "stage_exited"
+reason = "death"
+log = "the death animation started"
+
+# Everything else that leaves the level: a card-less level (fortress, castle,
+# airship) cleared, or an exit pipe to the map. A death has already ended the
+# attempt by the time $0014 rises, so this is no longer where deaths land, but
+# the reason stays `unknown`: ADR 0014 is where card-less clears get one.
 [[rule]]
 field = "return_to_map"
 edge = "leaves"
 value = 0
 emit = "stage_exited"
 reason = "unknown"
-log = "no card was seen: this is a death, or a card-less level cleared"
+log = "left the level without the end card or a death"
 
 [[rule]]
 field = "hit_timer"
@@ -259,8 +300,8 @@ note = "forced-scrolling: everyone finishes in the same number of frames, so the
 # entries. That is the deal — in exchange, everything a player can be dealt is
 # visible in this file.
 #
-# `cleared = true` here means the card rule fired, which is the honest end of a
-# card-awarding level. A fortress or an airship awards no card and would need
+# `cleared = true` here means the end card was grabbed, which is the honest end
+# of a card-awarding level. A fortress or an airship awards no card and would need
 # ADR 0014's missing detector before it could carry this criterion.
 
 [[challenge]]

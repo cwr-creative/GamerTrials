@@ -55,8 +55,9 @@
   #flash.hit { animation: flash 450ms ease-out; }
   @keyframes flash { 0% { background: rgba(200, 0, 0, .75); } 100% { background: rgba(200, 0, 0, 0); } }
 
-  /* Garland or skull: a badge that swings in and fades. */
-  #badge { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%) scale(0);
+  /* Garland or skull: a badge that swings in and fades, above every sheet —
+     in a solo match the round card is up before it has finished. */
+  #badge { position: absolute; z-index: 10; left: 50%; top: 40%; transform: translate(-50%, -50%) scale(0);
            font-size: 7em; filter: drop-shadow(0 0 20px #000); pointer-events: none;
            text-align: center; }
   #badge small { display: block; font-size: .22em; color: #fff; text-shadow: 0 0 8px #000; }
@@ -65,6 +66,14 @@
                      25% { transform: translate(-50%, -50%) scale(1.2) rotate(5deg); }
                      40% { transform: translate(-50%, -50%) scale(1); }
                      80% { opacity: 1; } 100% { opacity: 0; } }
+
+  /* A time trial's clock: the run's frames across every attempt, read out
+     in seconds at the core's own rate. A guide for the player; the score is
+     the frames. */
+  #clock { position: absolute; right: 14px; top: 10px; font-size: 2em; font-weight: 800;
+           font-variant-numeric: tabular-nums; text-shadow: 0 0 8px #000, 0 0 3px #000;
+           pointer-events: none; }
+  #clock.stopped { color: #ffb347; }
 
   #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
   #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
@@ -88,6 +97,7 @@
   </div></div>
   <div id="count" class="sheet"></div>
   <div id="flash" class="sheet"></div>
+  <div id="clock" class="hidden"></div>
   <div id="badge"></div>
   <div id="waiting" class="hidden"></div>
   <div id="round" class="sheet hidden"><div class="card">
@@ -185,6 +195,17 @@
     hud('playing');
   }
 
+  // ---- the clock ----------------------------------------------------------
+  // `m:ss.t`, truncated, so it never reads a tenth ahead of the frames.
+  function showClock(p) {
+    const tenths = Math.floor(p.frames * 10 / p.fps);
+    const m = Math.floor(tenths / 600), s = Math.floor(tenths / 10) % 60;
+    $('clock').textContent = m + ':' + String(s).padStart(2, '0') + '.' + tenths % 10;
+    $('clock').classList.toggle('stopped', !!p.stopped);
+    show('clock');
+  }
+  const hideClock = () => hide('clock');
+
   // ---- cards --------------------------------------------------------------
   const endingText = e => !e ? '' :
     e.type === 'completed' ? 'completed' :
@@ -248,7 +269,8 @@
 
   function handle(p) {
     switch (p.kind) {
-      case 'loading': playing = []; hud('loading round ' + p.round); break;
+      case 'loading': playing = []; hideClock(); hud('loading round ' + p.round); break;
+      case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;
       case 'go': goWanted = true; tryGo(); break;
       case 'death': replay($('flash'), 'hit'); hud('death at frame ' + p.frame); break;
@@ -257,7 +279,8 @@
         $('badge').innerHTML = (p.kind === 'garland' ? '\u{1F3C6}' : '\u{1F480}') + '<small>' + esc(p.text || '') + '</small>';
         replay($('badge'), 'show');
         hud((p.kind === 'garland' ? 'cleared' : 'out') + ' at frame ' + p.frame);
-        setTimeout(() => showWaiting(waitingText()), 2000);
+        // Not once the round card is up: a solo round is over by then.
+        setTimeout(() => { if ($('round').classList.contains('hidden') && !introUp) showWaiting(waitingText()); }, 2000);
         break;
       case 'playing':
         playing = p.players || [];
@@ -270,12 +293,12 @@
         hud('eliminated, round ' + p.round);
         break;
       case 'voided':
-        dropRound();
+        dropRound(); hideClock();
         showWaiting(esc(p.text));
         hud('round ' + p.round + ' void');
         break;
-      case 'round': showRound(p); break;
-      case 'score': showScore(p); break;
+      case 'round': hideClock(); showRound(p); break;
+      case 'score': hideClock(); showScore(p); break;
       case 'pause': showPause(p); break;
       case 'resume': hidePause(); hud('playing'); break;
       case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;

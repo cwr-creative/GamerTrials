@@ -12,7 +12,7 @@ completion rule.
    dependency is pure Rust, so nothing else needs a C compiler.
 2. **A NES core**, in `cores/` (the manifest's `core_dir`):
    - `mesen_libretro.dll` — most accurate, best RAM/savestate behaviour, and
-     the only one confirmed to publish the memory map the card detector needs
+     the only one confirmed to publish the memory map the end card flag needs
    - `fceumm_libretro.dll` — lighter, very widely used
    - `nestopia_libretro.dll`
 
@@ -74,7 +74,10 @@ the `note` beside it.
 | `$0552` | hit-invulnerability timer; rising from 0 means Mario just took damage | documented (Data Crystal), not yet playtested |
 | `$0510` | pipe transit countdown; rising from 0 means entering/exiting a pipe | documented (Data Crystal), not yet playtested |
 | `$05F4` | stomp counter; increments on a stomp kill only — fireball/shell/star kills don't touch it | documented (Data Crystal), not yet playtested |
-| `$7D9C` | card count; increments when Mario is awarded a card at a level's end | verified (playtested) |
+| `$7974` | `EndCard_Flag`; set to `$81` the frame the end-of-level card is grabbed, cleared by level initialisation | disassembly (`smb3.asm`); the clear signal |
+| `$00F1` | `Player_IsDying`; 1 dying, 2 fell off screen, 3 time up. Zero-page shared with the map's context | disassembly; playtested headless: a goomba death set it 0 → 1 at frame 312, 183 frames before `$0014` rose |
+| `$0713` | `Map_ReturnStatus`; written as `$0014` rises, 0 for a clear and nonzero for a death | disassembly; watched, never ruled on |
+| `$7D9C` | `Inventory_Cards`, the first of three card slots (`$7D9C-$7D9E`), each holding a card's *type*. Not a count | disassembly; was the clear signal, and wrong (below) |
 | `$0715`-`$0717` | `Player_Score`, most significant byte first, holding the displayed score ÷ 10 | disassembly (`smb3.asm`); the low byte playtested: a 100-point stomp took `$0717` from `00` to `0A`, six frames after `$05F4` moved |
 
 Any of them can be retargeted or switched off without a rebuild:
@@ -97,7 +100,7 @@ An SMB3 RAM map with other addresses to test is at
 
 ## Reaching cartridge WRAM
 
-The card count lives at `$7D9C`, in the `$6000-$7FFF` cartridge WRAM — and
+The end card flag lives at `$7974`, in the `$6000-$7FFF` cartridge WRAM — and
 `retro_get_memory_data` cannot reach it. Mesen exposes exactly one region,
 `RETRO_MEMORY_SYSTEM_RAM` (2048 bytes, the internal RAM at `$0000-$07FF`);
 querying `RETRO_MEMORY_SAVE_RAM` and every other region id returns nothing,
@@ -112,8 +115,8 @@ absent.
 
 **This is why the manifest sets `prefer = "memory_map"`.** It is the one field
 in `[runner.libretro.memory]` whose being wrong is invisible: with
-`prefer = "system_ram"` every low address still resolves, and the card detector
-simply never fires. If a core publishes no map at all, startup says which
+`prefer = "system_ram"` every low address still resolves, and the clear
+detector simply never fires. If a core publishes no map at all, startup says which
 addresses went unreadable and stage completion falls back to the `$0014`
 heuristic alone.
 
@@ -129,23 +132,37 @@ harness --game smb3 --dump-memory-map
 
 ## Stage completion
 
-A card increase (`$7D9C`) is the primary success signal: it fires seconds before
-`$0014` moves, and it never fires on death, so no lives check is needed to
-disambiguate it. Measured against a real run, the card lands at frame 11 and
-`$0014` doesn't rise until frame 359 — a 348-frame (5.8 s) difference, all of it
-noise that used to be counted as stage time.
+`EndCard_Flag` (`$7974`) leaving zero is the success signal: the game sets it on
+the frame the end card is grabbed, seconds before `$0014` moves, and a death
+never sets it. Measured against a real run with the earlier card rule, the card
+lands at frame 11 and `$0014` doesn't rise until frame 359 — a 348-frame (5.8 s)
+difference, all of it noise that used to be counted as stage time.
+
+The earlier rule watched `$7D9C` increase, on the belief that it was a card
+count. It is `Inventory_Cards`' first slot, holding the card's type. A new card
+goes in the first empty slot, so `$7D9C` moved only when the player held no
+cards, and a player who already held one cleared the level and was reported as
+leaving it for no reason.
+
+A death is `Player_IsDying` (`$00F1`) leaving zero, the frame the death
+animation starts. Lives were the wrong signal for it: SMB3 takes the life on the
+map, after `$0014` has risen, so the `unknown` exit always won and every death
+was reported as one. `$00F1` is in the zero page the map reuses for its own
+variables, so only its rise inside a level means anything. It stays at zero
+across a map-to-level entry on both hack3 stages.
 
 Not every level awards a card — fortresses, castles, and airships don't run the
 card-match bonus — so this only covers the levels that do.
 
 For everything else, `$0014` rising from zero means the game is leaving the
 level, and the manifest reports that as `stage_exited` with reason `unknown`.
-That reason is honest rather than provisional: a card-less level cleared
-normally is genuinely indistinguishable from a death by watching `$0014`.
+With deaths caught earlier, what reaches it is a card-less level cleared or an
+exit pipe. `Map_ReturnStatus` would tell those from a death, but that is ADR
+0014's to settle.
 
-The two rules are ordered so the card wins on a frame where both could fire, and
+The rules are ordered so the card wins on a frame where two could fire, and
 a terminal event ends the attempt — so the ordinary `$0014` exit a few seconds
-after a card reports nothing. `[[attempt.reset_on]]` re-opens scoring when
+after a card or a death reports nothing. `[[attempt.reset_on]]` re-opens scoring when
 `$0014` falls again, which is the hand-off to the map finishing.
 
 That last part is load-bearing and was a real bug. When the "already resolved"

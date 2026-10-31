@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use challenge_core::{Next, Run, RunResult};
 use minifb::{Scale, ScaleMode, Window, WindowOptions};
-use session_api::{Presentable, SessionEvent, StageRunner, StageSpec};
+use session_api::{ChallengeKind, Presentable, SessionEvent, StageRunner, StageSpec};
 use session_libretro::audio::{self, Audio};
 use session_libretro::input::PadState;
 use session_libretro::libretro;
@@ -76,6 +76,10 @@ pub enum Report {
     Frame { round: u64, frame: u64, events: Vec<SessionEvent> },
     /// A time trial re-entered the stage after an attempt ended.
     Reentered { round: u64, attempt: u32, banked: u64 },
+    /// A time trial's clock: frames across every attempt, and the core's
+    /// rate to read them in seconds by. Sent whenever the tenth of a second
+    /// it reads changes, and once more, `stopped`, when the run is over.
+    Clock { round: u64, frames: u64, fps: f64, stopped: bool },
     /// The provisional verdict. `forfeited_at` is the frame the player gave
     /// up on, when they did; the server is told that first.
     Finished { round: u64, result: RunResult, forfeited_at: Option<u64> },
@@ -103,6 +107,11 @@ struct Loaded {
     core_aspect: f32,
     _audio: Option<Audio>,
     frame_time: Duration,
+    fps: f64,
+    /// A time trial, which shows its clock.
+    timed: bool,
+    /// The tenth of a second the clock last read.
+    clock_tenth: Option<u64>,
     audio_target: Option<usize>,
     next_deadline: Instant,
     last_seq: u64,
@@ -281,12 +290,14 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             None
         }
     };
-    let frame_time = Duration::from_secs_f64(1.0 / av.timing.fps.max(1.0));
+    let fps = av.timing.fps.max(1.0);
+    let frame_time = Duration::from_secs_f64(1.0 / fps);
     let audio_target = audio
         .as_ref()
         .map(|a| (audio::TARGET_QUEUED_FRAMES as f64 * a.device_rate / av.timing.fps) as usize);
     window.set_title(&format!("{title} \u{2014} GamerTrials"));
     runner.enter(&spec).map_err(|e| e.to_string())?;
+    let timed = matches!(judged.kind, ChallengeKind::TimeTrial);
     let run = Run::new(judged).map_err(|e| e.to_string())?.with_limit(l.limit);
     // A keyboard game reads the pad too: its RetroPad buttons press keys.
     let pads = input::Pads::new(layout);
@@ -311,6 +322,9 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             core_aspect: av.geometry.aspect_ratio,
             _audio: audio,
             frame_time,
+            fps,
+            timed,
+            clock_tenth: None,
             audio_target,
             next_deadline: Instant::now(),
             last_seq: 0,
@@ -368,6 +382,10 @@ fn step(
     if !events.is_empty() || next != Next::Continue {
         let _ = reports.send(Report::Frame { round: l.round, frame, events });
     }
+    l.done = matches!(next, Next::Finished(_));
+    // Before `Finished`, so the last reading reaches the overlay ahead of
+    // the round card.
+    clock(l, reports);
     match next {
         Next::Continue => {}
         Next::Reenter => {
@@ -380,11 +398,23 @@ fn step(
             });
         }
         Next::Finished(result) => {
-            l.done = true;
             let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: None });
         }
     }
     present(l, window, canvas)
+}
+
+/// Shown to the player only; the run is scored in frames, never in these.
+fn clock(l: &mut Loaded, reports: &Sender<Report>) {
+    if !l.timed {
+        return;
+    }
+    let frames = l.run.frames();
+    let tenth = (frames as f64 * 10.0 / l.fps) as u64;
+    if l.done || l.clock_tenth != Some(tenth) {
+        l.clock_tenth = Some(tenth);
+        let _ = reports.send(Report::Clock { round: l.round, frames, fps: l.fps, stopped: l.done });
+    }
 }
 
 fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
@@ -394,6 +424,7 @@ fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
     let frame = l.runner.frame();
     let result = l.run.forfeit();
     l.done = true;
+    clock(l, reports);
     let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: Some(frame) });
 }
 

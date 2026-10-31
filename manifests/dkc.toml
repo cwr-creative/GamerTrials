@@ -82,7 +82,7 @@ note = "RA notes: bananas / mini animal tokens, up to 999"
 [watch.kong_letters]
 at = 0x057F
 width = "u8"
-note = "RA notes: KONG letters flag. Unmarked in the notes, so a byte"
+note = "RA notes: KONG letters. b0 G, b1 N, b2 O, b3 K, b4 spelled (from the ROM)"
 
 [watch.fade_type]
 at = 0x051B
@@ -237,13 +237,47 @@ edge = "increases"
 emit = "item"
 item = "banana"
 
-# One event per letter newly held, out of one byte.
+# KONG letters, read off the game's own code rather than guessed (dkc.md). The
+# byte holds the word backwards — G is bit 0, K bit 3 — and the letter that
+# completes the word never sets its bit: the game writes 0x90 over the byte
+# instead (bit 4, "spelled", and bit 7, transient) and awards the life. So the
+# fourth letter, whichever it is, reports as the objective and an extra life,
+# never as a letter. One rule per bit rather than `bits_set`, which would
+# report bits 4 and 7 as `kong_letter:4` and `kong_letter:7`.
 [[rule]]
 field = "kong_letters"
-edge = "bits_set"
-bit_labels = ["K", "O", "N", "G"]
+edge = "bit_set"
+bit = 3
 emit = "item"
-item = "kong_letter"
+item = "kong_letter:K"
+
+[[rule]]
+field = "kong_letters"
+edge = "bit_set"
+bit = 2
+emit = "item"
+item = "kong_letter:O"
+
+[[rule]]
+field = "kong_letters"
+edge = "bit_set"
+bit = 1
+emit = "item"
+item = "kong_letter:N"
+
+[[rule]]
+field = "kong_letters"
+edge = "bit_set"
+bit = 0
+emit = "item"
+item = "kong_letter:G"
+
+[[rule]]
+field = "kong_letters"
+edge = "bit_set"
+bit = 4
+emit = "objective"
+objective = "kong-spelled"
 
 [[rule]]
 field = "lives"
@@ -414,21 +448,22 @@ kind = "survival"
 complete_when = { survive_seconds = 45.0 }
 goal = "Stay in the cart for 45 seconds!"
 
-# Conjunction, and the per-bit item naming: `kong_letters` is one byte, and the
-# `bit_labels` on its rule are what turn bit 2 into `kong_letter:N`. All four
-# letters *and* the exit, as fast as you can — either alone is a different
-# challenge, and neither is this one.
+# Conjunction: all four letters *and* the exit, as fast as you can — either
+# alone is a different challenge, and neither is this one. "All four letters"
+# is the `kong-spelled` objective, not four `kong_letter:*` items: the letter
+# that completes the word never sets its own bit, so whichever is picked up
+# last never reports as a letter.
 [[challenge]]
 id = "jungle-hijinx-kong"
 name = "Jungle Hijinx: K-O-N-G"
 stage = "jungle-hijinx"
 kind = "time_trial"
 goal = "Collect K, O, N and G, then reach the end!"
-note = "every DKC level holds exactly four letters; the counts are 1 each, not 4 of one"
+note = "every DKC level holds exactly four letters; spelling them is one objective"
 
 [challenge.complete_when]
 cleared = true
-items_collected = { "kong_letter:K" = 1, "kong_letter:O" = 1, "kong_letter:N" = 1, "kong_letter:G" = 1 }
+objectives = ["kong-spelled"]
 
 # ----------------------------------------------------------- Reptile Roulette
 #

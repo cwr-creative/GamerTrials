@@ -330,15 +330,12 @@ fn shipped_challenges_use_criteria_other_than_cleared() {
     assert_eq!(stomps.counts.get(session_api::ENEMY_DEFEATED), Some(&5));
     assert!(!stomps.cleared, "the clock stops on the fifth stomp, not at the flagpole");
 
-    // All four letters *and* the exit. The per-bit rule is what makes
-    // `kong_letter:K` the name, and the loader refuses any other spelling.
+    // All four letters *and* the exit. "All four" is the game's own "spelled"
+    // bit, because the letter that completes the word never sets its own.
     let kong = dkc().challenge("jungle-hijinx-kong").unwrap().complete_when.clone();
     assert!(kong.cleared);
-    assert_eq!(
-        kong.counts.keys().cloned().collect::<Vec<_>>(),
-        ["kong_letter:G", "kong_letter:K", "kong_letter:N", "kong_letter:O"]
-    );
-    assert!(kong.counts.values().all(|&n| n == 1));
+    assert_eq!(kong.objectives, ["kong-spelled"]);
+    assert!(kong.counts.is_empty());
 }
 
 /// The spec that crosses into `challenge-core`. It names a stage and never the
@@ -374,7 +371,7 @@ fn the_dkc_level_table_survived_the_move_into_the_manifest() {
 // ==================================================================== SMB3
 //
 // The NES buffer is 0x8000 rather than the real 2 KB so that a test can write
-// the card counter at $7D9C, which on hardware is cartridge WRAM reached
+// the end card flag at $7974, which on hardware is cartridge WRAM reached
 // through the core's memory map. No map is published under `cargo test`, so
 // the slice is the only route and a longer slice is what makes the address
 // writable at all. This is what the original harness's tests did too.
@@ -395,8 +392,8 @@ fn return_to_map_with_no_card_exits_the_stage() {
     let mut g = mario();
     g.tick(1);
     g.put("return_to_map", 1);
-    // Honestly `unknown`: $0014 alone cannot tell a death from a card-less
-    // level cleared normally, and saying so is the point.
+    // Honestly `unknown`: a card-less level cleared, or an exit pipe. Deaths
+    // no longer reach this rule.
     assert_eq!(exited(&g.tick(2)), Some((2, ExitReason::Unknown)));
 }
 
@@ -404,8 +401,40 @@ fn return_to_map_with_no_card_exits_the_stage() {
 fn a_card_clears_the_stage() {
     let mut g = mario();
     g.tick(1);
-    g.put("cards", 1);
+    g.put("end_card", 0x81);
     assert_eq!(cleared(&g.tick(2)), Some(2));
+}
+
+/// Regression: the clear used to be $7D9C rising, which is the first card
+/// slot's type rather than a count, so a player already holding a card cleared
+/// a level and was told they had left it for no reason.
+#[test]
+fn a_card_clears_the_stage_whatever_cards_are_held() {
+    let mut g = mario();
+    g.put("card_1", 2);
+    g.tick(1);
+    g.put("end_card", 0x81);
+    assert_eq!(cleared(&g.tick(2)), Some(2));
+    // Three cards matched empties the slots; that is not a second ending.
+    g.put("card_1", 0);
+    assert!(g.tick(3).is_empty());
+}
+
+/// Regression: deaths used to be read off lives, which SMB3 takes on the map
+/// after $0014 has already ended the attempt, so every death was `unknown`.
+#[test]
+fn the_death_animation_is_a_death_and_ends_the_stage() {
+    for how in [1, 2, 3] {
+        let mut g = mario();
+        g.tick(1);
+        g.put("dying", how);
+        let ev = g.tick(2);
+        assert!(ev.contains(&SessionEvent::Died { frame: 2 }), "{how}");
+        assert_eq!(exited(&ev), Some((2, ExitReason::Death)), "{how}");
+        // The exit a few seconds later is the same death, not a second ending.
+        g.put("return_to_map", 1);
+        assert!(g.tick(3).is_empty(), "{how}");
+    }
 }
 
 /// The card fires seconds before $0014 moves; that later rise is the same
@@ -414,7 +443,7 @@ fn a_card_clears_the_stage() {
 fn the_exit_after_a_card_is_not_a_second_ending() {
     let mut g = mario();
     g.tick(1);
-    g.put("cards", 1);
+    g.put("end_card", 0x81);
     assert_eq!(cleared(&g.tick(2)), Some(2));
     g.put("return_to_map", 1);
     assert!(g.tick(3).is_empty());
@@ -428,17 +457,18 @@ fn a_death_after_a_card_still_exits() {
     let mut g = mario();
     g.tick(1);
 
-    g.put("cards", 1);
+    g.put("end_card", 0x81);
     assert_eq!(cleared(&g.tick(2)), Some(2));
     g.put("return_to_map", 1);
     assert!(g.tick(3).is_empty());
     // The flag clearing is the hand-off to the map finishing, which re-opens
-    // the attempt.
+    // the attempt. The next level's initialisation clears the card flag.
     g.put("return_to_map", 0);
+    g.put("end_card", 0);
     assert!(g.tick(4).is_empty());
 
-    g.put("return_to_map", 1);
-    assert_eq!(exited(&g.tick(5)), Some((5, ExitReason::Unknown)));
+    g.put("dying", 1);
+    assert_eq!(exited(&g.tick(5)), Some((5, ExitReason::Death)));
 }
 
 #[test]
@@ -735,11 +765,33 @@ fn bananas_and_letters_report_as_items() {
     g.put("bananas", 3);
     assert_eq!(items(&g.tick(2)), vec![("banana".to_string(), 3)]);
 
-    // Bit 0 then bit 2: K, then N. Only the newly set bit reports.
-    g.put("kong_letters", 0b0001);
+    // The byte holds the word backwards: K is bit 3, N bit 1. Only the newly
+    // set bit reports.
+    g.put("kong_letters", 0b1000);
     assert_eq!(items(&g.tick(3)), vec![("kong_letter:K".to_string(), 1)]);
-    g.put("kong_letters", 0b0101);
+    g.put("kong_letters", 0b1010);
     assert_eq!(items(&g.tick(4)), vec![("kong_letter:N".to_string(), 1)]);
+    g.put("kong_letters", 0b1110);
+    assert_eq!(items(&g.tick(5)), vec![("kong_letter:O".to_string(), 1)]);
+}
+
+/// The letter that completes KONG never sets its own bit: the game writes 0x90
+/// over the byte and awards a life. That is the objective and an extra life,
+/// and no letter at all — least of all `kong_letter:4` or `kong_letter:7`.
+#[test]
+fn the_last_letter_spells_kong() {
+    let mut g = kong();
+    g.put("kong_letters", 0b1110);
+    g.tick(2);
+
+    g.put("kong_letters", 0x90);
+    g.put("lives", 6);
+    let ev = g.tick(3);
+    assert_eq!(items(&ev), vec![("extra_life".to_string(), 1)]);
+    assert!(ev.contains(&SessionEvent::ObjectiveReached {
+        frame: 3,
+        objective: "kong-spelled".to_string()
+    }));
 }
 
 #[test]

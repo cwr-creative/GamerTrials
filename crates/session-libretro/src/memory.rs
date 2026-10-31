@@ -6,7 +6,7 @@
 //!
 //! On the NES, Mesen publishes exactly one region through
 //! `retro_get_memory_data` — the 2 KB of internal RAM at `$0000-$07FF` — and
-//! SMB3 keeps its end-of-level card count at `$7D9C`, in cartridge WRAM. That
+//! SMB3 keeps its end-of-level card flag at `$7974`, in cartridge WRAM. That
 //! byte is reachable only through the memory map the core publishes via
 //! `SET_MEMORY_MAPS`, so on the NES the map is the primary route and the
 //! system-RAM slice is the fallback.

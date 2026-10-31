@@ -524,6 +524,11 @@ impl Flow {
                 println!("[match] round {round}: attempt {attempt}, {banked} frames on the clock");
                 self.emit(json!({ "kind": "hud", "text": format!("attempt {attempt}") }));
             }
+            Report::Clock { round, frames, fps, stopped } => {
+                if self.is_current(round) {
+                    self.emit(json!({ "kind": "clock", "frames": frames, "fps": fps, "stopped": stopped }));
+                }
+            }
             Report::Finished { round, result, forfeited_at } => {
                 println!("[match] round {round}: provisional {result}");
                 if let Some(frame) = forfeited_at {

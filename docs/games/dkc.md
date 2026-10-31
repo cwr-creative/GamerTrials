@@ -97,7 +97,7 @@ with a noisy neighbour.
 | `$7E0040` | last room id inside a level, else 0 | RA notes — a second in-a-stage indicator |
 | `$7E0575` | lives | RA notes. `$0577`, which every older map quotes, is the *display copy* |
 | `$7E057B` | bananas / mini animal tokens | RA notes, agreeing with the older map |
-| `$7E057F` | KONG letters (bitfield, u8) | RA notes |
+| `$7E057F` | KONG letters: b0 G, b1 N, b2 O, b3 K; b4 spelled | RA notes for the address; **the ROM** for the bits — see below |
 | `$7E051B` | fade type; 0x82 = fading out | **two sources**: `Lui37/dkc1-hack` and RA; playtested |
 | `$7E0579` | state flags: b0 = 2 Kongs, b6 = paused | **two sources**; RA supplies the bit meanings |
 | `$7E16D1` | DK flash timer, set on taking a hit | RA notes (Diddy `$16D3`; invuln `$16D5`/`$16D7`) |
@@ -119,6 +119,23 @@ Two widths also changed. The notes mark 16-bit values explicitly (`[2 Byte]`,
 already agreed — so an unmarked note means a byte. By it, `kong_letters` and
 `state_flags` are `u8`, not the `u16` they were. Pause was unaffected (bit 6 is
 in the low byte), but a 16-bit `kong_letters` read was dragging in `$0580`.
+
+The KONG bits come from the game's own code, because the RA note names the
+byte and nothing more, and a playtest caught the first guess (K = bit 0)
+reading every letter backwards. In the playtested dump:
+
+* the pickup, at `FF:D55F`, is `LDA $13E9,x / ORA $057F / STA $057F`, then
+  `AND #$000F / CMP #$000F`; when all four bits are held it writes `#$90` over
+  the byte (8-bit) and goes on to award the life;
+* the HUD, at `C0:A766`, tests `#$01`, `#$02`, `#$04`, `#$08` in turn, and the
+  playtest pins that order to G, N, O, K;
+* bit 4 is tested at `FF:D4D4`, next to the letter objects' setup, and kept by
+  the `AND` on stage entry at `C0:837A` while bit 7 is not.
+
+So the letter that completes the word never sets its own bit: the byte goes
+from three letters straight to `0x90`. It reports as `kong-spelled` and an
+extra life, never as a letter, and "all four letters" is that objective.
+Which three letters did report depends on the order they were picked up.
 
 `$0B19` / `$0BC1`, the old player-position pair, have **no** RA note at all.
 They are still reachable with `--addr`, but the defaults are now the attested
@@ -409,7 +426,7 @@ levels do not exercise:
 
 * `mine-cart-carnage-45s` — `survive_seconds`, the only criterion that ends a
   run without the player doing anything.
-* `jungle-hijinx-kong` — a conjunction, and the per-bit item naming. The
-  `bit_labels` on the `kong_letters` rule are what make `kong_letter:N` the name
-  a criterion has to use; the bare `kong_letter` is refused at load. Every level
-  holds exactly four letters, so the counts are 1 each rather than 4 of one.
+* `jungle-hijinx-kong` — a conjunction of `cleared` and an objective. "All
+  four letters" is `kong-spelled`, the game's own bit 4, rather than four
+  `kong_letter:*` items, because the letter that completes the word never sets
+  its own bit (above).
