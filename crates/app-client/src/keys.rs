@@ -91,9 +91,9 @@ pub fn joypad(input: &ResolvedInput, pad: &PadState) -> u32 {
 
 /// Push this frame's keys into a keyboard game, as edges, the way
 /// `session_libretro::input::keyboard_passthrough` does — each host key as
-/// the player's remap says, plus whatever a gamepad's RetroPad buttons press.
-/// A guest key two sources hold is one press.
-pub fn keyboard_game(kb: &KeyboardGame, pad_bits: u32) {
+/// the player's remap says, plus whatever a gamepad's RetroPad buttons and
+/// stick directions press. A guest key two sources hold is one press.
+pub fn keyboard_game(kb: &KeyboardGame, pad_bits: u32, pad: &PadState, deadzone: f32) {
     let mut held_codes = Vec::new();
     for (vk, sent) in &kb.keys {
         if let Some(code) = sent {
@@ -104,6 +104,11 @@ pub fn keyboard_game(kb: &KeyboardGame, pad_bits: u32) {
     }
     for (id, code) in &kb.pad_keys {
         if pad_bits & (1 << id) != 0 {
+            held_codes.push(*code);
+        }
+    }
+    for (input, code) in &kb.stick_keys {
+        if held(input, pad, deadzone) {
             held_codes.push(*code);
         }
     }

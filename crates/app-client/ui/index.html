@@ -78,12 +78,19 @@
   .note { color: #aaa; font-size: .88em; max-width: 52em; }
   .pad { width: 100%; max-width: 560px; display: block; margin: .3em 0 .6em; }
   .pad .body { fill: #22224a; stroke: #555; stroke-width: 3; }
-  .pad .btn { fill: #34346a; stroke: #888; stroke-width: 2; cursor: pointer; }
-  .pad .btn:hover { stroke: #ffb347; }
-  .pad .btn.sel { stroke: #ffb347; stroke-width: 4; }
-  .pad .btn.lit { fill: #ffb347; }
+  .pad .btn, .pad .dir { fill: #34346a; stroke: #888; stroke-width: 2; cursor: pointer; }
+  .pad .dir { fill: #2a2a58; stroke-width: 1.5; }
+  .pad .btn:hover, .pad .dir:hover { stroke: #ffb347; }
+  .pad .btn.sel, .pad .dir.sel { stroke: #ffb347; stroke-width: 4; }
+  .pad .btn.lit, .pad .dir.lit { fill: #ffb347; }
   .pad .btn.dim, .pad .lbl.dim { opacity: .25; }
+  .pad .hub { fill: #34346a; }
+  .pad .well { fill: #1a1a38; stroke: #555; stroke-width: 2; }
   .pad .lbl { fill: #fff; font-size: 14px; text-anchor: middle; pointer-events: none; font-weight: 600; }
+  .pad .lbl.sm { font-size: 10px; }
+  .pad .lbl.tiny { font-size: 10px; font-weight: 400; fill: #ccc; }
+  select.stickto { width: 8.5em; }
+  select.stickto.sel { outline: 2px solid #ffb347; }
   table.binds, table.remap, table.form { border-collapse: collapse; margin: .3em 0 .8em; }
   table.binds td, table.binds th, table.remap td, table.form td { padding: .22em .4em; text-align: left; }
   table.binds th { color: #888; font-weight: 400; font-size: .85em; }

@@ -355,6 +355,12 @@ pub struct Layer {
     /// manifest's suggestion. An empty name presses nothing.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub pad_keys: BTreeMap<RetroButton, String>,
+    /// A keyboard game: the guest key a stick direction sends of its own,
+    /// rather than through whichever RetroPad button it is bound to (ADR
+    /// 0031). An empty name sends nothing. A direction not listed goes
+    /// through the RetroPad, as on a pad game.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub stick_keys: BTreeMap<Input, String>,
     /// A keyboard game: host key name to the guest key it sends instead. An
     /// empty name sends nothing. A key not listed sends itself.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -568,6 +574,9 @@ pub struct ResolvedInput {
 pub struct KeyboardGame {
     /// RetroPad id to the `RETROK_*` it presses.
     pub pad_keys: Vec<(u32, u32)>,
+    /// A stick direction to the `RETROK_*` it presses of its own. Such a
+    /// direction is in no RetroPad button's `binds`.
+    pub stick_keys: Vec<(Input, u32)>,
     /// Every host key the game is passed: its virtual key and the `RETROK_*`
     /// it sends, or none.
     pub keys: Vec<(i32, Option<u32>)>,
@@ -633,6 +642,25 @@ impl Settings {
         let g = self.games.get(game);
         let c = self.cores.get(core);
         let keyboard = keyboard_game.then(|| {
+            // A direction with a key of its own leaves the RetroPad, so the
+            // button it was bound to does not press as well.
+            let mut stick_keys = Vec::new();
+            for s in [Stick::Left, Stick::Right] {
+                for d in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+                    let i = Input::Stick(s, d);
+                    let Some(name) =
+                        g.and_then(|l| l.stick_keys.get(&i)).or_else(|| c.and_then(|l| l.stick_keys.get(&i)))
+                    else {
+                        continue;
+                    };
+                    for v in binds.iter_mut() {
+                        v.retain(|x| *x != i);
+                    }
+                    if let Some(key) = keymap::guest_key(name) {
+                        stick_keys.push((i, key.retrok));
+                    }
+                }
+            }
             let mut pad_keys = Vec::new();
             for b in RetroButton::ALL {
                 let name = g
@@ -660,7 +688,7 @@ impl Settings {
                 .and_then(|l| l.mouse_sensitivity)
                 .or_else(|| c.and_then(|l| l.mouse_sensitivity))
                 .unwrap_or(self.input.mouse_sensitivity);
-            KeyboardGame { pad_keys, keys, mouse_sensitivity }
+            KeyboardGame { pad_keys, stick_keys, keys, mouse_sensitivity }
         });
         ResolvedInput { binds, deadzone: self.input.deadzone, actions: self.input.actions.clone(), keyboard }
     }
@@ -718,6 +746,9 @@ impl Settings {
             trim_binds(&mut layer.pad, Family::Pad);
             layer.mouse_sensitivity = layer.mouse_sensitivity.map(|s| clamp(s, 0.1, 10.0, 1.0));
             layer.pad_keys.retain(|_, k| k.is_empty() || keymap::guest_key(k).is_some());
+            layer
+                .stick_keys
+                .retain(|i, k| matches!(i, Input::Stick(..)) && (k.is_empty() || keymap::guest_key(k).is_some()));
             layer.key_remap.retain(|from, to| {
                 keymap::guest_key(from).is_some() && (to.is_empty() || keymap::guest_key(to).is_some())
             });
@@ -823,7 +854,7 @@ impl Edge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session_libretro::libretro::{JOY_A, JOY_B, JOY_L, JOY_START, JOY_X, JOY_Y};
+    use session_libretro::libretro::{JOY_A, JOY_B, JOY_L, JOY_LEFT, JOY_R, JOY_START, JOY_X, JOY_Y};
 
     fn nes() -> Controller {
         Controller::Pad(PadLayout::Nes)
@@ -933,6 +964,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stick_direction_keeps_its_own_key_when_a_button_changes() {
+        let mut suggested = BTreeMap::new();
+        suggested.insert(RetroButton::R, "period".to_string());
+        suggested.insert(RetroButton::Left, "left".to_string());
+        let mut s = Settings::default();
+        let doom = |s: &Settings| s.resolve_input("dosbox_pure", "doom", Controller::Keyboard, &suggested);
+        let left = Input::Stick(Stick::Left, Dir::Left);
+        let right = Input::Stick(Stick::Right, Dir::Right);
+        assert!(ids(&doom(&s), JOY_LEFT).contains(&left), "until it has a key, a stick goes through the RetroPad");
+
+        let g = s.games.entry("doom".into()).or_default();
+        g.pad_keys.insert(RetroButton::R, "space".into());
+        g.stick_keys.insert(right, "period".into());
+        g.stick_keys.insert(left, "comma".into());
+        let r = doom(&s);
+        let kb = r.keyboard.as_ref().unwrap();
+        assert!(kb.pad_keys.contains(&(JOY_R, 32)), "R sends space");
+        assert!(kb.stick_keys.contains(&(right, 46)), "the right stick still sends period");
+        assert!(kb.stick_keys.contains(&(left, 44)));
+        assert!(!ids(&r, JOY_LEFT).contains(&left), "nor does it press LEFT as well");
+
+        s.games.get_mut("doom").unwrap().stick_keys.insert(left, String::new());
+        let r = doom(&s);
+        assert!(!r.keyboard.as_ref().unwrap().stick_keys.iter().any(|(i, _)| *i == left), "nothing, on purpose");
+        assert!(!ids(&r, JOY_LEFT).contains(&left));
+        let dkc = s.resolve_input("snes9x", "dkc", snes(), &BTreeMap::new());
+        assert!(ids(&dkc, JOY_LEFT).contains(&left), "another game is untouched");
+    }
+
+    #[test]
     fn inputs_read_back_as_written() {
         for s in ["key:z", "key:lctrl", "key:f9", "key:vk60", "mouse:x2", "pad:south", "pad:dup", "stick:right-left"] {
             let i: Input = s.parse().unwrap();
@@ -948,6 +1009,7 @@ mod tests {
         s.input.keys.insert(RetroButton::A, vec![Input::Key(0x20)]);
         s.input.pad.insert(RetroButton::A, vec![Input::Pad(PadButton::Rt)]);
         s.games.entry("doom".into()).or_default().key_remap.insert("w".into(), "up".into());
+        s.games.get_mut("doom").unwrap().stick_keys.insert(Input::Stick(Stick::Right, Dir::Right), "period".into());
         s.video.display = Display::Borderless;
         s.video.cores.insert("mesen".into(), VideoLayer { scaling: Some(Scaling::Integer), ..Default::default() });
         let text = s.to_toml();

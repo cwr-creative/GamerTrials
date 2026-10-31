@@ -19,7 +19,8 @@ Three tabs, and every change saves at once and applies from the next round
   scope shows what it inherits greyed out, and anything set there wins over
   the scopes above it. Buttons a console does not have are dimmed. A keyboard
   game (DOS) shows what each pad button *presses* in it instead, starting from
-  the manifest's `pad_keys`, plus a keyboard remap and mouse sensitivity. All
+  the manifest's `pad_keys`, plus a keyboard remap and mouse sensitivity. A
+  stick direction there can send a key of its own (ADR 0031). All
   games also carries the stick deadzone and the two client actions, pause and
   give up, as chords.
 - **Video** — window size, scaling (fit, integer, stretch), aspect (as the

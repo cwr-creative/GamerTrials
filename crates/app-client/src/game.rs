@@ -366,7 +366,7 @@ fn step(
         None => libretro::JOYPAD.store(bits, Ordering::Relaxed),
         Some(kb) => {
             if in_front {
-                keys::keyboard_game(kb, bits);
+                keys::keyboard_game(kb, bits, pad, l.input.deadzone);
                 if let Some(m) = l.mouse.as_mut() {
                     m.pump(window);
                 }

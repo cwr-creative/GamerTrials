@@ -163,6 +163,9 @@
     if (at >= 0) list.splice(at, 1);
     if (into !== fam || slot >= list.length) list.push(input); else list[slot] = input;
     setOwn(scope, b, into, list.slice(0, meta.max_slots));
+    // A stick bound to a button here goes through it, not its own key.
+    const own = layerOf(scope)?.stick_keys;
+    if (own && input in own) delete own[input];
     save();
   }
   function clearSlot(b, fam, slot) {
@@ -174,20 +177,71 @@
 
   // ---- the pad ----------------------------------------------------------------------
   // A generic modern pad, laid out by RetroPad name: the SNES diamond every
-  // modern pad shares, shoulders and triggers, two sticks.
+  // modern pad shares, shoulders and triggers, a d-pad, two sticks. It is the
+  // same drawing whatever pad is plugged in. A stick's cap is L3 or R3; its
+  // four directions are not RetroPad buttons but inputs, so they are drawn
+  // round the cap with what each presses.
+  const ORDER = ['up', 'down', 'left', 'right', 'b', 'a', 'y', 'x', 'l', 'r', 'l2', 'r2', 'l3', 'r3', 'select', 'start'];
+  const buttonsOf = g => g ? ORDER.filter(b => g.buttons.includes(b)) : ORDER;
   const PAD_SHAPES = {
-    l2: ['rect', 95, 18, 90, 26], r2: ['rect', 415, 18, 90, 26],
-    l: ['rect', 95, 50, 90, 22], r: ['rect', 415, 50, 90, 22],
-    up: ['rect', 128, 112, 34, 38], down: ['rect', 128, 186, 34, 38],
-    left: ['rect', 90, 150, 38, 36], right: ['rect', 162, 150, 38, 36],
-    x: ['circle', 450, 122, 20], a: ['circle', 492, 166, 20], b: ['circle', 450, 210, 20], y: ['circle', 408, 166, 20],
-    select: ['rect', 250, 140, 42, 18], start: ['rect', 308, 140, 42, 18],
-    l3: ['circle', 228, 248, 30], r3: ['circle', 372, 248, 30],
+    l2: ['rect', 110, 14, 80, 28], r2: ['rect', 410, 14, 80, 28],
+    l: ['rect', 95, 48, 110, 20], r: ['rect', 395, 48, 110, 20],
+    up: ['rect', 208, 184, 28, 28], down: ['rect', 208, 240, 28, 28],
+    left: ['rect', 180, 212, 28, 28], right: ['rect', 236, 212, 28, 28],
+    x: ['circle', 450, 112, 18], a: ['circle', 488, 150, 18], b: ['circle', 450, 188, 18], y: ['circle', 412, 150, 18],
+    select: ['rect', 242, 142, 40, 16], start: ['rect', 318, 142, 40, 16],
+    l3: ['circle', 150, 150, 17], r3: ['circle', 380, 226, 17],
   };
+  const STICKS = { left: [150, 150], right: [380, 226] };
+  const DIRS = ['up', 'down', 'left', 'right'];
+  // What a button is called on the pad: the key it presses, for a keyboard game.
+  const padText = (g, b) => g?.controller === 'keyboard' ? (keyName(padKeyFor(g, b).key || '')) : (ARROW[b] || b.toUpperCase());
+  // The buttons a stick direction presses here, from every button's pad half.
+  const stickTargets = (g, inp) => buttonsOf(g).filter(b => resolve(scope, b, 'pad').list.includes(inp));
+  // A keyboard game's stick direction may send a key of its own instead
+  // (ADR 0031): the game's, then the core's. Null when it goes through a button.
+  function stickKeyFor(g, inp) {
+    if (g?.controller !== 'keyboard') return null;
+    const gl = S.games[g.id]?.stick_keys, cl = S.cores[g.core]?.stick_keys;
+    if (gl && inp in gl) return { key: gl[inp], from: 'game' };
+    if (cl && inp in cl) return { key: cl[inp], from: 'core' };
+    return null;
+  }
+  // What a stick direction ends up pressing, as the pad draws it.
+  function stickText(g, inp) {
+    const own = stickKeyFor(g, inp);
+    if (own) return own.key ? keyName(own.key) : '';
+    const on = stickTargets(g, inp);
+    return on.length ? padText(g, on[0]) + (on.length > 1 ? '+' : '') : '';
+  }
+  function stickTitle(g, inp, name) {
+    const own = stickKeyFor(g, inp);
+    if (own) return name + (own.key ? ' sends ' + keyName(own.key) : ' sends nothing');
+    const on = stickTargets(g, inp);
+    return name + (on.length ? ' presses ' + on.map(b => b.toUpperCase()).join(' and ') : ' presses nothing');
+  }
+  function wedge(cx, cy, d) {
+    const mid = { up: -90, right: 0, down: 90, left: 180 }[d];
+    const pt = (r, a) => (cx + r * Math.cos(a * Math.PI / 180)).toFixed(1) + ' ' + (cy + r * Math.sin(a * Math.PI / 180)).toFixed(1);
+    return 'M' + pt(42, mid - 45) + ' A42 42 0 0 1 ' + pt(42, mid + 45) + ' L' + pt(19, mid + 45) + ' A19 19 0 0 0 ' + pt(19, mid - 45) + 'Z';
+  }
   function padSvg(g) {
     const has = g ? new Set(g.buttons) : null;
-    let h = '<svg viewBox="0 0 600 320" class="pad" role="img" aria-label="Gamepad">' +
-      '<path d="M120 80 Q300 60 480 80 Q560 90 575 190 Q590 300 520 305 Q470 310 430 250 L170 250 Q130 310 80 305 Q10 300 25 190 Q40 90 120 80 Z" class="body"/>';
+    let h = '<svg viewBox="0 0 600 330" class="pad" role="img" aria-label="Gamepad">' +
+      '<path d="M150 72 Q300 55 450 72 Q548 82 570 185 Q590 300 528 312 Q482 320 452 278 L148 278 Q118 320 72 312 Q10 300 30 185 Q52 82 150 72 Z" class="body"/>' +
+      '<rect class="hub" x="208" y="212" width="28" height="28"/><circle class="hub" cx="300" cy="104" r="13"/>';
+    for (const [s, [cx, cy]] of Object.entries(STICKS)) {
+      h += '<circle class="well" cx="' + cx + '" cy="' + cy + '" r="44"/>';
+      for (const d of DIRS) {
+        const inp = 'stick:' + s + '-' + d;
+        const name = (s === 'left' ? 'Left' : 'Right') + ' stick ' + ARROW[d];
+        h += '<path class="dir' + (inp === selIn ? ' sel' : '') + '" data-in="' + inp + '" d="' + wedge(cx, cy, d) + '"><title>' +
+             esc(stickTitle(g, inp, name)) + '</title></path>';
+        const a = { up: -90, right: 0, down: 90, left: 180 }[d] * Math.PI / 180;
+        h += '<text x="' + (cx + 31 * Math.cos(a)).toFixed(1) + '" y="' + (cy + 31 * Math.sin(a) + 3.5).toFixed(1) + '" class="lbl tiny">' +
+             esc(stickText(g, inp)) + '</text>';
+      }
+    }
     for (const [b, s] of Object.entries(PAD_SHAPES)) {
       const dim = has && !has.has(b) ? ' dim' : '';
       const on = (b === sel ? ' sel' : '');
@@ -196,12 +250,77 @@
       else h += '<circle ' + attrs + ' cx="' + s[1] + '" cy="' + s[2] + '" r="' + s[3] + '"/>';
       const cx = s[0] === 'rect' ? s[1] + s[3] / 2 : s[1];
       const cy = s[0] === 'rect' ? s[2] + s[4] / 2 : s[2];
-      const text = g?.controller === 'keyboard' ? (keyName(padKeyFor(g, b).key || '') || '·') : b.toUpperCase();
-      h += '<text x="' + cx + '" y="' + (cy + 5) + '" data-b="' + b + '" class="lbl' + dim + '">' + esc(text) + '</text>';
+      const small = s[0] === 'rect' ? s[4] < 20 : s[3] < 18;
+      h += '<text x="' + cx + '" y="' + (cy + (small ? 4 : 5)) + '" data-b="' + b + '" class="lbl' + dim + (small ? ' sm' : '') + '">' + esc(padText(g, b)) + '</text>';
     }
     return h + '</svg>';
   }
-  let sel = null;
+  let sel = null;      // the button picked on the pad
+  let selIn = null;    // or the stick direction
+
+  // Each stick direction, and the one button it presses. Choosing one moves
+  // that input there, out of whichever button had it. In a keyboard game it
+  // is the key it sends instead, which no button's key can then move.
+  function stickTable(g) {
+    const keyboard = g?.controller === 'keyboard';
+    const bs = buttonsOf(g);
+    let h = '<table class="binds sticks"><tr><th></th>' + DIRS.map(d => '<th>' + ARROW[d] + '</th>').join('') + '</tr>';
+    for (const s of ['left', 'right']) {
+      h += '<tr><td class="bname">' + (s === 'left' ? 'Left' : 'Right') + ' stick</td>';
+      for (const d of DIRS) {
+        const inp = 'stick:' + s + '-' + d;
+        const on = stickTargets(g, inp);
+        let o = '';
+        if (keyboard) {
+          const own = stickKeyFor(g, inp);
+          const via = on.length ? 'via ' + on.map(b => b.toUpperCase() + ' (' + (keyName(padKeyFor(g, b).key || '') || 'nothing') + ')').join(' + ') : 'via no button';
+          o += '<option value="via"' + (own ? '' : ' selected') + '>— ' + esc(via) + '</option>';
+          o += '<option value=""' + (own && !own.key ? ' selected' : '') + '>— nothing</option>';
+          for (const k of meta.guest_keys) o += '<option value="' + k + '"' + (own?.key === k ? ' selected' : '') + '>' + esc(keyName(k)) + '</option>';
+        } else {
+          o += '<option value=""' + (on.length ? '' : ' selected') + '>— nothing</option>';
+          if (on.length > 1) o += '<option value="*" selected disabled>' + esc(on.map(b => b.toUpperCase()).join(' + ')) + '</option>';
+          for (const b of bs) o += '<option value="' + b + '"' + (on.length === 1 && on[0] === b ? ' selected' : '') + '>' + esc(b.toUpperCase()) + '</option>';
+        }
+        h += '<td><select class="stickto' + (inp === selIn ? ' sel' : '') + '" data-in="' + inp + '">' + o + '</select></td>';
+      }
+      h += '</tr>';
+    }
+    return h + '</table><div class="note">A stick is read as four directions: pushed past the deadzone, a direction ' +
+      (keyboard ? 'sends the key chosen here, or presses its button like any other input. ' : 'presses its button like any other input. ') +
+      'No game is sent a stick\'s position.</div>';
+  }
+  // A keyboard game: the key a stick direction sends, or "via" to send it
+  // through its button again. A key of its own takes it out of every
+  // button's list here, as play does.
+  function bindStickKey(inp, v) {
+    const l = layerOf(scope, true);
+    l.stick_keys = l.stick_keys || {};
+    if (v === 'via') delete l.stick_keys[inp];
+    else {
+      l.stick_keys[inp] = v;
+      for (const b of buttonsOf(scopeGame(scope))) {
+        const list = resolve(scope, b, 'pad').list;
+        if (list.includes(inp)) setOwn(scope, b, 'pad', list.filter(i => i !== inp));
+      }
+    }
+    save();
+  }
+  function bindStick(inp, to) {
+    const bs = buttonsOf(scopeGame(scope));
+    if (to && !resolve(scope, to, 'pad').list.includes(inp) && resolve(scope, to, 'pad').list.length >= meta.max_slots) {
+      $('s-status').textContent = to.toUpperCase() + ' already has ' + meta.max_slots + ' gamepad inputs; unbind one first.';
+      render();
+      return;
+    }
+    for (const b of bs) {
+      const list = resolve(scope, b, 'pad').list;
+      const bound = list.includes(inp);
+      if (b === to && !bound) setOwn(scope, b, 'pad', [...list, inp]);
+      else if (b !== to && bound) setOwn(scope, b, 'pad', list.filter(i => i !== inp));
+    }
+    save();
+  }
 
   // ---- render: controls ------------------------------------------------------------
   function scopeList() {
@@ -222,15 +341,12 @@
 
   function bindTable(g) {
     const keyboard = g?.controller === 'keyboard';
-    const order = ['up', 'down', 'left', 'right', 'b', 'a', 'y', 'x', 'l', 'r', 'l2', 'r2', 'l3', 'r3', 'select', 'start'];
-    const has = g ? new Set(g.buttons) : null;
     const fams = keyboard ? ['pad'] : ['keys', 'pad'];
     let h = '<table class="binds"><tr><th>Button</th>' +
       fams.map(f => '<th colspan="' + meta.max_slots + '" class="fam">' + (f === 'keys' ? 'Keyboard &amp; mouse' :
         'Gamepad' + (keyboard ? ' <span class="sub">(the keyboard and mouse pass straight through)</span>' : '')) + '</th>').join('') +
       (keyboard ? '<th>Presses</th>' : '') + '<th></th></tr>';
-    for (const b of order) {
-      if (has && !has.has(b)) continue;
+    for (const b of buttonsOf(g)) {
       let mineAny = false, froms = [];
       h += '<tr data-row="' + b + '" class="' + (b === sel ? 'sel' : '') + '"><td class="bname">' + b.toUpperCase() + '</td>';
       for (const fam of fams) {
@@ -310,6 +426,7 @@
       h += '<p class="note"><b>' + esc(g.title) + '</b> only (' + esc(g.console.toUpperCase()) + ', ' + esc(coreName(g.core)) + ').</p>';
     }
     h += padSvg(g);
+    h += stickTable(g);
     h += bindTable(g);
     if (g?.controller === 'keyboard' && scope.startsWith('game:')) h += remapTable(g);
     if (scope === 'global' || g?.controller === 'keyboard') h += '<div class="row2">' + sensitivity(scope) + '</div>';
@@ -380,7 +497,7 @@
   $('s-scopes').onclick = e => {
     const el = e.target.closest('[data-scope],[data-vscope]');
     if (!el) return;
-    if (el.dataset.scope) { scope = el.dataset.scope; sel = null; }
+    if (el.dataset.scope) { scope = el.dataset.scope; sel = null; selIn = null; }
     else vscope = el.dataset.vscope;
     render();
   };
@@ -402,8 +519,13 @@
       return;
     }
     if (t.dataset.b && (t.classList.contains('btn') || t.classList.contains('lbl'))) {
-      sel = t.dataset.b; render();
+      sel = t.dataset.b; selIn = null; render();
       document.querySelector('tr[data-row="' + sel + '"]')?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (t.classList.contains('dir')) {
+      selIn = t.dataset.in; sel = null; render();
+      document.querySelector('select.stickto[data-in="' + selIn + '"]')?.focus();
       return;
     }
     if (t.classList.contains('reset')) { e.preventDefault(); resetOwn(scope, t.dataset.b); save(); return; }
@@ -426,6 +548,10 @@
 
   $('s-body').onchange = e => {
     const t = e.target;
+    if (t.classList.contains('stickto')) {
+      if (scopeGame(scope)?.controller === 'keyboard') bindStickKey(t.dataset.in, t.value); else bindStick(t.dataset.in, t.value);
+      return;
+    }
     if (t.classList.contains('padkey')) {
       const l = layerOf(scope, true); l.pad_keys = l.pad_keys || {};
       l.pad_keys[t.dataset.b] = t.value;
@@ -468,6 +594,7 @@
     for (const el of document.querySelectorAll('#s-body .btn')) {
       el.classList.toggle('lit', resolveBoth(scope, el.dataset.b).some(i => held.includes(i)));
     }
+    for (const el of document.querySelectorAll('#s-body .dir')) el.classList.toggle('lit', held.includes(el.dataset.in));
     for (const el of document.querySelectorAll('#s-body .slot[data-f]')) {
       const inp = resolve(scope, el.dataset.b, el.dataset.f).list[+el.dataset.i];
       el.classList.toggle('lit', inp !== undefined && held.includes(inp));
