@@ -162,13 +162,18 @@ And one that is not fixed:
 
 The hand tests, in order:
 
-1. **Two real machines.** Package a build (`tools\package.ps1` now includes
-   `harness.exe` and this file), make a recording on one machine with the
-   commands above, copy the `.txt` to the other, and run `harness --replay
-   <file> --passes 2` from the package folder. Both need the same ROMs; the
-   replay refuses otherwise.
-2. **A played recording.** `harness --game doom --challenge e1m1-time-trial
-   --record doom-play.txt` and play it in the window. The digest of each frame
+A package (`tools\package.ps1`) carries `harness.exe`, this file, and three
+launchers: `Record scripted.cmd` records one scripted run of each game,
+`Record.cmd` records a played one (DOOM E1M1 by default; `Record.cmd smb3
+1-1-time-trial` for another), and `Replay.cmd` replays whatever recordings are
+dropped on it, writing each one's full report beside it as `.result.txt`.
+Recordings go in `recordings\`. Both machines need the same ROMs; a replay
+refuses otherwise.
+
+1. **Two real machines.** Run `Record scripted.cmd` on one, send the three
+   files to the other however is convenient, and drop them on `Replay.cmd`
+   there. Drop them on this machine's `Replay.cmd` too, as the control.
+2. **A played recording.** `Record.cmd` and play it in the window. The digest of each frame
    is taken at the next frame's turn, when the core has parked; the input is
    whatever the 70 Hz pacing delivered. Replay it on the same machine and on
    the other. This answers whether a paced client is settled often enough in

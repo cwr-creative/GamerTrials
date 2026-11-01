@@ -103,6 +103,63 @@ Set-Content -Encoding ascii (Join-Path $out 'Start server.cmd') @(
     'pause'
 )
 
+# The input-replay spike's hand test (replay-spike.md), as things to
+# double-click: record on one machine, send the file, replay on the other.
+Set-Content -Encoding ascii (Join-Path $out 'Record.cmd') @(
+    '@echo off'
+    'rem Play a run and record it. Default: DOOM E1M1 as a time trial.'
+    'rem Another game: Record.cmd smb3 1-1-time-trial'
+    'cd /d "%~dp0"'
+    'if not exist recordings mkdir recordings'
+    'set game=%~1'
+    'set challenge=%~2'
+    'if "%game%"=="" set game=doom'
+    'if "%challenge%"=="" set challenge=e1m1-time-trial'
+    'set file=recordings\%game%-%challenge%-%COMPUTERNAME%-%RANDOM%.txt'
+    'echo Recording %game% %challenge% to %file%. Play; F12 or closing the window ends it.'
+    '.\harness.exe --game %game% --challenge %challenge% --record "%file%" > recording.log 2>&1'
+    'echo.'
+    'echo Recorded to %file%'
+    'echo Send that file to the other machine and drop it on Replay.cmd there.'
+    'echo Drop it on Replay.cmd here too: this machine should match itself.'
+    'pause'
+)
+Set-Content -Encoding ascii (Join-Path $out 'Record scripted.cmd') @(
+    '@echo off'
+    'rem Record one scripted run of each game, with nobody playing. Takes a few minutes.'
+    'cd /d "%~dp0"'
+    'if not exist recordings mkdir recordings'
+    'set tag=%COMPUTERNAME%-%RANDOM%'
+    'echo SMB3...'
+    '.\harness.exe --game smb3 --challenge 1-1-time-trial --frames 6000 --script 7 --record recordings\scripted-smb3-%tag%.txt > recording.log 2>&1'
+    'echo DKC...'
+    '.\harness.exe --game dkc --challenge ropey-rampage-time-trial --frames 6000 --script 4 --record recordings\scripted-dkc-%tag%.txt >> recording.log 2>&1'
+    'echo DOOM...'
+    '.\harness.exe --game doom --challenge e1m1-time-trial --frames 4200 --script 9 --warmup 120 --record recordings\scripted-doom-%tag%.txt >> recording.log 2>&1'
+    'echo.'
+    'echo Recorded to recordings\scripted-*-%tag%.txt'
+    'echo Send them to the other machine and drop them on Replay.cmd there.'
+    'pause'
+)
+Set-Content -Encoding ascii (Join-Path $out 'Replay.cmd') @(
+    '@echo off'
+    'rem Drop one or more recordings onto this file.'
+    'cd /d "%~dp0"'
+    'if "%~1"=="" ('
+    '    echo Drop one or more recordings onto Replay.cmd, or run: Replay.cmd recordings\name.txt'
+    '    pause'
+    '    exit /b 1'
+    ')'
+    'for %%f in (%*) do ('
+    '    echo === %%~nxf'
+    '    .\harness.exe --replay "%%~f" --passes 2 > "%%~dpnf.result.txt" 2>&1'
+    '    findstr /b /l /c:"[replay]" /c:"  attempt" /c:"  frames" /c:"error" "%%~dpnf.result.txt"'
+    '    echo Full output: %%~dpnf.result.txt'
+    '    echo.'
+    ')'
+    'pause'
+)
+
 $protocol = (Select-String -Path crates\protocol\src\lib.rs -Pattern '^pub const VERSION: u32 = (\d+);').Matches[0].Groups[1].Value
 Set-Content -Encoding ascii (Join-Path $out 'README.txt') @(
     "GamerTrials $commit (protocol v$protocol), built $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
@@ -117,8 +174,11 @@ Set-Content -Encoding ascii (Join-Path $out 'README.txt') @(
     '7878 to it. Every player must run the same build: a client whose manifests'
     'hash differently from the server''s is refused, and says which hash it holds.'
     ''
-    'harness.exe replays an input recording made on another machine and says'
-    'whether this one played the same game: see replay-spike.md.'
+    'Input replay (replay-spike.md): Record.cmd records a played run, Record'
+    'scripted.cmd records one of each game with nobody playing, and Replay.cmd'
+    'replays whatever recordings are dropped on it and says whether this machine'
+    'played the same game. Recordings go in recordings\; both machines need the'
+    'same ROMs.'
     ''
     'Settings are kept in %APPDATA%\com.cwr.gamertrials\settings.toml.'
     'Needs Windows 10 or 11 with the WebView2 runtime (Windows 11 has it).'
