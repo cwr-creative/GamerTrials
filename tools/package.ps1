@@ -15,7 +15,10 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 if (-not $SkipBuild) {
-    cargo build --release -p app-client -p server-net -p session-libretro --bin harness
+    cargo build --release -p app-client -p server-net
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+    # Apart: `--bin harness` alongside the others would build only the harness.
+    cargo build --release -p session-libretro --bin harness
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 
