@@ -31,8 +31,11 @@ it.
 - **`--passes N`** replays it N times in one process. Pass 1 starts like the
   recording did; later passes start on a core that has just played, as a
   spectator's has.
-- **`--settle MS`** and **`--warmup N`** exist because of what dosbox-pure
-  turned out to do (below).
+- **`--warmup N`** runs the stage idle before the first recorded entry, so a
+  recording and its replay can start from the same history (below).
+- **`--settle MS`** waits after every frame on top of what the manifest says.
+  It was how the dosbox-pure findings were made; since the runner settles a
+  threaded core itself (below) it is only for experiments.
 
 A recording is a text file, one line a frame, about 150 bytes a frame for Doom
 (the digests; the input alone is a few bytes).
@@ -42,21 +45,23 @@ A recording is a text file, one line a frame, about 150 bytes a frame for Doom
 One Windows 11 machine, and the same recordings replayed under Ubuntu 22.04 in
 WSL with the `.so` builds of the same core versions (ADR 0035) — a different
 compiler and OS, not a different CPU. Scripted input, 6000 frames per console
-run and 3500–4200 per Doom run, with deaths and re-entries.
+run and 4200 per Doom run, with deaths and re-entries. Doom's rows are on the
+runner as fixed on `server-relay` (commits `4aa4c0f`, `fbfc65c`, `b82eae9`,
+merged here), with no `--settle`.
 
 | Game (core) | Replayed as recorded | On a core with a history | Linux replaying Windows |
 |---|---|---|---|
 | SMB3 (Mesen) | every frame, every part, 5 attempts | the same | every frame, every part, both passes |
 | DKC (Snes9x) | every frame, every part, 3 attempts | the same | every frame, every part, both passes |
-| Doom (dosbox-pure), driven as the client drives it | diverges from frame 1 | diverges from frame 1 | — |
-| Doom, settled and warmed | every frame, every part (one run had one frame of game-variable mismatch at frame 1240, then matched again) | picture and events on every frame but the first; sound and sound-side memory differ throughout | picture, sound and events on every frame; memory differs on 14 frames of one run and most frames of the other (game-variable window: 1 and 53 frames) |
+| Doom (dosbox-pure), on the runner before the fix | diverges from frame 1; three runs of one script were three different games | diverges from frame 1 | — |
+| Doom, fixed runner | every frame, every part, 3 runs, cold or warmed, a re-entry included | picture and events on every frame but the first after an entry; sound and sound-side memory differ throughout | picture, sound and events on every frame; memory differs on some frames (the game-variable window on 1–57 frames per run) |
 
 To reproduce on one machine:
 
 ```sh
 harness --game smb3 --challenge 1-1-time-trial --frames 6000 --script 7 --record smb3.txt
 harness --replay smb3.txt
-harness --game doom --challenge e1m1-survival --frames 4200 --script 9 --settle 5 --warmup 120 --record doom.txt
+harness --game doom --challenge e1m1-time-trial --frames 4200 --script 9 --warmup 120 --record doom.txt
 harness --replay doom.txt --passes 3
 ```
 
@@ -83,9 +88,17 @@ latency option.
 **Waiting a frame's work out restores it, given the same history.** With the
 harness sleeping 5 ms after each frame (`--settle`; Doom's frame is ~1.3 ms of
 host time) the thread is parked at the frame boundary whenever input arrives
-or memory is read, and two recordings came out byte-identical. A paced client
-gets most of this for free — at 70 Hz a frame's turn is ~14 ms — but not by
-guarantee.
+or memory is read, and two recordings came out byte-identical. Three things
+had to be true together, and the runner on `server-relay` now does all three
+for a core whose manifest declares `settle_ms` (Doom's is 10): it waits that
+long after a frame before reading memory, restoring a state or running the
+next frame; it reads a frame's facts before starting the next one; and it
+hands the core its keyboard events at the frame boundary rather than the
+moment a key changes, since dosbox-pure takes those into a queue its thread
+reads mid-frame. A paced client is a whole frame past its last `retro_run` by
+its next turn and pays nothing. One frame in E1M1 takes longer than 5 ms of
+host time, which is why Doom's value is 10; under WSL even 10 was not always
+enough for it, so this is a bound that holds in practice, not a guarantee.
 
 **A restore during dosbox-pure's boot is a race too.** `LibretroRunner::start`
 spends one frame before anything is loaded, and the core boots on after it
@@ -93,7 +106,8 @@ returns. A state restored while it is still in `DBPSTATE_BOOT` is restored
 without pausing the thread, and the stage then starts one frame further on or
 not, by timing: a replay that reached its first entry sooner than its
 recording ran exactly one frame ahead from the start. Waiting 50 ms before the
-first entry was enough; the harness waits 250.
+first entry was enough; the runner now waits 250 after that frame for a core
+that declares a settle.
 
 **A restore does not reset the sound pipeline.** dosbox-pure's state leaves out
 part of the mixer (buffer position, channel state, the remainder it carries
@@ -116,24 +130,33 @@ known; host-side state such as file timestamps in DOS's buffers is a guess.
 
 ## Consequences outside the spike
 
-Found on the way, true on `server-relay` today, and not fixed here:
+Found on the way. Fixed on `server-relay`, for the client as much as the
+harness:
 
-- **Doom's telemetry reads memory while the core is running.** The watcher
-  reads RAM straight after `retro_run`, which for dosbox-pure is while the next
-  frame is being emulated. An event's frame number can therefore move by a frame
-  with host timing, and a fact that holds for a single frame could in principle
-  be missed. ADR 0018's first criterion — deterministic frame stepping — holds
-  for dosbox-pure only when the frontend lets the thread park.
-- **The first entry of a Doom round races the core's boot**, as above. The
-  client restores the entry state right after `LibretroRunner::start`.
-- **`GET_THROTTLE_STATE` is answered by writing a `bool`** into what is a
-  `retro_throttle_state { unsigned mode; float rate; }`. dosbox-pure reads the
-  rate; it happens to stay zero, which it treats as "the core's own rate".
-  Harmless by luck.
-- **dosbox-pure hangs at teardown on Linux.** Every Doom replay under WSL
-  finished and printed its report, then never exited: both threads waiting on
-  futexes. Not seen on Windows. Whether the client hits it when a round
-  unloads the core is not checked.
+- **Doom's telemetry read memory while the core was running**, input landed
+  mid-frame, and a restore after a death interrupted a frame in progress.
+  Before the fix the runner, given one scripted input three times, played three
+  different games of E1M1 (1, 4 and 2 items picked up, on different frames);
+  after it, three identical ones, death and re-entry included. SMB3 and DKC
+  print the same events, frame for frame, as before. ADR 0018's first
+  criterion — deterministic frame stepping — holds for dosbox-pure only
+  because the frontend now lets its thread park.
+- **The first entry of a Doom round raced the core's boot**, as above.
+- **`GET_THROTTLE_STATE` was answered by writing a `bool`** into what is a
+  `retro_throttle_state { unsigned mode; float rate; }`. It now reports the
+  core's own rate. dosbox-pure sizes each frame's sound from it, so recordings
+  made before the fix differ from replays after it in how sound is chunked,
+  though not in the game.
+
+And one that is not fixed:
+
+- **Exiting with dosbox-pure's thread alive hangs on Linux.** Every Doom
+  replay under WSL hung after its report: the harness called
+  `process::exit` with the core still loaded, and the core's static
+  destructors wait on its thread. The harness now drops the runner first and
+  exits cleanly. The client does not call `process::exit` with a core loaded,
+  but closing the app mid-round ends Tauri's event loop, which on Linux exits
+  the process the same way. Not checked.
 
 ## What it does not settle
 
@@ -154,7 +177,7 @@ The hand tests, in order:
    different. Needs a replay that plays aloud, which the harness does not do.
 
 If replay is pursued, it needs a new ADR, and the dosbox-pure findings decide
-its shape: the console cores could replay as they are, but dosbox-pure needs
-either a patched core (poll input after the frame in flight finishes, and
-serialize the mixer whole) or a frontend that settles every frame on both
-ends — and desync detection on the facts and the picture, not on whole memory.
+its shape: the console cores could replay as they are; dosbox-pure replays
+the game but not the sound unless the core is patched to serialize its mixer
+whole, and its desync detection has to look at the facts and the picture, not
+at whole memory.

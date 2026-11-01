@@ -335,6 +335,9 @@ pub fn region_labels(runner: &LibretroRunner) -> Vec<String> {
 
 /// The machine as it stands after a frame, and what that frame emitted.
 pub fn digest(runner: &mut LibretroRunner, emitted: &[SessionEvent]) -> Digest {
+    // `advance` ends by starting the next frame, which a threaded core is
+    // still emulating; its manifest says how long to give it.
+    runner.settle();
     let mut regions = Vec::new();
     if let Some(ram) = runner.system_ram().filter(|r| !r.is_empty()) {
         regions.push(hash_bytes(ram));

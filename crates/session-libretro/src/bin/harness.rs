@@ -14,7 +14,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
@@ -211,10 +211,18 @@ struct Args {
     warmup: Option<u64>,
 }
 
+/// Set by a replay that diverged, for the exit code. Not `process::exit` from
+/// inside: that skips dropping the runner, and on Linux exiting with
+/// dosbox-pure's thread still running hangs in the core's static destructors.
+static DIVERGED: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+    if DIVERGED.load(Ordering::Relaxed) {
+        std::process::exit(2);
     }
 }
 
@@ -463,16 +471,6 @@ fn run() -> Result<(), String> {
     let (width, height) =
         (av.geometry.base_width as usize, av.geometry.base_height as usize);
 
-    // `LibretroRunner::start` spends one frame before anything is loaded, and
-    // dosbox-pure carries on booting on its own thread after that frame
-    // returns. A state restored while it is still booting is restored without
-    // the thread paused, and the stage then starts a frame further on or not,
-    // by timing alone; measured, a replay that reached its first entry sooner
-    // than its recording ran one frame ahead from the start. Both halves wait
-    // the boot out, so both start from the same place.
-    if args.record.is_some() || replay_log.is_some() {
-        replay::settle(Duration::from_millis(250));
-    }
     if let Some(log) = &replay_log {
         // Armed before the warm-up, as the recorder is, so the first frame's
         // sound holds the same samples on both sides.
@@ -976,9 +974,7 @@ fn replay_main(
         report.print(&title);
         clean &= report.clean();
     }
-    if !clean {
-        std::process::exit(2);
-    }
+    DIVERGED.store(!clean, Ordering::Relaxed);
     Ok(())
 }
 
