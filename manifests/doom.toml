@@ -80,11 +80,13 @@ boot_seconds = 16.0
 # dosbox-pure emulates on its own thread and returns from retro_run with the
 # next frame already running, so the runner waits this long after a frame
 # before reading memory, restoring a state or running the next one. A frame
-# at 77000 cycles is ~1.3 ms of host time; a paced client already waits most
-# of a 14 ms frame and pays nothing. Measured on the input-replay spike: 5 ms
-# made two runs of the same input byte-identical, with none it differed from
-# the first frame.
-settle_ms = 5
+# at 77000 cycles is ~1.3 ms of host time, but not every one: on the
+# input-replay spike one E1M1 frame took longer than 5 ms and read differently
+# on that frame alone. With 10 ms, scripted runs replayed exactly, deaths and
+# re-entries included; with none they differed from the first frame. A paced
+# client has already spent most of a 14 ms frame by its next turn and pays
+# nothing for this.
+settle_ms = 10
 
 # What each RetroPad button presses when a player drives DOOM with a gamepad
 # (ADR 0028). A suggestion, not a remap: the keyboard still passes straight
