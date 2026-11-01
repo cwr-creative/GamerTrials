@@ -242,10 +242,10 @@ Turbo, `best-of-three`, its addresses found with the harness's scripted
 sync test and RAM log — `docs/games/sf2.md`) on two clients on one machine
 through `gamertrials-server`, with `--script` pressing the buttons: both
 found each other through the rendezvous, judged the same verdict on the
-same frame, and the server agreed. **Not yet**: three players with a
-backer, two machines over the internet with ggrs's numbers recorded against
-ADR 0036 (which stays Proposed until then), and a bout with hands on the
-pads. Doom's deathmatch needs a bundle of its own whose `[autoexec]` runs
+same frame, and the server agreed; and with three, the third backing a
+side by the deadline and taking that side's entry. **Not yet**: two
+machines over the internet with ggrs's numbers recorded against ADR 0036
+(which stays Proposed until then), and a bout with hands on the pads. Doom's deathmatch needs a bundle of its own whose `[autoexec]` runs
 `IPXSETUP` (`docs/games/doom.md`); the shipped bundle warps to E1M1 alone,
 so no `deathmatch` stage ships until that bundle exists.
 

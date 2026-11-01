@@ -7,8 +7,9 @@
 //! a match. `--host <name>` skips the menu (`--server <addr>` picks where),
 //! `--join <invite>` joins instead (as `--name <name>`), `--start` presses Start as soon as the lobby allows, and
 //! `--mode`, `--format kind:n`, `--games a,b`, `--limit <s>` and `--h2h`
-//! (allow head-to-head) set the match up first: a match from the command
-//! line, for playtesting and for the spike. `--script <seed>` presses random
+//! (allow head-to-head) set the match up first, and `--players <n>` holds
+//! `--start` until that many are in: a match from the command line, for
+//! playtesting and for the spike. `--script <seed>` presses random
 //! buttons instead of reading the pad, so two clients can play a bout with
 //! nobody at either keyboard (ADR 0036). `--spike` adds
 //! the window self-test from the first build to the first round: it moves and
@@ -61,6 +62,8 @@ struct Args {
     limit: Option<f64>,
     /// With `--host`: allow head-to-head challenges (ADR 0036).
     h2h: bool,
+    /// With `--start`: wait until this many players are in the lobby.
+    players: Option<usize>,
     /// Press random buttons from this seed instead of reading the pad.
     script: Option<u64>,
     /// With `--host`: the server to host on, over the profile's.
@@ -83,6 +86,7 @@ fn parse_args() -> Result<Args, String> {
         games: None,
         limit: None,
         h2h: false,
+        players: None,
         script: None,
         server: None,
         join: None,
@@ -106,6 +110,10 @@ fn parse_args() -> Result<Args, String> {
                 args.limit = Some(v.parse().map_err(|_| format!("--limit wants seconds, got {v}"))?);
             }
             "--h2h" => args.h2h = true,
+            "--players" => {
+                let v = it.next().ok_or("--players wants a count")?;
+                args.players = Some(v.parse().map_err(|_| format!("--players wants a count, got {v}"))?);
+            }
             "--script" => {
                 let v = it.next().ok_or("--script wants a seed")?;
                 args.script = Some(v.parse().map_err(|_| format!("--script wants a seed, got {v}"))?);
@@ -359,6 +367,7 @@ fn main() {
         games: args.games,
         limit: args.limit,
         head_to_head: args.h2h,
+        players: args.players,
         script: args.script,
     };
 

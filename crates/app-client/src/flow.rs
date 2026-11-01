@@ -88,6 +88,8 @@ pub struct Auto {
     pub limit: Option<f64>,
     /// `--h2h`: allow head-to-head challenges in the lobby (ADR 0036).
     pub head_to_head: bool,
+    /// `--players <n>`: with `--start`, wait until this many are in.
+    pub players: Option<usize>,
     /// `--script <seed>`: press random buttons instead of reading the pad,
     /// for a bout played by two clients with nobody at either keyboard.
     pub script: Option<u64>,
@@ -966,6 +968,7 @@ impl Flow {
             && self.auto.format.map_or(true, |f| f == lobby.settings.format)
             && self.auto.limit.map_or(true, |l| l == lobby.settings.default_limit_seconds)
             && (!self.auto.head_to_head || lobby.settings.allow_head_to_head)
+            && self.auto.players.map_or(true, |n| lobby.players.len() >= n)
             && self.auto.games.as_ref().map_or(true, |g| lobby.enabled.iter().all(|r| g.contains(&r.game)));
         if self.auto.start && !self.auto_started && lobby.can_start && settings_applied {
             self.auto_started = true;

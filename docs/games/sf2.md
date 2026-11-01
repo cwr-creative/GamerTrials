@@ -83,6 +83,12 @@ frame for the one it was beaten on, and the server holds the winner's
 completion until every slot has reported past it; the frame a verdict
 settles on is now always reported.
 
-Not yet: three players with a backer, two machines over the internet (ggrs's
-round trip and frames-ahead go in ADR 0036 when it is), and anyone actually
-holding a pad.
+Three players too, with `--start --players 3` holding the host until all
+are in: the seed drew two, the third never picked and was given a side at
+the fifteen-second mark (`sides: [("B", "A")]`), watched that player's
+picture from the deal, and was recorded with that player's beaten entry —
+the round card read C first, A and B beaten, and the standings C with two
+points and the other two tied second.
+
+Not yet: two machines over the internet (ggrs's round trip and frames-ahead
+go in ADR 0036 when it is), and anyone actually holding a pad.
