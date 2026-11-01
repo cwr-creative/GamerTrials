@@ -354,8 +354,9 @@ impl LibretroRunner {
     /// Wait until a threaded core has finished the frame it started, if it
     /// may not have yet. Nothing for a core that emulates inside `retro_run`,
     /// and nothing for a paced caller, which has already waited longer than
-    /// this for the frame's turn.
-    fn settle(&self) {
+    /// this for the frame's turn. Public for a tool that reads memory between
+    /// frames — the replay spike's digest.
+    pub fn settle(&self) {
         let settle = self.manifest.libretro.settle;
         if let Some(t) = self.last_frame.filter(|_| !settle.is_zero()) {
             if let Some(left) = settle.checked_sub(t.elapsed()) {
