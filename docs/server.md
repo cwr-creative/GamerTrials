@@ -69,7 +69,7 @@ the states, but no ROMs — `assets\ROMs\README.txt` inside it lists each
 dump, where it goes and its sha1. Package from a clean commit, so its name
 says which build every player is on.
 
-This is the test ADR 0013 waits on. On one machine host a match with the
+This is the test ADR 0013 was accepted on. On one machine host a match with the
 server set to the public address; on another join by the invite. A
 generated challenge must prepare on both with the same artifact hash — the
 server ends the match loudly if it does not — and a finished player must

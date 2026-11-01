@@ -189,8 +189,10 @@ Open, roughly in order:
   Settings in a match, and `wss://` against a real proxy. The encoder and
   the ADPCM coder have unit tests; the relay is tested in-process and over
   the wire.
-- **Phase C owes:** the two-machine match (`docs/server.md`), on which
-  **ADR 0013 stays Proposed**. Head-to-head comes last.
+- **Phase C's two-machine match is played** (`docs/server.md`): live
+  players on separate machines over the internet, generated challenges
+  dealt and every artifact hash agreeing, so **ADR 0013 is Accepted**.
+  Head-to-head comes last.
 - **Linux (ADR 0035, Proposed) plays under WSLg, not yet on a desktop.**
   A round of each game runs with the overlay aligned over it; a real window
   manager, fullscreen, mouse capture, sound and a match against a Windows

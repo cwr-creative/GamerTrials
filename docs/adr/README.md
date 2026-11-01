@@ -54,7 +54,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0010 | Game manifests are TOML data in git, not code | Accepted |
 | 0011 | Client in Rust + Tauri; server in Go or TypeScript; SQLite storage | Superseded by 0024 |
 | 0012 | Extract the StageRunner interface in Phase 2, not Phase 1 | Accepted |
-| [0013](0013-generate-stage-content-client-side-from-a-seed.md) | Generate stage content on each client from a server-issued seed | Proposed |
+| [0013](0013-generate-stage-content-client-side-from-a-seed.md) | Generate stage content on each client from a server-issued seed | Accepted |
 | [0014](0014-detect-stage-completion-and-death-by-watching-emulator-ram.md) | Detect stage completion and death by watching emulator RAM | Accepted |
 | [0015](0015-scope-custom-challenges-to-declarative-value-patches.md) | Scope custom-challenge ROM generation to declarative value-substitution patches | Accepted |
 | [0016](0016-describe-game-telemetry-as-declarative-ram-rules.md) | Describe game telemetry as declarative RAM rules in the manifest | Accepted |
@@ -82,11 +82,12 @@ Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is
 fine, a wrong one is not.
 
-**0013 is `Proposed` although it is built, and that is accurate.** The
-derivation key, local generation and the artifact hash exist, and a lobby
-issues one seed to every player and compares their hashes, in-process for one
-or over `gamertrials-server` for several (ADR 0030). Promoting it waits on a
-networked match played on two machines, not two clients on one.
+**0013 was accepted only once two machines agreed.** It was built well before:
+the derivation key, local generation and the artifact hash, with a lobby
+issuing one seed to every player and comparing their hashes (ADR 0030). It
+stayed `Proposed` until matches between live players on separate machines,
+over the internet, dealt generated challenges and every artifact hash agreed —
+two clients on one machine could not show that.
 
 ## Notes
 
