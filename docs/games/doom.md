@@ -441,3 +441,47 @@ keep an eye on:
 4. **Take the last hit** and confirm the death frame reports `died` and not
    `damaged` — the `unless = ["death"]` guard is what stops both, and it is the
    one rule here whose interaction has not been watched live.
+
+## Deathmatch over the emulated network (ADR 0036)
+
+Doom brings its own netcode: two DOS machines on IPX, in lockstep, each a
+node of one game. dosbox-pure emulates the IPX driver and hands its packets
+to the frontend under the libretro netpacket interface, which
+`session-libretro` answers and the `head-to-head` crate carries between the
+two players over UDP (`Networked`, `Relay`). Nothing is rolled back: a late
+packet costs what Doom says it costs, a stall, and an internet bout wants a
+short round trip. The manifest says `netplay = "packets"`.
+
+What a deathmatch stage needs that the shipped bundle lacks is a boot that
+runs the network setup. `doom-shareware-e1m1.zip` warps to E1M1 alone; a
+deathmatch bundle is the same files with an `[autoexec]` that runs
+
+```
+C:
+IPXSETUP -nodes 2 -deathmatch -nomonsters -warp 1 1
+```
+
+so that both machines sit in IPXSETUP waiting for each other once booted.
+It is a second `[[rom]]` of the manifest, a derivation from the base by a
+patch, since the platform never ships game files; until that patch exists
+the stage is not declared, because a stage naming a bundle a player does not
+hold keeps every Doom challenge out of the pool. The entry is `named`: the
+netpacket contract forbids restoring a state while connected, so the round
+starts with a cold boot, about 960 frames.
+
+The facts are the local machine's — the frag count in the player struct
+(`players[consoleplayer].frags[]`, summed) — and need no `slot`: each machine
+reports its own player. The challenge is then
+
+```toml
+[[challenge]]
+id = "e1m1-deathmatch"
+stage = "e1m1-deathmatch"
+kind = "head_to_head"
+slots = 2
+complete_when = { counts = { frags = 5 } }
+limit_seconds = 600
+```
+
+A machine that cannot judge the other slot claims the verdict the server
+sends it; whoever reaches five first ends the bout for both.

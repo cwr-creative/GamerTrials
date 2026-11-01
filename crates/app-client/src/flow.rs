@@ -135,6 +135,10 @@ pub struct Flow {
     rendezvous: Option<String>,
     /// The bout this player is backing someone in, if any.
     backing_round: Option<u64>,
+    /// The round this player has claimed a verdict for. A relayed bout's
+    /// judge sees only its own machine's facts, so the other slot's
+    /// completion reaches it as the server's verdict, which it then claims.
+    claimed: Option<u64>,
     spiked: bool,
     auto: Auto,
     /// `--start` has been acted on.
@@ -190,6 +194,7 @@ impl Flow {
                     slots: BTreeMap::new(),
                     rendezvous: None,
                     backing_round: None,
+                    claimed: None,
                     spiked: false,
                     auto,
                     auto_started: false,
@@ -481,6 +486,22 @@ impl Flow {
             }
             ToClient::PlayerFinished { round, player, outcome } => {
                 println!("[match] round {round}: {player} {outcome:?}");
+                let me = self.player.clone().unwrap_or_default();
+                if player == me && self.is_current(round) && self.claimed != Some(round) {
+                    // The server ruled on a run this client could not judge
+                    // for itself: the other machine's facts never came here,
+                    // or the link was lost. Its verdict is the claim.
+                    self.claimed = Some(round);
+                    let completed = outcome.completed();
+                    self.emit(json!({
+                        "kind": if completed { "garland" } else { "skull" },
+                        "frame": outcome.frames,
+                        "text": format!("{:?}", outcome.ending).to_lowercase(),
+                    }));
+                    if outcome.ending != protocol::Ending::Forfeited {
+                        self.send(ToServer::Finished { round, outcome: outcome.clone() });
+                    }
+                }
                 // A seated opponent who gave up hands this player the win
                 // (ADR 0036); the judge on the game thread is told.
                 if outcome.ending == protocol::Ending::Forfeited && self.is_current(round) {
@@ -670,6 +691,7 @@ impl Flow {
             }
             Report::Finished { round, result, forfeited_at } => {
                 println!("[match] round {round}: provisional {result}");
+                self.claimed = Some(round);
                 if let Some(frame) = forfeited_at {
                     self.send(ToServer::Forfeit { round, frame });
                 }

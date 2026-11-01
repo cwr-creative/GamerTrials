@@ -229,13 +229,23 @@ verdict, reports `PeerLost` when the link dies, and forfeits on a desync; a
 pause cannot hold the shared machine but the menu still gives up; a player
 not seated sees the backing sheet, picks a side or is given one, and
 spectates as the eliminated do; Settings › Profile sets the input delay.
+And the second mechanism: `session-libretro` answers the netpacket
+interface (78) and is `Networked` — the core's `start`, `receive`, `poll`,
+`connected`, `disconnected` and `stop` called from `join`, `deliver`,
+`outgoing` and the peers — and the `head-to-head` crate's `Relay` carries
+the packets with a frame header, a hello handshake before the bout goes,
+and reliable packets resent until acknowledged and delivered in order; the
+client takes that path when the manifest says `netplay = "packets"`, and
+claims the server's verdict for the slot it cannot judge itself.
 **Not hand-tested**: no shipped manifest carries a bout. Next is an SF2
-manifest (needs a dump and its addresses found with the harness: a
-rounds-won counter per slot, a `stage_exited` rule, an entry state at the
-character select, `netplay = "rollback"`), then two clients on one machine
-through `gamertrials-server`, then two machines over the internet with
-ggrs's numbers recorded against ADR 0036; and Doom over the netpacket
-interface (`Networked`, `netplay = "packets"`).
+manifest (a dump and a running two-player state are in `assets/`; its
+addresses are found with the harness: a rounds-won counter per slot, a
+`stage_exited` rule, `netplay = "rollback"`), then two clients on one
+machine through `gamertrials-server`, then two machines over the internet
+with ggrs's numbers recorded against ADR 0036. Doom's deathmatch needs a
+bundle of its own whose `[autoexec]` runs `IPXSETUP` (`docs/games/doom.md`);
+the shipped bundle warps to E1M1 alone, so no `deathmatch` stage ships
+until that bundle exists.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`

@@ -32,7 +32,7 @@
 //! except the audio drain runs on the emulator thread.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::{c_char, c_uint, c_void, CString};
+use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -185,6 +185,7 @@ const ENV_SET_CORE_OPTIONS_V2_INTL: u32 = 68;
 const ENV_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK: u32 = 69;
 const ENV_SET_VARIABLE: u32 = 70;
 const ENV_GET_THROTTLE_STATE: u32 = 71 | EXPERIMENTAL;
+const ENV_SET_NETPACKET_INTERFACE: u32 = 78;
 const ENV_GET_SAVESTATE_CONTEXT: u32 = 72 | EXPERIMENTAL;
 
 /// libretro.h caps a v2 option at this many values, and the array is inline in
@@ -475,6 +476,131 @@ pub fn set_savestate_context(context: u32) {
 /// The `RETRO_SERIALIZATION_QUIRK_*` bits the core declared, if any.
 pub fn serialization_quirks() -> u64 {
     SERIALIZATION_QUIRKS.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------- netpacket
+//
+// A core that brings its own network (ADR 0036): dosbox-pure's emulated IPX
+// driver and modem. Under `SET_NETPACKET_INTERFACE` (78) the core hands over
+// a struct of callbacks and the frontend owns the connections; the core
+// sends its own bytes through `send_fn` and is handed the other machines'
+// through `receive`. The frontend carries bytes and nothing else, which is
+// what keeps every player on their own emulated machine (invariant 7).
+
+type NetSendFn = unsafe extern "C" fn(c_int, *const c_void, usize, u16);
+type NetPollReceiveFn = unsafe extern "C" fn();
+
+/// `struct retro_netpacket_callback`, field for field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NetpacketCallback {
+    start: Option<unsafe extern "C" fn(u16, NetSendFn, NetPollReceiveFn)>,
+    receive: Option<unsafe extern "C" fn(*const c_void, usize, u16)>,
+    stop: Option<unsafe extern "C" fn()>,
+    poll: Option<unsafe extern "C" fn()>,
+    connected: Option<unsafe extern "C" fn(u16) -> bool>,
+    disconnected: Option<unsafe extern "C" fn(u16)>,
+    protocol_version: *const c_char,
+}
+
+// The struct holds a pointer into the core, read once at registration and
+// never dereferenced after the core is gone.
+unsafe impl Send for NetpacketCallback {}
+
+static NETPACKET: Mutex<Option<NetpacketCallback>> = Mutex::new(None);
+/// Set once `start` has been called on the core, so `stop` is owed.
+static NET_STARTED: AtomicU32 = AtomicU32::new(0);
+/// What the core asked to send since the last drain: client id, flags, bytes.
+static NET_OUTBOX: Mutex<Vec<(u16, c_int, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// `RETRO_NETPACKET_BROADCAST`: every other client.
+pub const NETPACKET_BROADCAST: u16 = 0xFFFF;
+/// `RETRO_NETPACKET_RELIABLE`: must arrive, in order.
+pub const NETPACKET_RELIABLE: c_int = 1;
+
+unsafe extern "C" fn cb_netpacket_send(flags: c_int, buf: *const c_void, len: usize, client_id: u16) {
+    if buf.is_null() || len == 0 {
+        return;
+    }
+    let bytes = std::slice::from_raw_parts(buf as *const u8, len).to_vec();
+    lock(&NET_OUTBOX).push((client_id, flags, bytes));
+}
+
+unsafe extern "C" fn cb_netpacket_poll_receive() {
+    // Everything that arrived is delivered before the frame; nothing to do.
+}
+
+/// Whether the core registered a network of its own.
+pub fn netpacket_supported() -> bool {
+    lock(&NETPACKET).is_some()
+}
+
+/// The protocol version the core named, if it named one: what two machines
+/// must agree on before their cores talk.
+pub fn netpacket_protocol() -> Option<String> {
+    let cb = (*lock(&NETPACKET))?;
+    if cb.protocol_version.is_null() {
+        return None;
+    }
+    Some(unsafe { cstr(cb.protocol_version) })
+}
+
+/// Join the session as `client_id`: 0 hosts, in the sense the game's own
+/// netcode gives the word. `false` if the core registered no network.
+pub fn netpacket_start(client_id: u16) -> bool {
+    let Some(cb) = *lock(&NETPACKET) else { return false };
+    let Some(start) = cb.start else { return false };
+    unsafe { start(client_id, cb_netpacket_send, cb_netpacket_poll_receive) };
+    NET_STARTED.store(1, Ordering::Relaxed);
+    true
+}
+
+/// Bytes another client's machine sent this one.
+pub fn netpacket_receive(bytes: &[u8], client_id: u16) {
+    let cb = *lock(&NETPACKET);
+    if let Some(receive) = cb.and_then(|c| c.receive) {
+        unsafe { receive(bytes.as_ptr() as *const c_void, bytes.len(), client_id) };
+    }
+}
+
+/// The frontend's turn to say the session has ended.
+pub fn netpacket_stop() {
+    if NET_STARTED.swap(0, Ordering::Relaxed) == 0 {
+        return;
+    }
+    let cb = *lock(&NETPACKET);
+    if let Some(stop) = cb.and_then(|c| c.stop) {
+        unsafe { stop() };
+    }
+}
+
+/// The core's own look at its queues, once a frame.
+pub fn netpacket_poll() {
+    let cb = *lock(&NETPACKET);
+    if let Some(poll) = cb.and_then(|c| c.poll) {
+        unsafe { poll() };
+    }
+}
+
+/// Another client joined (the host hears this). The core may refuse it.
+pub fn netpacket_connected(client_id: u16) -> bool {
+    let cb = *lock(&NETPACKET);
+    match cb.and_then(|c| c.connected) {
+        Some(connected) => unsafe { connected(client_id) },
+        None => true,
+    }
+}
+
+pub fn netpacket_disconnected(client_id: u16) {
+    let cb = *lock(&NETPACKET);
+    if let Some(disconnected) = cb.and_then(|c| c.disconnected) {
+        unsafe { disconnected(client_id) };
+    }
+}
+
+/// Everything the core asked to send since the last call.
+pub fn netpacket_outgoing() -> Vec<(u16, c_int, Vec<u8>)> {
+    std::mem::take(&mut *lock(&NET_OUTBOX))
 }
 
 /// This frame's mouse motion, in host pixels, and its held buttons as a bitmask
@@ -1156,6 +1282,22 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             *lock(&KEYBOARD_CB) = (*(data as *const KeyboardCallback)).callback;
             true
         }
+        // The core brings its own network (ADR 0036): the frontend will carry
+        // its packets, and nothing else, between the players' machines.
+        ENV_SET_NETPACKET_INTERFACE => {
+            if data.is_null() {
+                return false;
+            }
+            let cb = *(data as *const NetpacketCallback);
+            *lock(&NETPACKET) = Some(cb);
+            let protocol = if cb.protocol_version.is_null() {
+                "the core version".to_string()
+            } else {
+                cstr(cb.protocol_version)
+            };
+            println!("[net]  the core brings its own network (netpacket interface, protocol {protocol})");
+            true
+        }
         // A core-supplied status line. Worth surfacing: it is where dosbox-pure
         // reports that it could not mount the content, which otherwise looks
         // like a game that boots to nothing.
@@ -1496,6 +1638,9 @@ impl Core {
         REPLAYING.store(0, Ordering::Relaxed);
         SAVESTATE_CONTEXT.store(0, Ordering::Relaxed);
         SERIALIZATION_QUIRKS.store(0, Ordering::Relaxed);
+        *lock(&NETPACKET) = None;
+        NET_STARTED.store(0, Ordering::Relaxed);
+        lock(&NET_OUTBOX).clear();
         pads_clear();
 
         let lib = unsafe { Library::new(path) }
@@ -1777,6 +1922,8 @@ impl Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // A session the core was told had started is told it has ended.
+        netpacket_stop();
         unsafe {
             if self.game_loaded {
                 (self.fn_unload_game)();

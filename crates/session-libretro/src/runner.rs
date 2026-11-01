@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use session_api::{
-    AssetKey, EntryPoint, Presentable, RunnerError, SessionEvent, SharedRunner, Slot, SlotEvent,
-    SlotInput, Snapshot, StageRunner, StageSpec, VideoFrame,
+    AssetKey, EntryPoint, Networked, Packet, Presentable, RunnerError, SessionEvent, SharedRunner,
+    Slot, SlotEvent, SlotInput, Snapshot, StageRunner, StageSpec, VideoFrame,
 };
 
 use crate::libretro::{
@@ -507,6 +507,61 @@ impl SharedRunner for LibretroRunner {
         let mut out = self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]).to_vec();
         out.extend(self.watcher.state());
         out
+    }
+}
+
+/// A core that brings its own network, under the netpacket interface (ADR
+/// 0036): the game's netcode keeps the machines in step, and this runner
+/// hands its packets out and in. Slot numbers are the interface's client
+/// ids: 0 hosts.
+impl Networked for LibretroRunner {
+    fn join(&mut self, slot: Slot, slots: u8) -> Result<(), RunnerError> {
+        if self.manifest.libretro.netplay != Some(Netplay::Packets) {
+            return Err(RunnerError(format!(
+                "{} does not say netplay = \"packets\", so its machine is not shared this way",
+                self.manifest.title
+            )));
+        }
+        if !libretro::netpacket_supported() {
+            return Err(RunnerError(
+                "the core registered no network of its own (no netpacket interface)".into(),
+            ));
+        }
+        if !libretro::netpacket_start(u16::from(slot.0)) {
+            return Err(RunnerError("the core would not start its network".into()));
+        }
+        println!(
+            "[net]  joined as client {} of {slots}{}",
+            slot.0,
+            libretro::netpacket_protocol().map(|p| format!(", protocol {p}")).unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    fn deliver(&mut self, from: Slot, bytes: &[u8]) {
+        libretro::netpacket_receive(bytes, u16::from(from.0));
+    }
+
+    fn outgoing(&mut self) -> Vec<Packet> {
+        libretro::netpacket_poll();
+        libretro::netpacket_outgoing()
+            .into_iter()
+            .map(|(to, flags, bytes)| Packet {
+                to: if to == libretro::NETPACKET_BROADCAST { None } else { Some(Slot(to as u8)) },
+                bytes,
+                reliable: flags & libretro::NETPACKET_RELIABLE != 0,
+            })
+            .collect()
+    }
+
+    fn peer_joined(&mut self, slot: Slot) {
+        if !libretro::netpacket_connected(u16::from(slot.0)) {
+            eprintln!("[net]  the core refused client {}", slot.0);
+        }
+    }
+
+    fn peer_left(&mut self, slot: Slot) {
+        libretro::netpacket_disconnected(u16::from(slot.0));
     }
 }
 
