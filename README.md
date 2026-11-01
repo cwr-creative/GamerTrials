@@ -36,8 +36,10 @@ that plays it.
 **Spectating is a core requirement.** A player who finishes a stage can watch
 anyone still playing it, whatever game they are in.
 
-Head-to-head play, where players share one running game, is deliberately the last
-thing on the list: it needs synchronised netcode rather than one-way telemetry.
+Head-to-head play, where players share one running game, is the last thing on
+the list and is under way: a console game is kept in step by rollback on the
+players' own machines, a DOS game by its own netcode over an emulated network,
+and the two players' inputs travel directly between them (ADR 0036).
 
 ## Status
 

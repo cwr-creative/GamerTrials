@@ -140,6 +140,7 @@ fn steady(c: &ChallengeSpec) -> Vec<Attempt> {
             Attempt::meeting(&c.complete_when, at_least(c, 900)),
         ],
         ChallengeKind::Survival => vec![Attempt::meeting(&c.complete_when, at_least(c, 1200))],
+        ChallengeKind::HeadToHead => unreachable!("a bout is not played on a runner of one"),
     }
 }
 
@@ -153,6 +154,7 @@ fn reckless(c: &ChallengeSpec) -> Vec<Attempt> {
             Attempt::new(),
         ],
         ChallengeKind::Survival => vec![Attempt::new().died(50)],
+        ChallengeKind::HeadToHead => unreachable!("a bout is not played on a runner of one"),
     }
 }
 
@@ -193,6 +195,7 @@ fn challenge(kind: ChallengeKind, complete_when: Completion) -> ChallengeSpec {
         kind,
         complete_when,
         ends_attempt_on: Default::default(),
+        slots: 1,
     }
 }
 
@@ -243,6 +246,7 @@ fn a_dealt_session_places_every_player_on_every_challenge() {
                 assert_eq!(places, [1, 1, 3], "{}", c.id);
                 assert_eq!(outcome.result("reckless").ending, Ending::Failed(AttemptEnd::Died));
             }
+            ChallengeKind::HeadToHead => unreachable!("no manifest deals a bout here"),
         }
     }
 }

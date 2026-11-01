@@ -18,18 +18,25 @@
 //! connection ends when its socket closes, or when nothing has come from it
 //! for [`protocol::Liveness::silence`]: a player whose link dropped leaves
 //! as one who closed it does, in seconds rather than whenever TCP gives up.
+//!
+//! A fourth thread, **rendezvous**, reads one UDP socket (ADR 0036): a
+//! head-to-head player's probes, each eight bytes of token, so the server
+//! learns the address the player's machine reaches the world from and can
+//! tell the other slot. It carries nothing else — the slots then talk to
+//! each other directly. A lobby's thread also wakes every quarter second to
+//! give its `Server` the time, which is how a bout's backing window closes.
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use challenge_library::Catalog;
 use protocol::{Lane, Message, ToClient, ToServer};
@@ -65,6 +72,30 @@ enum LobbyMsg {
     Open(Sender<ToClient>, Sender<ConnId>),
     Msg(ConnId, ToServer),
     Closed(ConnId),
+    /// A probe carrying this token came from this address (ADR 0036). Every
+    /// lobby hears every probe; the one that knows the token acts on it.
+    Observed(u64, String),
+}
+
+/// How often a lobby gives its server the time.
+const TICK: Duration = Duration::from_millis(250);
+
+/// The UDP side a head-to-head player probes (ADR 0036), and the address to
+/// tell players to probe: `host:port`, or `:port` for the WebSocket's own
+/// host, which is right unless a proxy fronts it (ADR 0033).
+pub struct Rendezvous {
+    pub socket: UdpSocket,
+    pub public: String,
+}
+
+impl Rendezvous {
+    /// Bound on `addr`, told to players as `:port` unless `public` says
+    /// otherwise.
+    pub fn bind(addr: &str, public: Option<String>) -> io::Result<Rendezvous> {
+        let socket = UdpSocket::bind(addr)?;
+        let public = public.unwrap_or_else(|| format!(":{}", socket.local_addr().map(|a| a.port()).unwrap_or(0)));
+        Ok(Rendezvous { socket, public })
+    }
 }
 
 struct Router {
@@ -73,6 +104,8 @@ struct Router {
     lobbies: Mutex<HashMap<String, Sender<LobbyMsg>>>,
     /// Stepped for every code and seed.
     entropy: Mutex<u64>,
+    /// What a `Welcome` says about probes; `None` deals no bouts.
+    rendezvous: Option<String>,
 }
 
 impl Router {
@@ -127,8 +160,20 @@ fn code_from(mut x: u64) -> String {
 /// A lobby's thread: its `Server`, and who each reply goes to.
 fn lobby(router: Arc<Router>, code: String, seed: u64, rx: Receiver<LobbyMsg>) {
     let mut server = Server::new(router.catalog.clone(), code.clone(), seed);
+    if let Some(r) = &router.rendezvous {
+        server = server.with_rendezvous(r.clone());
+    }
     let mut conns: HashMap<ConnId, Sender<ToClient>> = HashMap::new();
-    for msg in rx.iter() {
+    loop {
+        let msg = match rx.recv_timeout(TICK) {
+            Ok(m) => m,
+            Err(RecvTimeoutError::Timeout) => {
+                let out = server.tick(Instant::now());
+                deliver(&conns, out);
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         let out = match msg {
             LobbyMsg::Open(reply, ack) => {
                 let id = server.connect();
@@ -137,6 +182,7 @@ fn lobby(router: Arc<Router>, code: String, seed: u64, rx: Receiver<LobbyMsg>) {
                 continue;
             }
             LobbyMsg::Msg(id, m) => server.handle(id, m),
+            LobbyMsg::Observed(token, addr) => server.observed(token, addr),
             LobbyMsg::Closed(id) => {
                 conns.remove(&id);
                 let out = server.disconnect(id);
@@ -151,17 +197,53 @@ fn lobby(router: Arc<Router>, code: String, seed: u64, rx: Receiver<LobbyMsg>) {
                 out
             }
         };
-        for (to, reply) in out {
-            if let Some(tx) = conns.get(&to) {
-                let _ = tx.send(reply);
+        deliver(&conns, out);
+    }
+}
+
+fn deliver(conns: &HashMap<ConnId, Sender<ToClient>>, out: Vec<(ConnId, ToClient)>) {
+    for (to, reply) in out {
+        if let Some(tx) = conns.get(&to) {
+            let _ = tx.send(reply);
+        }
+    }
+}
+
+/// Reads probes until the socket fails: eight bytes of token, little-endian,
+/// from wherever the player's machine reaches the world (ADR 0036). Anything
+/// else is dropped.
+fn read_probes(socket: UdpSocket, router: Arc<Router>) {
+    let mut buf = [0u8; 64];
+    loop {
+        let (n, from) = match socket.recv_from(&mut buf) {
+            Ok(x) => x,
+            // A peer's port closing shows up here on Windows; the socket is fine.
+            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
+            Err(e) => {
+                println!("[rendezvous] {e}");
+                return;
             }
+        };
+        if n != 8 {
+            continue;
+        }
+        let token = u64::from_le_bytes(buf[..8].try_into().expect("8 bytes"));
+        let lobbies: Vec<Sender<LobbyMsg>> = router.lobbies.lock().unwrap().values().cloned().collect();
+        for l in lobbies {
+            let _ = l.send(LobbyMsg::Observed(token, from.to_string()));
         }
     }
 }
 
 /// Serves until the listener fails. Each connection gets a thread.
 /// `rules` is [`Rules::DEFAULT`] but for tests that cannot wait for it.
-pub fn serve(listener: TcpListener, catalog: Catalog, rules: Rules) -> io::Result<()> {
+/// Without a `rendezvous` no bout is dealt (ADR 0036).
+pub fn serve(
+    listener: TcpListener,
+    catalog: Catalog,
+    rules: Rules,
+    rendezvous: Option<Rendezvous>,
+) -> io::Result<()> {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -171,7 +253,15 @@ pub fn serve(listener: TcpListener, catalog: Catalog, rules: Rules) -> io::Resul
         rules,
         lobbies: Mutex::new(HashMap::new()),
         entropy: Mutex::new(seed),
+        rendezvous: rendezvous.as_ref().map(|r| r.public.clone()),
     });
+    if let Some(r) = rendezvous {
+        let router = Arc::clone(&router);
+        thread::Builder::new()
+            .name("rendezvous".into())
+            .spawn(move || read_probes(r.socket, router))
+            .expect("spawn the rendezvous thread");
+    }
     for stream in listener.incoming() {
         let stream = stream?;
         let router = Arc::clone(&router);
@@ -189,15 +279,35 @@ pub fn serve(listener: TcpListener, catalog: Catalog, rules: Rules) -> io::Resul
 }
 
 /// Binds and serves on a thread; the address it bound. For tests, and for
-/// anything else that wants a server without owning the accept loop.
-pub fn spawn(addr: &str, catalog: Catalog, rules: Rules) -> io::Result<std::net::SocketAddr> {
+/// anything else that wants a server without owning the accept loop. No
+/// UDP side: such a server deals no bouts.
+pub fn spawn(addr: &str, catalog: Catalog, rules: Rules) -> io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
     thread::Builder::new()
         .name("accept".into())
-        .spawn(move || serve(listener, catalog, rules))
+        .spawn(move || serve(listener, catalog, rules, None))
         .expect("spawn the accept thread");
     Ok(bound)
+}
+
+/// [`spawn`], with a UDP side bound beside the listener (the same port if
+/// it is free, else any): the WebSocket address and the UDP one.
+pub fn spawn_with_rendezvous(
+    addr: &str,
+    catalog: Catalog,
+    rules: Rules,
+) -> io::Result<(SocketAddr, SocketAddr)> {
+    let listener = TcpListener::bind(addr)?;
+    let bound = listener.local_addr()?;
+    let udp = UdpSocket::bind(bound).or_else(|_| UdpSocket::bind((bound.ip(), 0)))?;
+    let udp_addr = udp.local_addr()?;
+    let rendezvous = Rendezvous { socket: udp, public: format!(":{}", udp_addr.port()) };
+    thread::Builder::new()
+        .name("accept".into())
+        .spawn(move || serve(listener, catalog, rules, Some(rendezvous)))
+        .expect("spawn the accept thread");
+    Ok((bound, udp_addr))
 }
 
 /// Where a connection is.

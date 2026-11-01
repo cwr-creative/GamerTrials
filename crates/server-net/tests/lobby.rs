@@ -232,7 +232,7 @@ fn two_players_play_a_round_over_the_wire() {
     };
     let (round, cref, seed, limit, players) = dealt(&mut host);
     assert_eq!(dealt(&mut guest), (round, cref.clone(), seed, limit, players.clone()), "one deal, one seed");
-    assert_eq!(players, ["guest", "host"], "sorted by player id");
+    assert_eq!(players, ["host", "guest"], "in player order, which is slot order in a bout");
 
     for p in [&mut host, &mut guest] {
         p.send(&ToServer::Prepared { round, artifact: "same".into() });

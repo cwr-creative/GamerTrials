@@ -233,6 +233,7 @@ impl Library {
                             "kind": match c.kind {
                                 session_api::ChallengeKind::TimeTrial => "time_trial",
                                 session_api::ChallengeKind::Survival => "survival",
+                                session_api::ChallengeKind::HeadToHead => "head_to_head",
                             },
                             "goal": c.goal_text(),
                             "custom": c.is_custom(),

@@ -29,6 +29,12 @@
 //! [`Completion`] lives here rather than in an adapter because it is the
 //! consumer's vocabulary: `challenge-core` must be able to read a challenge
 //! without depending on whichever adapter happened to parse it.
+//!
+//! A stage several players share is the same contract with slots (ADR 0036):
+//! [`SharedRunner`] for a machine the frontend keeps in step by saving and
+//! restoring it, [`Networked`] for one that keeps itself in step over a
+//! network of its own. Each fact a shared machine reports says whose it is
+//! ([`SlotEvent`]); judging it is still `challenge-core`'s, one run per slot.
 
 #![forbid(unsafe_code)]
 
@@ -156,10 +162,10 @@ impl Framerate {
 
 // ------------------------------------------------------------------ challenge
 
-/// The two shapes a challenge can take.
+/// The three shapes a challenge can take.
 ///
 /// They differ in what a death costs and in what is scored — **not** in what
-/// completes them, which is why one [`Completion`] vocabulary serves both:
+/// completes them, which is why one [`Completion`] vocabulary serves all:
 ///
 /// * [`TimeTrial`](ChallengeKind::TimeTrial): a death re-enters at the stage's
 ///   entry point and the clock keeps running. The run is worth the total frames
@@ -168,6 +174,12 @@ impl Framerate {
 /// * [`Survival`](ChallengeKind::Survival): a death ends the run. Because of
 ///   that, "without dying" is never spelled out as a criterion; it is what the
 ///   kind means.
+/// * [`HeadToHead`](ChallengeKind::HeadToHead): several players share one
+///   running stage, one per [`Slot`], and the first to meet the criteria ends
+///   the round for everyone else (ADR 0036). What a death costs is what the
+///   game says — a round in a fighting game, a respawn in a deathmatch — so a
+///   death is a fact here and never an ending. Nobody re-enters: the machine
+///   is shared.
 ///
 /// Which kinds a stage can carry is not declared anywhere: it is expressed by
 /// which challenges a manifest defines. A forced-scrolling level simply has no
@@ -176,6 +188,7 @@ impl Framerate {
 pub enum ChallengeKind {
     TimeTrial,
     Survival,
+    HeadToHead,
 }
 
 impl fmt::Display for ChallengeKind {
@@ -183,6 +196,7 @@ impl fmt::Display for ChallengeKind {
         match self {
             ChallengeKind::TimeTrial => f.write_str("time_trial"),
             ChallengeKind::Survival => f.write_str("survival"),
+            ChallengeKind::HeadToHead => f.write_str("head_to_head"),
         }
     }
 }
@@ -251,6 +265,10 @@ pub struct ChallengeSpec {
     /// an attempt already. Empty for most challenges; `["damaged"]` is a no-hit
     /// run (ADR 0025).
     pub ends_attempt_on: BTreeSet<String>,
+    /// How many players share the stage: 1 for a time trial or a survival
+    /// run, at least 2 for [`ChallengeKind::HeadToHead`], where it is how
+    /// many [`Slot`]s the machine seats (ADR 0036).
+    pub slots: u8,
 }
 
 // --------------------------------------------------------------------- events
@@ -458,6 +476,112 @@ pub trait Presentable {
     /// the machine's own rate, and forgets them. Nothing while the tap is
     /// off.
     fn take_audio(&self, _f: &mut dyn FnMut(&[i16], u32)) {}
+}
+
+// ------------------------------------------------------------ shared machine
+
+/// A controller port on a shared machine, counted from 0. A head-to-head
+/// challenge seats one player per slot (ADR 0036).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Slot(pub u8);
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "slot {}", self.0)
+    }
+}
+
+/// What one slot's pad holds on one frame, as a bitmask whose bits are the
+/// adapter's to assign — today the same RetroPad bits the single-player path
+/// fills, which is ADR 0028's existing debt and not a new one. Two machines
+/// running one bout are the same adapter, so the bits mean the same on both;
+/// nothing else reads them.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct SlotInput(pub u32);
+
+/// A fact from a shared machine and whose it is. `None` is everyone's — the
+/// stage was left, the match screen appeared — and a judge for any slot takes
+/// it; `Some` is one slot's own tally or milestone.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SlotEvent {
+    pub slot: Option<Slot>,
+    pub event: SessionEvent,
+}
+
+/// A shared machine and its observer at one frame, as bytes only the adapter
+/// that made them can read, and only in the same session. A rollback saves
+/// one every frame and restores one when a guess about a remote slot's input
+/// was wrong (ADR 0036). A capability of an emulated machine — ADR 0018's
+/// deterministic frame stepping, taken one step further — and not a word from
+/// any one adapter: a fake implements it as its own script position.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Snapshot(pub Vec<u8>);
+
+/// A stage several players run on one machine, each on a [`Slot`].
+///
+/// A rollback session drives it one frame at a time with every slot's input
+/// set first, saves a [`Snapshot`] after each frame, and when a remote slot's
+/// real input turns out to differ from the guess, restores the snapshot from
+/// that frame and advances again — *replaying* — up to the present. What
+/// `advance_slots` reports on a replayed frame may differ from what it
+/// reported the first time, and the session discards the first. The runner's
+/// own frame counter ([`StageRunner::frame`]) must be part of the snapshot,
+/// so that a restore puts it back too.
+pub trait SharedRunner: StageRunner + Presentable {
+    /// How many slots the machine seats for this stage.
+    fn slots(&self) -> u8;
+
+    /// What `slot`'s pad holds for the next advance. Set every slot before
+    /// every advance; a slot left unset keeps what it had.
+    fn set_input(&mut self, slot: Slot, input: SlotInput);
+
+    /// One emulated frame with every slot's input, and what happened on it,
+    /// each fact tagged with whose it is. `replaying` means this frame is
+    /// being run again after a restore: produce the same state, but no
+    /// picture and no sound, since the player saw and heard this frame
+    /// already.
+    fn advance_slots(&mut self, replaying: bool) -> Result<&[SlotEvent], RunnerError>;
+
+    fn snapshot(&mut self) -> Result<Snapshot, RunnerError>;
+
+    fn restore(&mut self, snapshot: &Snapshot) -> Result<(), RunnerError>;
+
+    /// What two machines fed the same inputs must agree on, frame for frame:
+    /// the bytes the observer reads its facts from, and the observer's own
+    /// state. Compared between the machines every few frames; a difference
+    /// ends the bout.
+    fn digest(&self) -> Vec<u8>;
+}
+
+/// Bytes a machine that brings its own network wants carried to another
+/// slot's machine, or to every other slot when `to` is `None`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Packet {
+    pub to: Option<Slot>,
+    pub bytes: Vec<u8>,
+    /// Must arrive, in order. Otherwise it may be dropped.
+    pub reliable: bool,
+}
+
+/// A stage whose machine keeps itself in step with the other slots' machines
+/// over a network of its own — a DOS game's netcode over an emulated IPX
+/// driver (ADR 0036). Every slot runs its own machine; the frontend only
+/// carries the packets. Driven as an ordinary [`StageRunner`], with these
+/// around each frame.
+pub trait Networked: StageRunner + Presentable {
+    /// Join the session as `slot` of `slots`. Slot 0 hosts, in the sense the
+    /// game's own netcode gives the word.
+    fn join(&mut self, slot: Slot, slots: u8) -> Result<(), RunnerError>;
+
+    /// Bytes another slot's machine sent this one.
+    fn deliver(&mut self, from: Slot, bytes: &[u8]);
+
+    /// Everything this machine wants sent since the last call.
+    fn outgoing(&mut self) -> Vec<Packet>;
+
+    fn peer_joined(&mut self, slot: Slot);
+
+    fn peer_left(&mut self, slot: Slot);
 }
 
 #[cfg(test)]

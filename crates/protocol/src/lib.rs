@@ -22,8 +22,11 @@ use session_api::{ChallengeKind, ExitReason, SessionEvent};
 /// 3 added `Watch`, `Video`, `Audio` and `Watched`: spectating rides this
 /// socket (ADR 0032). 4 carries a picture's and a sound's bytes in a binary
 /// frame after the packet rather than as base64 inside it, and added
-/// `Progress` (ADR 0034).
-pub const VERSION: u32 = 4;
+/// `Progress` (ADR 0034). 5 added head-to-head (ADR 0036): `Kind::HeadToHead`
+/// and `Ending::Beaten`, `Back`, `Endpoint`, `PeerLost`, `Sides`, `Peers`,
+/// `Welcome.rendezvous`, `Dealt.backing_seconds`, `RoundEntry.backed` and
+/// `LobbySettings.allow_head_to_head`.
+pub const VERSION: u32 = 5;
 
 /// A versioned message. `v` is read before anything else.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -244,6 +247,10 @@ pub struct LobbySettings {
     /// The bound for a challenge whose manifest hints none (ADR 0026).
     pub default_limit_seconds: f64,
     pub allow_custom: bool,
+    /// Whether head-to-head challenges are dealt (ADR 0036). Off by default:
+    /// a bout needs two players who can reach each other.
+    #[serde(default)]
+    pub allow_head_to_head: bool,
     pub grouping: Grouping,
 }
 
@@ -254,9 +261,21 @@ impl Default for LobbySettings {
             format: Format::Challenges(10),
             default_limit_seconds: 180.0,
             allow_custom: true,
+            allow_head_to_head: false,
             grouping: Grouping::Console,
         }
     }
+}
+
+/// One slot's player and where to reach their machine (ADR 0036). The
+/// candidates are addresses to try until one answers: the one the server
+/// saw the player's probes come from, and the one the player's own machine
+/// reports, which is the one that works on a LAN or on the same machine.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Peer {
+    pub player: String,
+    pub slot: u8,
+    pub candidates: Vec<String>,
 }
 
 /// A base ROM a player does not have, or has the wrong dump of. Named by
@@ -397,6 +416,7 @@ impl Event {
 pub enum Kind {
     TimeTrial,
     Survival,
+    HeadToHead,
 }
 
 impl From<ChallengeKind> for Kind {
@@ -404,6 +424,17 @@ impl From<ChallengeKind> for Kind {
         match k {
             ChallengeKind::TimeTrial => Kind::TimeTrial,
             ChallengeKind::Survival => Kind::Survival,
+            ChallengeKind::HeadToHead => Kind::HeadToHead,
+        }
+    }
+}
+
+impl From<Kind> for ChallengeKind {
+    fn from(k: Kind) -> Self {
+        match k {
+            Kind::TimeTrial => ChallengeKind::TimeTrial,
+            Kind::Survival => ChallengeKind::Survival,
+            Kind::HeadToHead => ChallengeKind::HeadToHead,
         }
     }
 }
@@ -416,6 +447,8 @@ pub enum Ending {
     Failed { how: String },
     TimedOut,
     Forfeited,
+    /// Head-to-head: another slot completed first (ADR 0036).
+    Beaten,
 }
 
 /// What one run came to. The client sends its provisional one and the server
@@ -436,6 +469,7 @@ impl From<&challenge_core::RunResult> for RunOutcome {
             kind: r.kind.into(),
             ending: match &r.ending {
                 challenge_core::Ending::Completed => Ending::Completed,
+                challenge_core::Ending::Failed(how) if how.is_beaten() => Ending::Beaten,
                 challenge_core::Ending::Failed(how) => Ending::Failed { how: how.to_string() },
                 challenge_core::Ending::TimedOut => Ending::TimedOut,
                 challenge_core::Ending::Forfeited => Ending::Forfeited,
@@ -457,7 +491,11 @@ impl RunOutcome {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RoundEntry {
     pub player: String,
+    /// A backer's is the backed player's (ADR 0036).
     pub outcome: RunOutcome,
+    /// The seated player this one backed, when this one did not play.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backed: Option<String>,
     pub completed: bool,
     pub place: u32,
     /// The frames the round cost: the run's, or the limit if it did not
@@ -473,6 +511,7 @@ impl From<&challenge_core::RoundEntry> for RoundEntry {
         RoundEntry {
             player: e.player.0.clone(),
             outcome: (&e.result).into(),
+            backed: e.backed.as_ref().map(|p| p.0.clone()),
             completed: e.completed,
             place: e.place,
             frames: e.frames,
@@ -555,6 +594,19 @@ pub enum ToServer {
     Finished { round: u64, outcome: RunOutcome },
     /// The player gave up at this frame.
     Forfeit { round: u64, frame: u64 },
+    /// Head-to-head (ADR 0036): a player not seated in the bout throws in
+    /// their lot with a seated one. Picking again replaces the pick.
+    Back { round: u64, player: String },
+    /// Head-to-head: where this seated player's machine can be reached.
+    /// `token` is what the player's probes to the server's UDP port carry,
+    /// so the server can pair the address it saw them come from with this
+    /// connection; `local` is the address the machine itself reports, for a
+    /// peer on the same LAN or the same machine.
+    Endpoint { round: u64, token: u64, local: String },
+    /// Head-to-head: the link to the other slots died on this player's
+    /// side, on `frame`, the last this player confirmed. The player makes no
+    /// claim after this; the server's ruling reaches it as `PlayerFinished`.
+    PeerLost { round: u64, frame: u64 },
     /// Host only. Ends the match where it stands.
     EndMatch,
     /// Host only, from the score screen: the same settings, a new seed.
@@ -583,11 +635,22 @@ pub enum ToServer {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToClient {
-    Welcome { player: String, lobby: LobbyState },
+    /// `rendezvous` is where a head-to-head player's probes go: `host:port`,
+    /// or `:port` to mean this connection's own host (ADR 0036). `None` from
+    /// a server that deals no bouts, such as the in-process one.
+    Welcome {
+        player: String,
+        lobby: LobbyState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rendezvous: Option<String>,
+    },
     Refused { reason: String },
     Lobby(LobbyState),
     /// The next round. Everyone hears of it; only `players` prepare it. The
-    /// eliminated wait it out, and will spectate it.
+    /// eliminated wait it out, and will spectate it. For a head-to-head
+    /// round `players` are the slots in slot order, and every other active
+    /// player backs one of them within `backing_seconds` or is assigned
+    /// one (ADR 0036).
     Dealt {
         round: u64,
         challenge: ChallengeRef,
@@ -597,7 +660,15 @@ pub enum ToClient {
         limit_frames: u64,
         /// Who plays this round.
         players: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backing_seconds: Option<u32>,
     },
+    /// Head-to-head: who backs whom so far, whole, on every change.
+    Sides { round: u64, backing: Vec<(String, String)> },
+    /// Head-to-head: every slot's machine and where to reach it. Sent once
+    /// the server has heard from every seated player; the seated start
+    /// connecting on it.
+    Peers { round: u64, peers: Vec<Peer> },
     /// A player could not prepare the round, so nobody plays it and its
     /// challenge is withdrawn for the rest of the match (ADR 0029). The next
     /// `Dealt`, or `MatchOver`, follows.
@@ -740,14 +811,14 @@ mod tests {
     #[test]
     fn packets_round_trip_and_carry_the_version() {
         let text = encode(&ToServer::Start);
-        assert!(text.contains("\"v\":4"), "{text}");
+        assert!(text.contains("\"v\":5"), "{text}");
         assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
     }
 
     #[test]
     fn another_version_is_refused_before_the_body_is_read() {
         let text = r#"{"v":99,"body":{"type":"start"}}"#;
-        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 4 }));
+        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 5 }));
     }
 
     #[test]

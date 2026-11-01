@@ -182,6 +182,11 @@ struct ChallengeDoc {
     /// like `survive_seconds`. Absent means the lobby's default applies.
     #[serde(default)]
     limit_seconds: Option<f64>,
+    /// How many players a head-to-head challenge seats on the shared
+    /// machine; required for that kind, at least 2, and forbidden for the
+    /// others (ADR 0036).
+    #[serde(default)]
+    slots: Option<i64>,
 
     // ADR 0015's generated-challenge keys. The table's shape is `content-gen`'s
     // and is checked by the adapter that links it; here only their presence is
@@ -377,6 +382,9 @@ pub struct Challenge {
     /// manifest declares one. `None` means the lobby's default limit applies;
     /// a run always has one (ADR 0023, ADR 0026).
     pub limit_frames: Option<u64>,
+    /// How many players share the stage: 1, or at least 2 for a head-to-head
+    /// challenge (ADR 0036).
+    pub slots: u8,
     /// `Some` when this challenge's content is rolled per attempt from a seed
     /// (ADR 0013, ADR 0015), and the version of the table that rolls it. A
     /// dealer issues a seed for exactly these. The table itself is read by the
@@ -431,7 +439,12 @@ impl Challenge {
             kind: self.kind,
             complete_when: self.complete_when.clone(),
             ends_attempt_on: self.ends_attempt_on.clone(),
+            slots: self.slots,
         }
+    }
+
+    pub fn is_head_to_head(&self) -> bool {
+        self.kind == ChallengeKind::HeadToHead
     }
 }
 
@@ -838,9 +851,32 @@ impl Doc {
             let kind = match c.kind.as_str() {
                 "time_trial" => ChallengeKind::TimeTrial,
                 "survival" => ChallengeKind::Survival,
+                "head_to_head" => ChallengeKind::HeadToHead,
                 other => {
-                    return Err(format!("{what}: kind `{other}`; try time_trial or survival"))
+                    return Err(format!(
+                        "{what}: kind `{other}`; try time_trial, survival or head_to_head"
+                    ))
                 }
+            };
+            let slots = match (kind, c.slots) {
+                (ChallengeKind::HeadToHead, None) => {
+                    return Err(format!(
+                        "{what}: a head_to_head challenge must say how many players it seats; \
+                         add slots = 2"
+                    ))
+                }
+                (ChallengeKind::HeadToHead, Some(n)) if !(2..=8).contains(&n) => {
+                    return Err(format!(
+                        "{what}: slots = {n}; a head_to_head challenge seats between 2 and 8"
+                    ))
+                }
+                (ChallengeKind::HeadToHead, Some(n)) => n as u8,
+                (_, Some(_)) => {
+                    return Err(format!(
+                        "{what}: slots is for head_to_head only; a {kind} run seats one player"
+                    ))
+                }
+                (_, None) => 1,
             };
             let stage = stages.iter().find(|s| s.id.0 == c.stage).ok_or_else(|| {
                 format!("{what}: stage `{}` is not declared by this manifest", c.stage)
@@ -915,6 +951,7 @@ impl Doc {
                 note: c.note.clone(),
                 goal: c.goal.clone(),
                 limit_frames,
+                slots,
                 generator_version,
                 custom: generator_version.is_some() || derived,
                 goal_fallback,
@@ -1023,7 +1060,7 @@ fn completion(
         if kind != ChallengeKind::Survival {
             return Err(format!(
                 "{what}: survive_seconds is a survival criterion; \"survive {secs} \
-                 seconds fastest\" is not something a time trial can be won at"
+                 seconds\" is not something a {kind} run can be won at"
             ));
         }
         // Infinity and NaN both reach `Framerate::frames`, where the cast

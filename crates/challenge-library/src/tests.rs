@@ -606,6 +606,63 @@ fn a_limit_shorter_than_the_survival_is_refused() {
     assert!(ok.is_ok(), "{ok:?}");
 }
 
+// ------------------------------------------------------------ head-to-head
+
+/// A bout seats players on one machine; the manifest says how many, and
+/// each slot's facts are its own (ADR 0036).
+#[test]
+fn a_head_to_head_challenge_declares_its_slots() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}\
+         [[rule]]\nfield = \"lives\"\nedge = \"increases\"\nemit = \"count\"\ncounter = \"rounds_won\"\n\
+         [[challenge]]\nid = \"fight\"\nstage = \"s\"\nkind = \"head_to_head\"\nslots = 2\n\
+         complete_when = {{ counts = {{ rounds_won = 2 }} }}\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    let c = lib.challenge("fight").unwrap();
+    assert!(c.is_head_to_head());
+    assert_eq!(c.slots, 2);
+    let spec = c.spec(&lib.game.id);
+    assert_eq!((spec.kind, spec.slots), (ChallengeKind::HeadToHead, 2));
+}
+
+#[test]
+fn a_head_to_head_challenge_without_slots_or_with_too_few_is_refused() {
+    let e = with_challenge("id = \"c\"\nkind = \"head_to_head\"\ncomplete_when = { cleared = true }\n")
+        .unwrap_err();
+    assert!(e.contains("slots = 2"), "{e}");
+    for bad in ["0", "1", "9"] {
+        let e = with_challenge(&format!(
+            "id = \"c\"\nkind = \"head_to_head\"\nslots = {bad}\ncomplete_when = {{ cleared = true }}\n"
+        ))
+        .unwrap_err();
+        assert!(e.contains("between 2 and 8"), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn slots_are_for_head_to_head_only() {
+    let e = with_challenge("id = \"c\"\nkind = \"survival\"\nslots = 2\ncomplete_when = { cleared = true }\n")
+        .unwrap_err();
+    assert!(e.contains("head_to_head only"), "{e}");
+}
+
+#[test]
+fn a_bout_cannot_be_won_by_surviving() {
+    let e = with_challenge(
+        "id = \"c\"\nkind = \"head_to_head\"\nslots = 2\ncomplete_when = { survive_seconds = 30 }\n",
+    )
+    .unwrap_err();
+    assert!(e.contains("survive_seconds is a survival criterion"), "{e}");
+}
+
+#[test]
+fn an_unknown_kind_names_all_three() {
+    let e = with_challenge("id = \"c\"\nkind = \"duel\"\ncomplete_when = { cleared = true }\n")
+        .unwrap_err();
+    assert!(e.contains("head_to_head"), "{e}");
+}
+
 // ------------------------------------------------------------- the game
 
 #[test]

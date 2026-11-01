@@ -298,7 +298,7 @@ impl Flow {
 
     fn server(&mut self, m: ToClient) {
         match m {
-            ToClient::Welcome { player, lobby } => {
+            ToClient::Welcome { player, lobby, .. } => {
                 println!("[lobby] joined {} as {player}", lobby.code);
                 self.player = Some(player.clone());
                 let invite = self.link.as_ref().and_then(|l| l.server.as_ref()).map(|s| link::invite(s, &lobby.code));
@@ -348,7 +348,7 @@ impl Flow {
                 }
                 self.show_lobby(lobby);
             }
-            ToClient::Dealt { round, challenge, kind, seed, limit_frames, players } => {
+            ToClient::Dealt { round, challenge, kind, seed, limit_frames, players, .. } => {
                 println!(
                     "[match] round {round}: {} / {} ({kind:?}), seed {seed}, limit {limit_frames} frames, players {players:?}",
                     challenge.game, challenge.challenge
@@ -493,6 +493,15 @@ impl Flow {
                         "clock": clock, "fps": fps, "events": said,
                     }));
                 }
+            }
+            // Head-to-head (ADR 0036): the client's half of a bout is not
+            // built yet; what the server says is logged so a hand test can
+            // see the brokering happen.
+            ToClient::Sides { round, backing } => {
+                println!("[match] round {round} sides: {backing:?}");
+            }
+            ToClient::Peers { round, peers } => {
+                println!("[match] round {round} peers: {peers:?}");
             }
             ToClient::RoundResult { round, entries, eliminated, standings } => {
                 println!("[match] round {round} result:");
@@ -884,6 +893,7 @@ impl Flow {
             "challenge_kind": match ch.kind {
                 session_api::ChallengeKind::TimeTrial => "Time trial",
                 session_api::ChallengeKind::Survival => "Survival",
+                session_api::ChallengeKind::HeadToHead => "Head-to-head",
             },
             "custom": ch.is_custom(),
         })

@@ -11,6 +11,8 @@
 //! * [`rank`] — how the players who ran one challenge place against each other.
 //! * [`matches`] — a series of challenges: what each round was worth, who is
 //!   out, who stands where, and when it is over (ADR 0026).
+//! * [`bout`] — one head-to-head round: a run per slot on one shared stage,
+//!   and the rules that bind them (ADR 0036).
 //!
 //! Pure (invariant 1). Nothing here reads a file, a clock or a socket, and
 //! nothing here drives a [`StageRunner`](session_api::StageRunner): a run is
@@ -20,11 +22,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bout;
 pub mod deal;
 pub mod matches;
 pub mod rank;
 pub mod run;
 
+pub use bout::Bout;
 pub use deal::{deal, DealError, Dealer, Dealt, Mode};
 pub use matches::{Deal, Entry, Format, Match, MatchError, Round, RoundEntry, Settings, Standing};
 pub use rank::places;

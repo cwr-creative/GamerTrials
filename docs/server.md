@@ -14,6 +14,13 @@ target/release/gamertrials-server --listen 0.0.0.0:7878 --manifests manifests
 That is a LAN server. Players put `host` or `host:port` in Settings ›
 Profile, or paste the lobby's invite, `host[:port]/CODE`.
 
+The same port is also opened for UDP, for head-to-head (ADR 0036): a
+seated player sends a few probes to it so the server learns the address
+their machine reaches the world from, and tells the other slot. Nothing
+else crosses it — the two players then talk to each other directly. `--udp
+<port>` moves it, `--udp off` deals no bouts, and on a host whose firewall
+is open for the listen port, open it for UDP too.
+
 ## Beyond the LAN: behind TLS
 
 The server never holds a certificate (ADR 0033). Put a proxy in front of
@@ -39,6 +46,12 @@ firewall and nothing else. nginx wants `proxy_http_version 1.1` and the
 Players then set `wss://games.example.com` as their server, and invites
 read `wss://games.example.com/CODE`. A port other than 443 is written as
 `wss://games.example.com:8443`.
+
+UDP does not pass through the proxy, so a server behind one that should
+deal bouts listens for probes on its own address and says so: `--udp 7878
+--udp-public games.example.com:7878`, with 7878/udp open on the host.
+Without `--udp-public` a player would probe the proxy's host at the UDP
+port, which answers nothing.
 
 Keep the server running with whatever the host offers — a `systemd` unit
 with `Restart=always` is enough; it holds nothing between lobbies.
