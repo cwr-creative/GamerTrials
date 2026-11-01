@@ -445,6 +445,16 @@ static CORE_PATH: Mutex<Option<CString>> = Mutex::new(None);
 static VARIABLES_DIRTY: AtomicU32 = AtomicU32::new(1);
 /// The core's keyboard-event callback, if it registered one.
 static KEYBOARD_CB: Mutex<Option<unsafe extern "C" fn(bool, c_uint, u32, u16)>> = Mutex::new(None);
+/// Key edges for that callback, oldest first, held until [`deliver_keys`].
+///
+/// They used to be delivered the moment a key changed, which is whenever the
+/// caller sets its input — before the frame, but not at a moment the core
+/// chose. A core that emulates on its own thread (dosbox-pure) takes a
+/// callback event into a queue its thread reads mid-frame, so a key handed
+/// over while the previous frame was still running landed at a point host
+/// timing decided. Held here, they reach the core at the frame boundary, in
+/// order, the way `input_state` is already read at the start of `retro_run`.
+static PENDING_KEYS: Mutex<Vec<(bool, u32)>> = Mutex::new(Vec::new());
 /// Set when the core asks to shut down. `retro_run` after that is undefined,
 /// and a DOS core reaches it the moment the guest program exits — quitting Doom
 /// from its own menu is enough.
@@ -632,24 +642,32 @@ pub fn unhandled_env() -> BTreeMap<u32, u64> {
 }
 
 /// Press a key, as a `RETROK_*` code. Both channels are fed: the held-key set
-/// `input_state` answers from, and the core's own callback if it registered one.
+/// `input_state` answers from, and the core's own callback if it registered
+/// one — the latter at the next [`deliver_keys`].
 pub fn key_down(code: u32) {
     if !lock(&KEYS_DOWN).insert(code) {
         return;
     }
-    let cb = *lock(&KEYBOARD_CB);
-    if let Some(cb) = cb {
-        unsafe { cb(true, code, 0, 0) };
-    }
+    lock(&PENDING_KEYS).push((true, code));
 }
 
 pub fn key_up(code: u32) {
     if !lock(&KEYS_DOWN).remove(&code) {
         return;
     }
+    lock(&PENDING_KEYS).push((false, code));
+}
+
+/// Hand the core's keyboard callback every key edge since the last call, in
+/// order. [`Core::run_frame`] does this first; call it yourself before
+/// anything else that must see the keys as they now are, such as a restore.
+pub fn deliver_keys() {
+    let pending = std::mem::take(&mut *lock(&PENDING_KEYS));
     let cb = *lock(&KEYBOARD_CB);
     if let Some(cb) = cb {
-        unsafe { cb(false, code, 0, 0) };
+        for (down, code) in pending {
+            unsafe { cb(down, code, 0, 0) };
+        }
     }
 }
 
@@ -1357,6 +1375,8 @@ impl Core {
         // one core after another in one process, and the next core's memory
         // map, options and keyboard callback are its own to register.
         lock(&MEMORY_MAP).clear();
+        // Edges meant for the last core's callback are not this one's.
+        lock(&PENDING_KEYS).clear();
         lock(&OPTION_DEFS).clear();
         lock(&OPTION_VALUES).clear();
         lock(&UNHANDLED_ENV).clear();
@@ -1561,6 +1581,7 @@ impl Core {
     }
 
     pub fn run_frame(&mut self) {
+        deliver_keys();
         unsafe { (self.fn_run)() };
     }
 
