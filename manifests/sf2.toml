@@ -1,0 +1,122 @@
+# Street Fighter II Turbo (SNES).
+#
+# The first head-to-head game (ADR 0036): two players on one machine, kept in
+# step by rollback. Every address below was found with the harness's scripted
+# sync test on the shipped entry state — three runs, one with each player
+# fighting an idle opponent and one with both idle — and the two players'
+# addresses mirror each other 0x200 apart. Read docs/games/sf2.md before
+# trusting a number.
+
+schema_version = 3
+
+[game]
+id = "sf2"
+title = "Street Fighter II Turbo"
+console = "snes"
+region = "usa"
+genre = "fighting"
+year = 1993
+framerate = 60.0988
+
+[[rom]]
+id = "base"
+name = "Street Fighter II Turbo (USA) (Rev 1)"
+path = "assets/ROMs/snes/Street Fighter II Turbo (USA) (Rev 1).sfc"
+header = "copier-optional"
+min_bytes = 32768
+# A headerless 2.5 MB file.
+sha1 = "9f6e8f2585e60bd6690c068c692ac97653bae6a6"
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+core_dir = "cores/snes"
+pad_layout = "snes"
+# The machine is shared by saving and restoring Snes9x every frame; proved
+# with `harness --game sf2 --synctest 7200 --slots 2` (ADR 0036).
+netplay = "rollback"
+
+[runner.libretro.memory]
+base = 0x7E0000
+size = 0x20000
+system_ram_bytes = 131072
+prefer = "system_ram"
+default_width = "u8"
+
+# ---------------------------------------------------------------- what to read
+
+# Rounds won this match, per player. Steps by one on a KO or on time-over
+# with more health left; a draw moves neither. Two wins is the match.
+[watch.p1_rounds]
+at = 0x05D0
+[watch.p2_rounds]
+at = 0x07D0
+
+# Health, 176 (0xB0) full, back to full at each round's start.
+[watch.p1_health]
+at = 0x0530
+[watch.p2_health]
+at = 0x0730
+
+# The round timer, in BCD, 0x99 down to 0; one tick is about 30 frames.
+[watch.timer]
+at = 0x18F3
+
+# Rounds played this match, whoever won them.
+[watch.rounds_played]
+at = 0x18DF
+
+[display]
+fields = ["p1_rounds", "p2_rounds", "p1_health", "p2_health", "timer"]
+
+# -------------------------------------------------------------------- rules
+
+# Whose fact each is: a slot, since the machine is shared (ADR 0036).
+[[rule]]
+field = "p1_rounds"
+edge = "increases"
+emit = "count"
+counter = "rounds_won"
+slot = 0
+
+[[rule]]
+field = "p2_rounds"
+edge = "increases"
+emit = "count"
+counter = "rounds_won"
+slot = 1
+
+[[rule]]
+field = "p1_health"
+edge = "decreases"
+emit = "damaged"
+slot = 0
+
+[[rule]]
+field = "p2_health"
+edge = "decreases"
+emit = "damaged"
+slot = 1
+
+# ------------------------------------------------------------------- stages
+
+[[stage]]
+id = "vs"
+name = "Versus"
+# The first frames of a two-player match, both at full health, no rounds won.
+rom = "base"
+entry = { state = "assets/states/sf2_vs.state" }
+
+# --------------------------------------------------------------- challenges
+
+[[challenge]]
+id = "best-of-three"
+name = "Best of three"
+stage = "vs"
+kind = "head_to_head"
+slots = 2
+complete_when = { counts = { rounds_won = 2 } }
+goal = "Win two rounds!"
+# Three rounds at the timer's pace are about two and a half minutes.
+limit_seconds = 240

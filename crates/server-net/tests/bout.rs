@@ -43,7 +43,7 @@ slot = 1
 id = "vs"
 rom = "base"
 [[challenge]]
-id = "best-of-three"
+id = "fight-best-of-three"
 stage = "vs"
 kind = "head_to_head"
 slots = 2
@@ -118,7 +118,7 @@ fn won(frame: u64) -> protocol::Event {
 }
 
 fn outcome(ending: Ending, frames: u64) -> RunOutcome {
-    RunOutcome { challenge: "best-of-three".into(), kind: protocol::Kind::HeadToHead, ending, frames, attempts: 1 }
+    RunOutcome { challenge: "fight-best-of-three".into(), kind: protocol::Kind::HeadToHead, ending, frames, attempts: 1 }
 }
 
 /// A lobby of two with the fight enabled and dealt: the server's UDP
@@ -150,7 +150,7 @@ fn dealt() -> (SocketAddr, Vec<Peer>, Vec<String>, u64) {
         ..Default::default()
     }));
     host.send(&ToServer::Enable {
-        challenges: vec![protocol::ChallengeRef { game: "fight".into(), challenge: "best-of-three".into() }],
+        challenges: vec![protocol::ChallengeRef { game: "fight".into(), challenge: "fight-best-of-three".into() }],
     });
     host.until(|m| match m {
         ToClient::Lobby(l) if l.can_start && l.players.len() == 2 => Some(()),
@@ -248,7 +248,7 @@ fn a_bout_is_played_over_udp_between_two_machines() {
     let spec = {
         let catalog = catalog();
         let lib = catalog.game("fight").unwrap();
-        lib.challenge("best-of-three").unwrap().spec(&lib.game.id)
+        lib.challenge("fight-best-of-three").unwrap().spec(&lib.game.id)
     };
 
     // Probe from the socket the bout will run on; the server's answer

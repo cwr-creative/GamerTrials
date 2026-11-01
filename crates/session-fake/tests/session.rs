@@ -179,7 +179,9 @@ fn library() -> Vec<ChallengeSpec> {
         if path.extension().is_some_and(|e| e == "toml") {
             let text = fs::read_to_string(&path).unwrap();
             let lib = Library::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            specs.extend(lib.specs());
+            // A bout is not played on a runner of one; the lobby deals one
+            // only by its own toggle (ADR 0036). These tests are solo runs.
+            specs.extend(lib.specs().into_iter().filter(|c| c.kind != ChallengeKind::HeadToHead));
         }
     }
     assert!(!specs.is_empty(), "no manifests in {}", dir.display());

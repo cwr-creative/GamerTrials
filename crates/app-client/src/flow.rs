@@ -86,6 +86,11 @@ pub struct Auto {
     pub format: Option<protocol::Format>,
     pub games: Option<Vec<String>>,
     pub limit: Option<f64>,
+    /// `--h2h`: allow head-to-head challenges in the lobby (ADR 0036).
+    pub head_to_head: bool,
+    /// `--script <seed>`: press random buttons instead of reading the pad,
+    /// for a bout played by two clients with nobody at either keyboard.
+    pub script: Option<u64>,
 }
 
 /// The round being played, as the overlay needs to describe it.
@@ -346,6 +351,10 @@ impl Flow {
                     settings.default_limit_seconds = l;
                     changed = true;
                 }
+                if self.auto.head_to_head {
+                    settings.allow_head_to_head = true;
+                    changed = true;
+                }
                 let only: Option<Vec<ChallengeRef>> = self.auto.games.as_ref().map(|games| {
                     lobby.enabled.iter().filter(|r| games.contains(&r.game)).cloned().collect()
                 });
@@ -438,6 +447,7 @@ impl Flow {
                     video,
                     display,
                     bout,
+                    script: self.auto.script,
                 };
                 self.emit(json!({ "kind": "loading", "round": round }));
                 match &self.game {
@@ -515,6 +525,11 @@ impl Flow {
                     c.playing.retain(|p| p != &player);
                     let playing = c.playing.clone();
                     self.emit(json!({ "kind": "playing", "round": round, "players": playing }));
+                    // This player's bout is over by the server's word: watch
+                    // whoever is still going, if anyone is.
+                    if player == me && self.spectate.is_none() && !playing.is_empty() {
+                        self.start_spectating(round, playing);
+                    }
                 }
                 if let Some(s) = self.spectate.as_mut().filter(|s| s.round == round) {
                     s.players.retain(|p| p != &player);
@@ -703,7 +718,10 @@ impl Flow {
                     "frame": result.frames,
                     "text": result.ending.to_string(),
                 }));
-                // Done, and others are not: watch them (ADR 0032).
+                // Done, and others are not: watch them (ADR 0032). In a bout
+                // the server settles later than this judge does, and a watch
+                // before it has is refused; `PlayerFinished` starts it then.
+                let bout = self.dealt_kind(round) == Some(Kind::HeadToHead);
                 let me = self.player.clone().unwrap_or_default();
                 let others: Vec<String> = self
                     .current
@@ -711,7 +729,7 @@ impl Flow {
                     .filter(|c| c.round == round)
                     .map(|c| c.playing.iter().filter(|p| **p != me).cloned().collect())
                     .unwrap_or_default();
-                if !others.is_empty() {
+                if !others.is_empty() && !bout {
                     self.start_spectating(round, others);
                 }
             }
@@ -769,6 +787,13 @@ impl Flow {
 
     fn is_current(&self, round: u64) -> bool {
         self.current.as_ref().is_some_and(|c| c.round == round)
+    }
+
+    /// The kind of the challenge dealt for `round`, from the library.
+    fn dealt_kind(&self, round: u64) -> Option<Kind> {
+        let c = self.dealt.get(&round)?;
+        let lib = self.library.catalog.game(&c.game)?;
+        Some(lib.challenge(&c.challenge)?.kind.into())
     }
 
     /// Where a bout's probes go: the server's own word, with `:port` meaning
@@ -940,6 +965,7 @@ impl Flow {
         let settings_applied = self.auto.mode.map_or(true, |m| m == lobby.settings.mode)
             && self.auto.format.map_or(true, |f| f == lobby.settings.format)
             && self.auto.limit.map_or(true, |l| l == lobby.settings.default_limit_seconds)
+            && (!self.auto.head_to_head || lobby.settings.allow_head_to_head)
             && self.auto.games.as_ref().map_or(true, |g| lobby.enabled.iter().all(|r| g.contains(&r.game)));
         if self.auto.start && !self.auto_started && lobby.can_start && settings_applied {
             self.auto_started = true;

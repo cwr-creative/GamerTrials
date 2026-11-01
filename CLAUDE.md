@@ -237,15 +237,17 @@ the packets with a frame header, a hello handshake before the bout goes,
 and reliable packets resent until acknowledged and delivered in order; the
 client takes that path when the manifest says `netplay = "packets"`, and
 claims the server's verdict for the slot it cannot judge itself.
-**Not hand-tested**: no shipped manifest carries a bout. Next is an SF2
-manifest (a dump and a running two-player state are in `assets/`; its
-addresses are found with the harness: a rounds-won counter per slot, a
-`stage_exited` rule, `netplay = "rollback"`), then two clients on one
-machine through `gamertrials-server`, then two machines over the internet
-with ggrs's numbers recorded against ADR 0036. Doom's deathmatch needs a
-bundle of its own whose `[autoexec]` runs `IPXSETUP` (`docs/games/doom.md`);
-the shipped bundle warps to E1M1 alone, so no `deathmatch` stage ships
-until that bundle exists.
+**The first bout is played**: `manifests/sf2.toml` (Street Fighter II
+Turbo, `best-of-three`, its addresses found with the harness's scripted
+sync test and RAM log — `docs/games/sf2.md`) on two clients on one machine
+through `gamertrials-server`, with `--script` pressing the buttons: both
+found each other through the rendezvous, judged the same verdict on the
+same frame, and the server agreed. **Not yet**: three players with a
+backer, two machines over the internet with ggrs's numbers recorded against
+ADR 0036 (which stays Proposed until then), and a bout with hands on the
+pads. Doom's deathmatch needs a bundle of its own whose `[autoexec]` runs
+`IPXSETUP` (`docs/games/doom.md`); the shipped bundle warps to E1M1 alone,
+so no `deathmatch` stage ships until that bundle exists.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`

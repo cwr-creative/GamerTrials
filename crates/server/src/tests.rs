@@ -770,7 +770,7 @@ slot = 1
 id = "vs"
 rom = "base"
 [[challenge]]
-id = "best-of-three"
+id = "fight-best-of-three"
 stage = "vs"
 kind = "head_to_head"
 slots = 2
@@ -796,7 +796,7 @@ fn won(frame: u64) -> protocol::Event {
 }
 
 fn outcome(ending: Ending, frames: u64) -> RunOutcome {
-    RunOutcome { challenge: "best-of-three".into(), kind: protocol::Kind::HeadToHead, ending, frames, attempts: 1 }
+    RunOutcome { challenge: "fight-best-of-three".into(), kind: protocol::Kind::HeadToHead, ending, frames, attempts: 1 }
 }
 
 fn fetch<T>(t: &Table, who: usize, f: impl Fn(&ToClient) -> Option<T>) -> Vec<T> {
@@ -822,7 +822,7 @@ impl Table {
             allow_head_to_head: true,
             ..Default::default()
         });
-        t.send(0, ToServer::Enable { challenges: vec![r("fight", "best-of-three")] });
+        t.send(0, ToServer::Enable { challenges: vec![r("fight", "fight-best-of-three")] });
         t
     }
 
@@ -1065,6 +1065,6 @@ fn a_bout_needs_the_toggle_a_rendezvous_and_enough_players() {
     plain.join("ann", ace);
     plain.join("bob", ace);
     plain.settings(LobbySettings { allow_head_to_head: true, mode: Mode::Combo, ..Default::default() });
-    plain.send(0, ToServer::Enable { challenges: vec![r("fight", "best-of-three")] });
+    plain.send(0, ToServer::Enable { challenges: vec![r("fight", "fight-best-of-three")] });
     assert!(!plain.lobby(0).can_start, "no rendezvous, no bout");
 }

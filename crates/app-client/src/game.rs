@@ -50,6 +50,9 @@ pub struct Load {
     /// A bout (ADR 0036): this player's slot on the shared machine, and how
     /// to find the others.
     pub bout: Option<BoutLoad>,
+    /// Press random buttons from this seed instead of reading the pad, for a
+    /// hand test with nobody at the keyboard.
+    pub script: Option<u64>,
 }
 
 pub struct BoutLoad {
@@ -223,6 +226,25 @@ struct Loaded {
     watchers: u32,
     /// The next picture sent starts a group: a watcher just arrived.
     want_key: bool,
+    /// Random buttons, when the round was loaded with a script.
+    script: Option<(u64, u32)>,
+}
+
+/// The same scripted pad the harness's sync test presses: a random set of
+/// buttons held for a while, never start or select.
+fn scripted_pad(state: &mut (u64, u32), frame: u64) -> u32 {
+    state.0 = state.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = state.0;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let r = (z ^ (z >> 31)) ^ frame;
+    if r % 12 == 0 {
+        let bits = (r >> 8) as u32;
+        let dpad = 1u32 << (libretro::JOY_UP + ((bits >> 4) & 3));
+        let face = bits & ((1 << libretro::JOY_B) | (1 << libretro::JOY_Y) | (1 << libretro::JOY_A) | (1 << libretro::JOY_X));
+        state.1 = dpad | face;
+    }
+    state.1
 }
 
 impl Loaded {
@@ -539,6 +561,7 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             last_seq: 0,
             watchers: 0,
             want_key: false,
+            script: l.script.map(|seed| (seed, 0)),
         },
         artifact,
     ))
@@ -716,6 +739,17 @@ fn local_address(udp: &Udp, rendezvous: Option<SocketAddr>) -> String {
 fn bout_prepare(l: &mut Loaded, reports: &Sender<Report>) {
     let Some(b) = l.bout.as_mut() else { return };
     if l.done {
+        // Over on this side; the other machine may still want this one's
+        // last inputs to confirm the same frame, and only a poll resends.
+        match &mut l.machine {
+            Machine::Bout(s) => {
+                s.poll();
+            }
+            Machine::Relay(r) => {
+                r.poll();
+            }
+            _ => {}
+        }
         return;
     }
     if b.loaded_sent {
@@ -935,7 +969,12 @@ fn step_bout(
     l.next_deadline += l.frame_time;
     window.update();
 
-    let bits = if in_front { keys::joypad(&l.input, pad) } else { 0 };
+    let frame_now = l.machine.runner().frame() + 1;
+    let bits = match l.script.as_mut() {
+        Some(state) => scripted_pad(state, frame_now),
+        None if in_front => keys::joypad(&l.input, pad),
+        None => 0,
+    };
     let round = l.round;
     let streaming = l.streaming();
     let watchers = l.watchers;
@@ -957,9 +996,6 @@ fn step_bout(
             .filter(|e| e.slot.is_none() || e.slot == Some(b.slot))
             .map(|e| e.event.clone())
             .collect();
-        if !mine.is_empty() || c.frame % HEARTBEAT == 0 {
-            let _ = reports.send(Report::Frame { round, frame: c.frame, events: mine });
-        }
         let mut verdicts = Vec::new();
         for slot in 0..b.slots {
             let theirs: Vec<SessionEvent> = c
@@ -970,8 +1006,15 @@ fn step_bout(
                 .collect();
             verdicts.extend(b.judge.observe(Slot(slot), c.frame, &theirs));
         }
-        if let Some((_, r)) = verdicts.into_iter().find(|(s, _)| *s == b.slot) {
-            mine_done = Some(r);
+        let settled = verdicts.into_iter().find(|(s, _)| *s == b.slot).map(|(_, r)| r);
+        // The frame a verdict settles on is always reported, as a solo run's
+        // is: the server's judge holds another slot's completion until this
+        // slot has reported past it (ADR 0036).
+        if !mine.is_empty() || c.frame % HEARTBEAT == 0 || settled.is_some() {
+            let _ = reports.send(Report::Frame { round, frame: c.frame, events: mine });
+        }
+        if settled.is_some() {
+            mine_done = settled;
             break;
         }
     }

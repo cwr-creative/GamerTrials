@@ -70,6 +70,15 @@ GAME:
     --digest-log <PATH>
                      Write each frame's digest checksum, one line a frame, so two
                      machines on the same script can be diffed
+    --ram-log <PATH> With --synctest: append the whole system RAM every
+                     --ram-every frames (default 30), raw, for finding an
+                     address by what moved while the script played
+    --script-slots <N>
+                     With --synctest: only the first N slots get scripted
+                     input; the rest hold still. Default: every slot
+    --idle-slots <LIST>
+                     With --synctest: these slots (comma-separated, from 0)
+                     hold still whatever --script-slots says
 
 OPTIONS:
     --core <PATH>    libretro core library. Default: the single *_libretro.dll
@@ -191,6 +200,10 @@ struct Args {
     check: usize,
     script: u64,
     digest_log: Option<PathBuf>,
+    ram_log: Option<PathBuf>,
+    ram_every: u64,
+    script_slots: Option<u8>,
+    idle_slots: Vec<u8>,
 }
 
 fn main() {
@@ -221,13 +234,19 @@ fn synctest(mut runner: LibretroRunner, spec: &StageSpec, frames: u64, args: &Ar
         Some(p) => Some(fs::File::create(p).map_err(|e| format!("{}: {e}", p.display()))?),
         None => None,
     };
+    let mut ram_log = match &args.ram_log {
+        Some(p) => Some(fs::File::create(p).map_err(|e| format!("{}: {e}", p.display()))?),
+        None => None,
+    };
+    let scripted = args.script_slots.unwrap_or(slots).min(slots);
     let mut rng = Script::new(args.script);
     let mut held: Vec<u32> = vec![0; usize::from(slots)];
     let mut tallies: std::collections::BTreeMap<String, u32> = Default::default();
     let started = Instant::now();
     for frame in 1..=frames {
         for (i, h) in held.iter_mut().enumerate() {
-            *h = rng.pad(i as u8, frame, *h);
+            let idle = (i as u8) >= scripted || args.idle_slots.contains(&(i as u8));
+            *h = if idle { 0 } else { rng.pad(i as u8, frame, *h) };
         }
         let inputs: Vec<(Slot, SlotInput)> =
             held.iter().enumerate().map(|(i, h)| (Slot(i as u8), SlotInput(*h))).collect();
@@ -256,6 +275,15 @@ fn synctest(mut runner: LibretroRunner, spec: &StageSpec, frames: u64, args: &Ar
             if let Some(f) = log.as_mut() {
                 use std::io::Write;
                 let _ = writeln!(f, "{} {:016x}", c.frame, fnv1a(&session.machine().digest()));
+            }
+            if let Some(f) = ram_log.as_mut() {
+                if c.frame % args.ram_every.max(1) == 0 {
+                    use std::io::Write;
+                    if let Some(ram) = session.machine().system_ram() {
+                        let _ = f.write_all(&c.frame.to_le_bytes());
+                        let _ = f.write_all(ram);
+                    }
+                }
             }
         }
         if session.machine().shutdown_requested() {
@@ -1262,6 +1290,10 @@ fn parse_args() -> Result<Option<Args>, String> {
         check: 3,
         script: 1,
         digest_log: None,
+        ram_log: None,
+        ram_every: 30,
+        script_slots: None,
+        idle_slots: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -1334,6 +1366,24 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.script = parsed.map_err(|_| format!("--script wants a number, got {v}"))?;
             }
             "--digest-log" => args.digest_log = Some(PathBuf::from(value("--digest-log")?)),
+            "--ram-log" => args.ram_log = Some(PathBuf::from(value("--ram-log")?)),
+            "--ram-every" => {
+                let v = value("--ram-every")?;
+                args.ram_every = v.parse().map_err(|_| format!("--ram-every wants a frame count, got {v}"))?;
+            }
+            "--script-slots" => {
+                let v = value("--script-slots")?;
+                args.script_slots = Some(v.parse().map_err(|_| format!("--script-slots wants a count, got {v}"))?);
+            }
+            "--idle-slots" => {
+                for part in value("--idle-slots")?.split(',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    args.idle_slots.push(part.parse().map_err(|_| format!("--idle-slots wants slot numbers, got {part}"))?);
+                }
+            }
             "--no-probe" => args.probe = false,
             "--list-addrs" => args.list_addrs = true,
             "--list-stages" => args.list_stages = true,
