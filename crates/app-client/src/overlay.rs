@@ -105,7 +105,11 @@ impl Overlay {
                 let _ = self.window.close();
                 return;
             };
-            if last != Some(rect) {
+            // An X11 window manager may put a window other than where it was
+            // asked, a window not yet mapped above all: there, where the
+            // overlay is counts, not where it was last sent.
+            let moved = last != Some(rect) || (cfg!(target_os = "linux") && window_rect(self.hwnd) != Some(rect));
+            if moved {
                 last = Some(rect);
                 if self.place(rect).is_err() {
                     return;

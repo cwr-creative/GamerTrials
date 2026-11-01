@@ -289,14 +289,12 @@ fn main_hwnd(app: &tauri::AppHandle) -> Option<isize> {
 fn main() {
     // Every window of ours is an X11 window on Linux, XWayland under a
     // Wayland desktop: Wayland lets no program place its window over
-    // another's, and the overlay is exactly that (ADR 0035). WebKitGTK's
-    // DMA-BUF renderer draws a blank page on several XWayland drivers; the
-    // overlay is too light to miss it. A player's own setting of either wins.
+    // another's, and the overlay is exactly that (ADR 0035). A player's own
+    // setting wins. WebKitGTK's DMA-BUF renderer is left alone: turning it
+    // off stops the transparent overlay clearing what it drew before.
     #[cfg(target_os = "linux")]
-    for (var, value) in [("GDK_BACKEND", "x11"), ("WEBKIT_DISABLE_DMABUF_RENDERER", "1")] {
-        if std::env::var_os(var).is_none() {
-            std::env::set_var(var, value);
-        }
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        std::env::set_var("GDK_BACKEND", "x11");
     }
     let args = match parse_args() {
         Ok(a) => a,

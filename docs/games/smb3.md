@@ -17,9 +17,11 @@ completion rule.
    - `nestopia_libretro.dll`
 
    From the RetroArch core downloader, or
-   <https://buildbot.libretro.com/nightly/windows/x86_64/latest/>. The
-   directory must hold exactly one `*_libretro.dll`; ambiguity is an error
-   rather than a guess.
+   <https://buildbot.libretro.com/nightly/windows/x86_64/latest/> (and
+   `linux/x86_64/latest/`). The directory must hold exactly one
+   `*_libretro.dll`, or one `*_libretro.so` on Linux; ambiguity is an error
+   rather than a guess. The repository carries both, from the same night's
+   build.
 3. **The ROM**, at `assets/ROMs/Super Mario Bros. 3 (USA) (Rev 1).nes`.
 
 ## Run

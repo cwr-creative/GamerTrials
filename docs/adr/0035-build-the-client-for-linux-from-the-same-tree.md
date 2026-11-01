@@ -75,16 +75,22 @@ webview.
 
 ## Consequences
 
-**Not yet hand-tested on a Linux desktop.** The workspace builds and every
-test passes on Ubuntu 22.04 (under WSL), and the menu draws in an X11 window
-under WSLg; the overlay's placement, focus and pass-through,
-fullscreen, and mouse capture under XWayland are what the first match on
-Linux has to check.
+**Played under WSLg, not yet on a Linux desktop.** The workspace builds and
+every test passes on Ubuntu 22.04 under WSL. Under WSLg a round of each game
+plays with the overlay transparent over it, its clock running, and `--spike`
+finds it aligned with the game window through a move and a resize. Not yet
+seen: a real desktop's window manager, fullscreen, mouse capture, sound (WSL
+has no ALSA device), and a match against a Windows player.
 
-**Linux cores are owed.** `cores/` holds Windows DLLs only. The Linux builds
-must be the same versions as the DLLs beside them: an entry state is a
-savestate (ADR 0002), and a core of another version may refuse it or load it
-differently, which in a race is a different game.
+**Both platforms run one build of each core.** An entry state is a savestate
+(ADR 0002), and a core of another version may refuse it or load it
+differently, which in a race is a different game. The buildbot keeps only
+the latest nightly, so the port moved the Windows DLLs to the same night's
+build as the Linux ones: Mesen 0.9.9, Snes9x 1.63 `fae2fea` (from
+`9e63727`), DOSBox-pure 1.0-preview7 (from preview6). Every raced stage,
+run headless for 600 frames, printed the same events on the old DLLs, the
+new DLLs and the new `.so` files, and Doom's eight pinned options are all
+still offered. A core is updated on both platforms at once, or not at all.
 
 **What is weaker on Linux:**
 
@@ -97,6 +103,8 @@ differently, which in a race is a different game.
 - `--spike` measures placement and focus but cannot inject its key, which
   needs XTest.
 
-**The DMA-BUF renderer is off.** WebKitGTK's DMA-BUF renderer draws a blank
-page under several XWayland drivers, so the client sets
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` unless the player has set it.
+**WebKitGTK's DMA-BUF renderer stays on.** The usual advice for a blank
+WebKitGTK page under XWayland is `WEBKIT_DISABLE_DMABUF_RENDERER=1`; under
+WSLg that left the transparent overlay unable to clear what it had drawn,
+so each new line of text landed on the last. A player who needs it can still
+set it.

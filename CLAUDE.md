@@ -190,11 +190,13 @@ Open, roughly in order:
   the wire.
 - **Phase C owes:** the two-machine match (`docs/server.md`), on which
   **ADR 0013 stays Proposed**. Head-to-head comes last.
-- **Linux (ADR 0035, Proposed) is written but not hand-tested.** The overlay,
-  fullscreen and mouse capture under XWayland are unproven, and `cores/`
-  has no `.so` builds yet — they must match the DLLs' versions, since entry
-  states are savestates. `bash tools/setup-ubuntu.sh` installs what a build
-  needs; `bash tools/package.sh` is `package.ps1`'s twin.
+- **Linux (ADR 0035, Proposed) plays under WSLg, not yet on a desktop.**
+  A round of each game runs with the overlay aligned over it; a real window
+  manager, fullscreen, mouse capture, sound and a match against a Windows
+  player are unseen. `cores/` holds each core for both platforms from one
+  nightly — update both at once, since entry states are savestates. `bash
+  tools/setup-ubuntu.sh` installs what a build needs; `bash
+  tools/package.sh` is `package.ps1`'s twin.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
   zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
   a member overlay — wait on it (ADR 0020).

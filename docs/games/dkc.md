@@ -11,12 +11,17 @@ rule.
    Visual Studio Build Tools with "Desktop development with C++". Every
    dependency here is pure Rust.
 2. **A SNES core**, in `cores/snes/`:
-   - `snes9x_libretro.dll` — what this was developed against (1.63)
+   - `snes9x_libretro.dll` (`.so` on Linux) — what this runs on: 1.63,
+     developed against commit `9e63727` and moved with the Linux port to
+     `fae2fea`, with every entry state checked to replay frame for frame
    - `bsnes_libretro.dll` / `bsnes_mercury_*` — more accurate, heavier
    - `snes9x2010_libretro.dll` — lighter
 
    From the RetroArch core downloader, or
-   <https://buildbot.libretro.com/nightly/windows/x86_64/latest/>.
+   <https://buildbot.libretro.com/nightly/windows/x86_64/latest/> (and
+   `linux/x86_64/latest/`). The repository carries both platforms' builds,
+   taken from the same night's build: an entry state is a savestate, and
+   both machines in a race must run the same core.
 
    The SNES core lives in its own folder rather than in `cores/` alongside the
    NES core, so "the single `*_libretro.dll`" stays unambiguous now that the
