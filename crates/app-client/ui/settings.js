@@ -486,9 +486,13 @@
     else if (tab === 'video') renderVideo();
     else {
       $('s-body').innerHTML = '<table class="form"><tr><td>Display name</td><td><input id="pname" maxlength="24" value="' + esc(S.name) + '"></td></tr>' +
-        '<tr><td>Server</td><td><input id="pserver" maxlength="255" spellcheck="false" placeholder="host:port or wss://host" value="' + esc(S.server || '') + '"></td></tr></table>' +
+        '<tr><td>Server</td><td><input id="pserver" maxlength="255" spellcheck="false" placeholder="host:port or wss://host" value="' + esc(S.server || '') + '"></td></tr>' +
+        '<tr><td>Stream</td><td><input id="pstream" type="number" min="100" max="2000" step="50" value="' + S.stream_kbps + '"> kbit/s</td></tr></table>' +
         '<p class="note">The <code>gamertrials-server</code> that Host game opens a lobby on, and that a bare invite code joins. ' +
         'Leave it blank to play on this machine alone. Without a port it means 7878, or 443 for <code>wss://</code>, which is a server behind TLS (ADR 0033).</p>' +
+        '<p class="note">Stream is the picture you send a player watching you, 100 to 2000 kbit/s; 500 unless you change it. ' +
+        'Higher is sharper and needs more of your upload. A link that cannot carry it drops pictures rather than falling behind, ' +
+        'so too high costs a watcher smoothness, never the match. Takes effect from the next picture, even while someone watches.</p>' +
         '<p class="note">Settings are saved to <code>' + esc(settingsPath || 'nowhere — no config directory') + '</code>. They never leave this machine.</p>';
     }
   }
@@ -583,6 +587,8 @@
       S.name = t.value;
     } else if (t.id === 'pserver') {
       S.server = t.value.trim();
+    } else if (t.id === 'pstream') {
+      S.stream_kbps = parseInt(t.value) || 500;
     } else return;
     save();
   };

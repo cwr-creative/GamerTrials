@@ -33,6 +33,11 @@ use session_libretro::manifest::{Controller, PadLayout};
 pub const MAX_SLOTS: usize = 3;
 /// How many inputs one chord may hold down together.
 pub const MAX_CHORD: usize = 4;
+/// The spectator picture's bitrate when none is set, and the range a setting
+/// is held to, in kbit/s: under 100 a retro picture smears; over 2000 buys
+/// nothing at these resolutions that a home uplink would notice.
+pub const DEFAULT_STREAM_KBPS: u32 = 500;
+pub const STREAM_KBPS: (u32, u32) = (100, 2000);
 
 pub const SETTINGS_VERSION: u32 = 1;
 
@@ -462,6 +467,10 @@ pub struct Settings {
     /// and a bare invite code joins on (ADR 0030). Empty: Host plays on this
     /// machine alone.
     pub server: String,
+    /// The picture this player sends a watcher, in kbit/s (ADR 0034). Only
+    /// this player's uplink and their watchers' downlinks feel it; a link
+    /// that cannot carry it drops pictures rather than falling behind.
+    pub stream_kbps: u32,
     pub input: InputSettings,
     /// By core id: `mesen`, `snes9x`, `dosbox_pure`.
     pub cores: BTreeMap<String, Layer>,
@@ -476,6 +485,7 @@ impl Default for Settings {
             settings_version: SETTINGS_VERSION,
             name: "Player".into(),
             server: String::new(),
+            stream_kbps: DEFAULT_STREAM_KBPS,
             input: InputSettings::default(),
             cores: BTreeMap::new(),
             games: BTreeMap::new(),
@@ -721,7 +731,8 @@ impl Settings {
             self.name = "Player".into();
         }
         self.server = self.server.trim().chars().take(255).collect();
-        let clamp = |v: f32, lo: f32, hi: f32, default: f32| if v.is_finite() { v.clamp(lo, hi) } else { default };
+        self.stream_kbps = self.stream_kbps.clamp(STREAM_KBPS.0, STREAM_KBPS.1);
+        let clamp =|v: f32, lo: f32, hi: f32, default: f32| if v.is_finite() { v.clamp(lo, hi) } else { default };
         self.input.deadzone = clamp(self.input.deadzone, 0.1, 0.95, 0.5);
         self.input.mouse_sensitivity = clamp(self.input.mouse_sensitivity, 0.1, 10.0, 1.0);
         let trim_binds = |b: &mut Binds, family: Family| {
@@ -1044,6 +1055,7 @@ mod tests {
         s.input.keys.insert(RetroButton::A, vec![Input::Key(1); 9].into_iter().chain((2..9).map(Input::Key)).collect());
         s.input.pad.insert(RetroButton::B, vec![Input::Key(1), Input::Pad(PadButton::South)]);
         s.video.global.window_scale = 40;
+        s.stream_kbps = 9;
         s.games.insert("gone".into(), Layer::default());
         s.games.entry("doom".into()).or_default().pad_keys.insert(RetroButton::B, "f2".into());
         s.sanitize();
@@ -1052,6 +1064,7 @@ mod tests {
         assert_eq!(s.input.keys[&RetroButton::A][0], Input::Key(1), "duplicates dropped first");
         assert_eq!(s.input.pad[&RetroButton::B], [Input::Pad(PadButton::South)], "a key is not a pad input");
         assert_eq!(s.video.global.window_scale, 6);
+        assert_eq!(s.stream_kbps, STREAM_KBPS.0);
         assert!(s.games.is_empty(), "an empty layer and an unknown key are both dropped");
     }
 

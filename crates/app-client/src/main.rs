@@ -239,6 +239,8 @@ fn get_settings(state: State<'_, Shared>) -> serde_json::Value {
 fn put_settings(state: State<'_, Shared>, settings: Settings) -> Result<Settings, String> {
     let mut s = settings;
     s.sanitize();
+    // From the next picture on, even mid-stream.
+    stream::set_kbps(s.stream_kbps);
     *state.settings.lock().unwrap() = s.clone();
     if let Some(path) = state.settings_path.lock().unwrap().as_ref() {
         s.save(path)?;
@@ -372,6 +374,7 @@ fn main() {
                         eprintln!("[settings] {w}");
                     }
                     println!("[settings] {}", path.display());
+                    stream::set_kbps(loaded.stream_kbps);
                     *settings.lock().unwrap() = loaded;
                     let state = app.state::<Shared>();
                     *state.settings_warning.lock().unwrap() = warning;

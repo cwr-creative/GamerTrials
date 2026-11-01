@@ -17,7 +17,7 @@
 //! gap and the next one still decodes. Together they cost about 0.6 Mbit/s;
 //! a link that carries less drops what it cannot send (ADR 0034).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -28,11 +28,19 @@ use openh264::formats::{ArgbSliceU32, YUVBuffer};
 use openh264::{OpenH264API, Timestamp};
 
 use crate::game::Report;
+use crate::settings::DEFAULT_STREAM_KBPS;
 
-/// What the picture costs the sender's uplink. Half a megabit carries a
+/// What the picture costs the sender's uplink, in kbit/s: Settings ›
+/// Profile's, half a megabit unless the player changes it. That carries a
 /// retro picture at its own rate; a home uplink has room for it, and a
 /// phone's drops what it cannot carry rather than falling behind.
-const BITRATE: u32 = 500_000;
+static KBPS: AtomicU32 = AtomicU32::new(DEFAULT_STREAM_KBPS);
+
+/// For the settings: the bitrate from the next picture on. A change starts
+/// the encoder afresh, on a key frame.
+pub fn set_kbps(kbps: u32) {
+    KBPS.store(kbps, Ordering::Release);
+}
 
 /// A key frame every two seconds at 60 Hz: the longest a watcher who lost
 /// pictures waits for the next one that decodes on its own.
@@ -164,6 +172,8 @@ impl Streamer {
 struct Video {
     encoder: Option<Encoder>,
     started: Option<Instant>,
+    /// The bitrate `encoder` was made for, in kbit/s.
+    kbps: u32,
 }
 
 impl Video {
@@ -181,11 +191,16 @@ impl Video {
             cropped = p.pixels.chunks(p.width).take(h).flat_map(|row| row[..w].iter().copied()).collect();
             &cropped
         };
+        let kbps = KBPS.load(Ordering::Acquire);
+        if kbps != self.kbps {
+            self.encoder = None;
+        }
         let enc = match self.encoder.as_mut() {
             Some(e) => e,
             None => {
+                self.kbps = kbps;
                 let config = EncoderConfig::new()
-                    .bitrate(BitRate::from_bps(BITRATE))
+                    .bitrate(BitRate::from_bps(kbps * 1000))
                     .max_frame_rate(FrameRate::from_hz(60.0))
                     .intra_frame_period(IntraFramePeriod::from_num_frames(KEY_EVERY))
                     .rate_control_mode(RateControlMode::Bitrate);
