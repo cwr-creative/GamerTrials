@@ -397,8 +397,11 @@ impl StageRunner for LibretroRunner {
         libretro::JOYPAD.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // A threaded core restored mid-frame resumes the rest of that frame on
-        // the restored machine, from wherever host timing had got it to.
+        // the restored machine, from wherever host timing had got it to. The
+        // keys just released reach it now, at that boundary and before the
+        // restore, as they always have.
         self.settle();
+        libretro::deliver_keys();
 
         match &spec.entry {
             EntryPoint::State(key) => {
