@@ -1,0 +1,20 @@
+[package]
+name = "head-to-head"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "One bout on one shared machine (ADR 0036): rollback over a SharedRunner on ggrs, or a relay of a Networked machine's packets, over a link between the slots."
+
+# A consumer of `session-api` like `challenge-core` is, and held to a fence
+# of its own: no emulator, no protocol, no server. It is handed a machine
+# and a link, and the only socket it opens is the UDP one between the slots.
+[dependencies]
+session-api = { path = "../session-api" }
+ggrs = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+session-fake = { path = "../session-fake" }
+challenge-core = { path = "../challenge-core" }

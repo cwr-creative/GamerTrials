@@ -19,8 +19,8 @@
 //!
 //! As a [`Networked`] machine it keeps no state of its own in step with
 //! anyone; it hands out what it was asked to send and counts what it was
-//! handed, `Counted { counter: "packets" }`, so a relay can be seen to carry
-//! bytes both ways.
+//! handed, `Counted { counter: "packets" }` on the next frame, so a relay
+//! can be seen to carry bytes both ways.
 
 use std::collections::BTreeSet;
 
@@ -52,6 +52,7 @@ pub struct FakeMachine {
     peers: BTreeSet<Slot>,
     inbox: Vec<(Slot, Vec<u8>)>,
     outbox: Vec<Packet>,
+    /// Delivered since the last frame; reported on the next one.
     packets: u32,
 }
 
@@ -85,6 +86,13 @@ impl FakeMachine {
     /// From `frame` on, this machine is wrong, the way a desynced core is.
     pub fn diverge_from(mut self, frame: u64) -> FakeMachine {
         self.diverge_from = Some(frame);
+        self
+    }
+
+    /// Entered at its own stage, for a test that wants one in one line.
+    pub fn entered(mut self) -> FakeMachine {
+        let stage = self.stage.clone();
+        self.enter(&stage).expect("its own stage");
         self
     }
 
@@ -149,6 +157,13 @@ impl FakeMachine {
             self.events.push(SlotEvent {
                 slot: None,
                 event: SessionEvent::StageExited { frame, reason: ExitReason::Quit },
+            });
+        }
+        if self.packets > 0 {
+            let count = std::mem::take(&mut self.packets);
+            self.events.push(SlotEvent {
+                slot: self.slot,
+                event: SessionEvent::Counted { frame, counter: "packets".into(), count },
             });
         }
         if replaying {
@@ -259,9 +274,6 @@ impl Networked for FakeMachine {
     fn deliver(&mut self, from: Slot, bytes: &[u8]) {
         self.inbox.push((from, bytes.to_vec()));
         self.packets += 1;
-        let event = SessionEvent::Counted { frame: self.frame, counter: "packets".into(), count: 1 };
-        self.plain.push(event.clone());
-        self.events.push(SlotEvent { slot: self.slot, event });
     }
 
     fn outgoing(&mut self) -> Vec<Packet> {
@@ -361,6 +373,7 @@ mod tests {
         assert!(m.outgoing().is_empty());
         m.deliver(Slot(1), b"yo");
         assert_eq!(m.received(), [(Slot(1), b"yo".to_vec())]);
-        assert!(matches!(m.events[0].event, SessionEvent::Counted { ref counter, .. } if counter == "packets"));
+        let events = m.advance().unwrap();
+        assert!(matches!(events[0], SessionEvent::Counted { ref counter, count: 1, .. } if counter == "packets"));
     }
 }

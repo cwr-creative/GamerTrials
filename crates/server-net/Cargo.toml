@@ -15,10 +15,12 @@ transport = { path = "../transport" }
 tungstenite = "0.29.0"
 
 [dev-dependencies]
-# The tests play the client's part on scripted telemetry, over real sockets.
+# The tests play the client's part on scripted telemetry, over real sockets —
+# a bout's on two fake machines over real UDP, through the rendezvous.
 session-api = { path = "../session-api" }
 session-fake = { path = "../session-fake" }
 challenge-core = { path = "../challenge-core" }
+head-to-head = { path = "../head-to-head" }
 
 [[bin]]
 name = "gamertrials-server"

@@ -1,15 +1,20 @@
 //! A bout brokered over real sockets (ADR 0036): two players' probes reach
 //! the server's UDP side, each is told where the other is, and the round
-//! is judged from both players' frames. The players' own link to each other
-//! is the `head-to-head` crate's and is not opened here; the facts are sent
-//! as a rollback session would confirm them.
+//! is judged from both players' frames. The first test sends the facts as
+//! a rollback session would confirm them; the second opens the players'
+//! own link — two `Rollback` sessions on fake machines over real UDP, found
+//! through the real rendezvous — and plays the bout through both judges.
 
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use challenge_core::Bout;
 use challenge_library::Catalog;
+use head_to_head::{Rollback, Settings, State, Udp};
 use protocol::{Ending, FileReport, Format, LobbySettings, Mode, RunOutcome, ToClient, ToServer, Wire};
+use session_api::{AssetKey, EntryPoint, GameId, Slot, SlotInput, StageId, StageRunner, StageSpec};
+use session_fake::FakeMachine;
 use transport::Rules;
 use tungstenite::{Message, WebSocket};
 
@@ -116,8 +121,11 @@ fn outcome(ending: Ending, frames: u64) -> RunOutcome {
     RunOutcome { challenge: "best-of-three".into(), kind: protocol::Kind::HeadToHead, ending, frames, attempts: 1 }
 }
 
-#[test]
-fn two_players_are_brokered_and_judged_over_the_wire() {
+/// A lobby of two with the fight enabled and dealt: the server's UDP
+/// address, the two players in slot order with their names, and the round.
+/// Who sits in which slot is the seed's to say, so the test takes what it
+/// is dealt.
+fn dealt() -> (SocketAddr, Vec<Peer>, Vec<String>, u64) {
     let catalog = catalog();
     let hash = format!("{:016x}", catalog.hash());
     let (addr, udp) = server_net::spawn_with_rendezvous("127.0.0.1:0", catalog, Rules::DEFAULT).unwrap();
@@ -154,15 +162,20 @@ fn two_players_are_brokered_and_judged_over_the_wire() {
         _ => None,
     });
     assert_eq!(slots.len(), 2);
+    let mut peers = vec![host, guest];
+    if slots[0] == "guest" {
+        peers.reverse();
+    }
+    (udp, peers, slots, round)
+}
+
+#[test]
+fn two_players_are_brokered_and_judged_over_the_wire() {
+    let (udp, mut peers, slots, round) = dealt();
 
     // Each player probes the server from the socket it will play on, and
     // says where it thinks it is.
     let sockets: Vec<UdpSocket> = (0..2).map(|_| UdpSocket::bind("127.0.0.1:0").unwrap()).collect();
-    let mut peers: Vec<&mut Peer> = vec![&mut host, &mut guest];
-    peers.sort_by_key(|p| {
-        let name = if p.inbox.iter().any(|m| matches!(m, ToClient::Welcome { player, .. } if player == "host")) { "host" } else { "guest" };
-        slots.iter().position(|s| s == name).unwrap()
-    });
     for (i, p) in peers.iter_mut().enumerate() {
         let token = 7000 + i as u64;
         sockets[i].send_to(&token.to_le_bytes(), udp).unwrap();
@@ -207,4 +220,146 @@ fn two_players_are_brokered_and_judged_over_the_wire() {
         p.until(|m| matches!(m, ToClient::MatchOver { .. }).then_some(()));
         assert!(!p.inbox.iter().any(|m| matches!(m, ToClient::Error { .. })), "{:?}", p.inbox);
     }
+}
+
+fn stage() -> StageSpec {
+    StageSpec {
+        game: GameId("fight".into()),
+        stage: StageId("vs".into()),
+        content: AssetKey("fake:fight".into()),
+        entry: EntryPoint::Named("vs".into()),
+    }
+}
+
+/// Slot 0 wins rounds on frames 100 and 300, slot 1 on 200: a pad press
+/// on the frame before each, with no input delay.
+fn script(slot: Slot, next_frame: u64) -> SlotInput {
+    let wins: &[u64] = if slot.0 == 0 { &[100, 300] } else { &[200] };
+    SlotInput(u32::from(wins.contains(&next_frame)))
+}
+
+/// The whole of a bout, the way the client will play it: the players'
+/// machines found through the rendezvous, kept in step by rollback over
+/// UDP, each client judging provisionally from the confirmed facts and
+/// claiming what it saw, and the server agreeing with both.
+#[test]
+fn a_bout_is_played_over_udp_between_two_machines() {
+    let (server_udp, mut peers, slots, round) = dealt();
+    let spec = {
+        let catalog = catalog();
+        let lib = catalog.game("fight").unwrap();
+        lib.challenge("best-of-three").unwrap().spec(&lib.game.id)
+    };
+
+    // Probe from the socket the bout will run on; the server's answer
+    // names each machine by what its probe came from and what it said.
+    let mut links: Vec<Option<Udp>> = Vec::new();
+    for (i, p) in peers.iter_mut().enumerate() {
+        let udp = Udp::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let token = 9000 + i as u64;
+        udp.probe(server_udp, token).unwrap();
+        p.send(&ToServer::Endpoint { round, token, local: udp.local_addr().unwrap().to_string() });
+        links.push(Some(udp));
+    }
+    for (i, p) in peers.iter_mut().enumerate() {
+        let got = p.until(|m| match m {
+            ToClient::Peers { round: r, peers } if *r == round => Some(peers.clone()),
+            _ => None,
+        });
+        let udp = links[i].as_mut().unwrap();
+        for peer in got.iter().filter(|peer| usize::from(peer.slot) != i) {
+            let candidates = peer.candidates.iter().map(|c| c.parse().unwrap()).collect();
+            udp.peer(Slot(peer.slot), candidates);
+        }
+    }
+
+    let settings = Settings { input_delay: 0, check_every: 10, ..Default::default() };
+    let mut sessions: Vec<Rollback<FakeMachine>> = links
+        .into_iter()
+        .enumerate()
+        .map(|(i, udp)| {
+            let mut m = FakeMachine::new(stage(), 2);
+            m.enter(&stage()).unwrap();
+            Rollback::connect(m, udp.unwrap(), Slot(i as u8), 2, settings).unwrap()
+        })
+        .collect();
+
+    // Prepared only once the machines have found each other (ADR 0036).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let states: Vec<State> = sessions.iter_mut().map(|s| s.poll().clone()).collect();
+        if states.iter().all(|s| *s == State::Live) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never synchronized: {states:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for p in peers.iter_mut() {
+        p.send(&ToServer::Prepared { round, artifact: "same".into() });
+    }
+    for p in peers.iter_mut() {
+        p.until(|m| matches!(m, ToClient::Go { round: r } if *r == round).then_some(()));
+    }
+
+    let mut bouts: Vec<Bout> = (0..2).map(|_| {
+        let mut b = Bout::new(spec.clone(), Some(6000)).unwrap();
+        b.enter();
+        b
+    }).collect();
+    let mut claimed = [false, false];
+    for _ in 0..20_000 {
+        if claimed.iter().all(|c| *c) {
+            break;
+        }
+        for i in 0..2 {
+            if claimed[i] {
+                continue;
+            }
+            let me = Slot(i as u8);
+            let next = sessions[i].frame() + 1;
+            let confirmed = sessions[i].pump(&[(me, script(me, next))]).unwrap();
+            for c in confirmed {
+                // My own facts go to the server; every slot's to my judge.
+                let mine: Vec<protocol::Event> = c
+                    .events
+                    .iter()
+                    .filter(|e| e.slot.is_none() || e.slot == Some(me))
+                    .map(|e| (&e.event).into())
+                    .collect();
+                if !mine.is_empty() || c.frame % 15 == 0 {
+                    peers[i].send(&ToServer::Frame { round, frame: c.frame, events: mine });
+                }
+                let mut verdicts = Vec::new();
+                for s in 0..2u8 {
+                    let theirs: Vec<session_api::SessionEvent> = c
+                        .events
+                        .iter()
+                        .filter(|e| e.slot.is_none() || e.slot == Some(Slot(s)))
+                        .map(|e| e.event.clone())
+                        .collect();
+                    verdicts.extend(bouts[i].observe(Slot(s), c.frame, &theirs));
+                }
+                if let Some((_, result)) = verdicts.into_iter().find(|(s, _)| *s == me) {
+                    peers[i].send(&ToServer::Finished { round, outcome: (&result).into() });
+                    claimed[i] = true;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    assert!(claimed.iter().all(|c| *c), "{:?}", sessions.iter().map(|s| s.stats()).collect::<Vec<_>>());
+
+    for (i, p) in peers.iter_mut().enumerate() {
+        let entries = p.until(|m| match m {
+            ToClient::RoundResult { entries, .. } => Some(entries.clone()),
+            _ => None,
+        });
+        let of = |name: &str| entries.iter().find(|e| e.player == name).unwrap().clone();
+        assert_eq!(of(&slots[0]).outcome, outcome(Ending::Completed, 300), "{i}: {entries:?}");
+        assert_eq!(of(&slots[1]).outcome, outcome(Ending::Beaten, 300), "{i}: {entries:?}");
+        p.until(|m| matches!(m, ToClient::MatchOver { .. }).then_some(()));
+        assert!(!p.inbox.iter().any(|m| matches!(m, ToClient::Error { .. })), "{:?}", p.inbox);
+    }
+    let stats: Vec<_> = sessions.iter().map(|s| s.stats()).collect();
+    println!("bout over udp: {stats:?}");
 }

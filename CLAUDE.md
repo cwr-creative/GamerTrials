@@ -115,6 +115,7 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Relays a watched player's stream to their watchers, and refuses a watch from a player still playing (ADR 0032). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `server-net` | The server process (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (a thread per socket, each running `transport`'s loop, and per lobby), each lobby a `server::Server`. Also the UDP side a head-to-head player probes so the server can tell the other slot where they are (ADR 0036); it carries nothing else. Held to the same dependency fence as `server`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
+| `head-to-head` | One bout on one shared machine (ADR 0036). `Rollback` drives a `SharedRunner` through `ggrs`, answering its save, restore and advance requests and holding each frame's facts until every slot's input for it is final; `Relay` carries a `Networked` machine's packets. Both over a `Link` between the slots: `Udp` between two players' machines (candidates tried until one answers), `Channels` in a test. No emulator, no protocol, no server. |
 
 ## Conventions
 
@@ -197,16 +198,21 @@ v5 carries `Back`, `Endpoint`, `PeerLost`, `Sides` and `Peers`; the server
 deals bouts, brokers the two players' addresses from their UDP probes,
 closes the backing window on a tick, judges the bout and records backers;
 `server-net` opens the UDP side (`--udp`, `--udp-public`) and ticks each
-lobby. Tested on literal frames in both arrival orders, and over real
-sockets in `server-net/tests/bout.rs`. Not yet: the `head-to-head` crate
-(rollback on `ggrs` over a `SharedRunner`, the UDP link between the two
-machines), `session-libretro`'s `SharedRunner` (per-port input, snapshot
-with the watcher's state, no picture or sound on a replay, `netplay =
-"rollback"`), the harness's sync test, an SF2 manifest, the client's bout
-flow and backing sheet, and Doom over the netpacket interface (`Networked`,
-`netplay = "packets"`). The client logs `Sides` and `Peers` and plays no
-bout; no shipped manifest carries one, so nothing changes for a player
-until the rest lands.
+lobby. Also done: the `head-to-head` crate — `Rollback` on `ggrs` over a
+`SharedRunner`, holding each frame's facts until confirmed, with a
+checksum over the machine's digest every few frames; `Relay` for a
+`Networked` machine; `Udp` between the two machines, trying every candidate
+address until one answers; `Channels` for tests. Tested with literal frames
+in both arrival orders, a sync test on `FakeMachine`, two sessions over a
+jittery channel agreeing frame for frame, a diverged machine caught, a cut
+link lost, and a whole bout played over real UDP through the real
+rendezvous in `server-net/tests/bout.rs`. Not yet: `session-libretro`'s
+`SharedRunner` (per-port input, snapshot with the watcher's state, no
+picture or sound on a replay, `netplay = "rollback"`), the harness's sync
+test, an SF2 manifest, the client's bout flow and backing sheet, and Doom
+over the netpacket interface (`Networked`, `netplay = "packets"`). The
+client logs `Sides` and `Peers` and plays no bout; no shipped manifest
+carries one, so nothing changes for a player until the rest lands.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`
