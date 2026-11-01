@@ -206,13 +206,25 @@ address until one answers; `Channels` for tests. Tested with literal frames
 in both arrival orders, a sync test on `FakeMachine`, two sessions over a
 jittery channel agreeing frame for frame, a diverged machine caught, a cut
 link lost, and a whole bout played over real UDP through the real
-rendezvous in `server-net/tests/bout.rs`. Not yet: `session-libretro`'s
-`SharedRunner` (per-port input, snapshot with the watcher's state, no
-picture or sound on a replay, `netplay = "rollback"`), the harness's sync
-test, an SF2 manifest, the client's bout flow and backing sheet, and Doom
-over the netpacket interface (`Networked`, `netplay = "packets"`). The
-client logs `Sides` and `Peers` and plays no bout; no shipped manifest
-carries one, so nothing changes for a player until the rest lands.
+rendezvous in `server-net/tests/bout.rs`. And `session-libretro` is a
+`SharedRunner`: one pad per port, a snapshot that carries the frame, the
+watcher's edge state and the core's state (saved in the same-instance
+context so a core may take its fast path), no picture or sound on a replayed
+frame, and `netplay = "rollback"` in `[runner.libretro]` refused on a
+threaded or keyboard core and on one whose serialization declares itself
+incomplete; a `[[rule]]` says whose fact it is with `slot`. **The two
+console cores are proved:** `harness --synctest` rolls a stage back on
+every frame with no network and compares checksums, and Snes9x and Mesen
+both pass 1800 frames at three and at seven replays per advance, with two
+processes on one script writing the same digests on every frame
+(`docs/games/dkc.md`, `smb3.md`, with the cost per frame). Not yet: an SF2
+manifest (needs a dump and its addresses found with the harness: a
+rounds-won counter per slot, a `stage_exited` rule, an entry state at the
+character select, `netplay = "rollback"`), the client's bout flow and
+backing sheet, and Doom over the netpacket interface (`Networked`, `netplay
+= "packets"`). The client logs `Sides` and `Peers` and plays no bout; no
+shipped manifest carries one, so nothing changes for a player until the
+rest lands.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`

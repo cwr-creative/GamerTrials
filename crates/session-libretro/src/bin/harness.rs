@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 
 use challenge_core::{Next, Run};
-use session_api::{ChallengeSpec, Presentable, SessionEvent, StageRunner, StageSpec};
+use head_to_head::{Rollback, Settings, State};
+use session_api::{ChallengeSpec, Presentable, SessionEvent, SharedRunner, Slot, SlotInput, StageRunner, StageSpec};
 use session_libretro::libretro::{self, RETRO_MEMORY_IDS};
 use session_libretro::manifest::{Challenge, Controller, Manifest};
 use session_libretro::memory::{AddressSpace, Width};
@@ -57,6 +58,18 @@ GAME:
     --list-challenges
                      Print every challenge and what completes it, and exit
     --list-addrs     Print the address table with its sources, and exit
+    --synctest <N>   Prove the core rolls back exactly (ADR 0036): run N frames
+                     headless through a rollback session with no network, which
+                     restores and replays a few frames on every advance and
+                     compares checksums. Scripted input on every slot. Exits 2
+                     on a mismatch
+    --slots <N>      Pads to plug for --synctest, when the manifest declares no
+                     bout. Default: the biggest bout's, else 1
+    --check <N>      Frames the sync test replays on every advance. Default 3
+    --script <SEED>  Seed for the scripted input (decimal, or 0x hex). Default 1
+    --digest-log <PATH>
+                     Write each frame's digest checksum, one line a frame, so two
+                     machines on the same script can be diffed
 
 OPTIONS:
     --core <PATH>    libretro core library. Default: the single *_libretro.dll
@@ -173,6 +186,11 @@ struct Args {
     audio: bool,
     frames: Option<u64>,
     capture: Option<PathBuf>,
+    synctest: Option<u64>,
+    slots: Option<u8>,
+    check: usize,
+    script: u64,
+    digest_log: Option<PathBuf>,
 }
 
 fn main() {
@@ -180,6 +198,125 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+/// The core, rolled back on every frame with no network and checked against
+/// itself: what a manifest is proved on before its game is dealt as a bout
+/// (ADR 0036). Every slot gets scripted input from `--script`, so a second
+/// machine on the same script derives the same digests, which `--digest-log`
+/// writes out for a diff.
+fn synctest(mut runner: LibretroRunner, spec: &StageSpec, frames: u64, args: &Args, fps: f64) -> Result<(), String> {
+    runner.enter(spec).map_err(|e| e.to_string())?;
+    if let Some(n) = args.slots {
+        runner.plug(n);
+    }
+    let slots = runner.slots().max(1);
+    let settings = Settings { input_delay: 0, fps: fps.round().max(1.0) as usize, ..Default::default() };
+    println!(
+        "[synctest] {frames} frames on {slots} slot(s), replaying {} on every advance, script {}",
+        args.check, args.script
+    );
+    let mut session = Rollback::synctest(runner, slots, args.check, settings).map_err(|e| e.to_string())?;
+    let mut log = match &args.digest_log {
+        Some(p) => Some(fs::File::create(p).map_err(|e| format!("{}: {e}", p.display()))?),
+        None => None,
+    };
+    let mut rng = Script::new(args.script);
+    let mut held: Vec<u32> = vec![0; usize::from(slots)];
+    let mut tallies: std::collections::BTreeMap<String, u32> = Default::default();
+    let started = Instant::now();
+    for frame in 1..=frames {
+        for (i, h) in held.iter_mut().enumerate() {
+            *h = rng.pad(i as u8, frame, *h);
+        }
+        let inputs: Vec<(Slot, SlotInput)> =
+            held.iter().enumerate().map(|(i, h)| (Slot(i as u8), SlotInput(*h))).collect();
+        let confirmed = session.pump(&inputs).map_err(|e| e.to_string())?;
+        if let State::Desynced { frame } = session.state() {
+            eprintln!("[synctest] the machine did not replay frame {frame} the way it ran it");
+            std::process::exit(2);
+        }
+        for c in confirmed {
+            for e in &c.events {
+                match &e.event {
+                    SessionEvent::StageCleared { .. } | SessionEvent::StageExited { .. } => {
+                        println!("{}  ({})", e.event, e.slot.map_or("everyone".to_string(), |s| s.to_string()));
+                    }
+                    other => {
+                        if let Some((name, n)) = other.tally() {
+                            let key = match e.slot {
+                                Some(s) => format!("{name} [{s}]"),
+                                None => name.to_string(),
+                            };
+                            *tallies.entry(key).or_default() += n;
+                        }
+                    }
+                }
+            }
+            if let Some(f) = log.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, "{} {:016x}", c.frame, fnv1a(&session.machine().digest()));
+            }
+        }
+        if session.machine().shutdown_requested() {
+            println!("[core] the game asked to shut down at frame {frame}");
+            break;
+        }
+    }
+    let stats = session.stats();
+    let secs = started.elapsed().as_secs_f64();
+    println!(
+        "[synctest] ok: {} frames, {} restores, {} replayed, {:.1} frames/s of host time",
+        stats.frame,
+        stats.rollbacks,
+        stats.replayed,
+        stats.frame as f64 / secs.max(1e-9)
+    );
+    if !tallies.is_empty() {
+        let shown: Vec<String> = tallies.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        println!("[synctest] tallies: {}", shown.join(", "));
+    }
+    Ok(())
+}
+
+/// Scripted pads for a sync test: each slot holds a random set of buttons
+/// for a random while, from a seed, never start or select — a pause menu is
+/// not the point.
+struct Script(u64);
+
+impl Script {
+    fn new(seed: u64) -> Script {
+        Script(seed)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn pad(&mut self, slot: u8, frame: u64, held: u32) -> u32 {
+        let r = self.next() ^ (u64::from(slot) << 32) ^ frame;
+        // Change about every 12 frames.
+        if r % 12 != 0 {
+            return held;
+        }
+        let bits = (r >> 8) as u32;
+        let dpad = 1u32 << (libretro::JOY_UP + ((bits >> 4) & 3));
+        let face = bits & ((1 << libretro::JOY_B) | (1 << libretro::JOY_Y) | (1 << libretro::JOY_A) | (1 << libretro::JOY_X));
+        (dpad | face) & !((1 << libretro::JOY_SELECT) | (1 << libretro::JOY_START))
+    }
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 fn run() -> Result<(), String> {
@@ -337,6 +474,10 @@ fn run() -> Result<(), String> {
     let av = runner.av_info();
     let (width, height) =
         (av.geometry.base_width as usize, av.geometry.base_height as usize);
+
+    if let Some(n) = args.synctest {
+        return synctest(runner, &spec, n, &args, av.timing.fps);
+    }
 
     // Headless: enter the stage, run a fixed number of frames as fast as the
     // core will go, and print what fired. No window, no sound, no pacing — the
@@ -1116,6 +1257,11 @@ fn parse_args() -> Result<Option<Args>, String> {
         audio: true,
         frames: None,
         capture: None,
+        synctest: None,
+        slots: None,
+        check: 3,
+        script: 1,
+        digest_log: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -1166,6 +1312,28 @@ fn parse_args() -> Result<Option<Args>, String> {
                     Some(v.parse().map_err(|_| format!("--frames wants a count, got {v}"))?);
             }
             "--capture" => args.capture = Some(PathBuf::from(value("--capture")?)),
+            "--synctest" => {
+                let v = value("--synctest")?;
+                args.synctest =
+                    Some(v.parse().map_err(|_| format!("--synctest wants a frame count, got {v}"))?);
+            }
+            "--slots" => {
+                let v = value("--slots")?;
+                args.slots = Some(v.parse().map_err(|_| format!("--slots wants a count, got {v}"))?);
+            }
+            "--check" => {
+                let v = value("--check")?;
+                args.check = v.parse().map_err(|_| format!("--check wants a frame count, got {v}"))?;
+            }
+            "--script" => {
+                let v = value("--script")?;
+                let parsed = match v.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16),
+                    None => v.parse(),
+                };
+                args.script = parsed.map_err(|_| format!("--script wants a number, got {v}"))?;
+            }
+            "--digest-log" => args.digest_log = Some(PathBuf::from(value("--digest-log")?)),
             "--no-probe" => args.probe = false,
             "--list-addrs" => args.list_addrs = true,
             "--list-stages" => args.list_stages = true,

@@ -78,6 +78,14 @@ impl Sim {
         }
         out
     }
+
+    fn state(&self) -> Vec<u8> {
+        self.watcher.state()
+    }
+
+    fn restore(&mut self, state: &[u8]) {
+        self.watcher.restore(state).unwrap();
+    }
 }
 
 fn cleared(events: &[SessionEvent]) -> Option<u64> {
@@ -893,4 +901,40 @@ fn an_animal_buddy_is_a_pickup_only_on_the_way_in() {
     assert_eq!(items(&g.tick(2)), vec![("animal_buddy".to_string(), 1)]);
     g.put("animal", 0x00);
     assert!(items(&g.tick(3)).is_empty());
+}
+
+// ------------------------------------------------------------- rollback
+
+/// A rollback restores the observer with the machine (ADR 0036): an edge the
+/// watcher saw before the restore is seen again after it — the frame is being
+/// run again — and an edge it had not reached is not pre-empted.
+#[test]
+fn the_watcher_state_round_trips_and_a_restored_edge_fires_again() {
+    let mut sim = Sim::new(dkc(), 0x20000);
+    sim.put("lives", 5);
+    sim.tick(1);
+    let before = sim.state();
+    sim.put("lives", 4);
+    let fired = sim.tick(2);
+    assert!(fired.iter().any(|e| matches!(e, SessionEvent::Died { frame: 2 })), "{fired:?}");
+    // Guessed wrong: back to frame 1, then the same frame again.
+    sim.restore(&before);
+    sim.put("lives", 4);
+    let again = sim.tick(2);
+    assert_eq!(again, fired, "the restored observer sees the same edge once more");
+    assert!(sim.idle(3, 10).is_empty());
+    // And its own state after that is the state it had the first time.
+    let after = sim.state();
+    sim.restore(&before);
+    sim.put("lives", 4);
+    sim.tick(2);
+    assert_eq!(sim.state(), after);
+}
+
+#[test]
+fn a_watcher_refuses_another_watchers_state() {
+    let mut a = Sim::new(dkc(), 0x20000);
+    let b = Sim::new(smb3(), 0x800);
+    a.tick(1);
+    assert!(a.watcher.restore(&b.state()).is_err() || a.state().len() != b.state().len());
 }

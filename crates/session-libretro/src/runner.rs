@@ -11,15 +11,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use session_api::{
-    AssetKey, EntryPoint, Presentable, RunnerError, SessionEvent, StageRunner, StageSpec,
-    VideoFrame,
+    AssetKey, EntryPoint, Presentable, RunnerError, SessionEvent, SharedRunner, Slot, SlotEvent,
+    SlotInput, Snapshot, StageRunner, StageSpec, VideoFrame,
 };
 
 use crate::libretro::{
     self, Core, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_KEYBOARD, RETRO_MEMORY_SAVE_RAM,
     RETRO_MEMORY_SYSTEM_RAM, VIDEO,
 };
-use crate::manifest::{Controller, Manifest};
+use crate::manifest::{Controller, Manifest, Netplay};
 use crate::prep::Content;
 use crate::statebind;
 use crate::watch::Watcher;
@@ -32,6 +32,10 @@ pub struct LibretroRunner {
     /// Whatever `advance` last observed. Held here because [`StageRunner`]
     /// hands back a borrow rather than an allocation per frame.
     events: Vec<SessionEvent>,
+    /// The same, each tagged with whose it is, for a shared machine.
+    slot_events: Vec<SlotEvent>,
+    /// How many pads are plugged: one, or a bout's slots (ADR 0036).
+    ports: u8,
     av: libretro::SystemAvInfo,
     /// The content, kept so a `Named` entry can re-load it. A DOS bundle is a
     /// few megabytes and a console ROM less; holding it costs nothing next to
@@ -146,6 +150,22 @@ impl LibretroRunner {
             Controller::Keyboard => RETRO_DEVICE_KEYBOARD,
         };
         core.load_game(&rom_path, &rom, device)?;
+        // A machine that can be shared seats its biggest bout's players, each
+        // on a port of their own (ADR 0036). A core that calls its own state
+        // incomplete cannot host one: rollback would restore a machine that
+        // is not the one it saved.
+        let mut ports = 1;
+        if manifest.libretro.netplay == Some(Netplay::Rollback) {
+            ports = manifest.max_slots();
+            core.plug_ports(ports);
+            if libretro::serialization_quirks() & libretro::QUIRK_INCOMPLETE != 0 {
+                return Err(format!(
+                    "{} says netplay = \"rollback\", but the core declares its serialization \
+                     incomplete, which rollback cannot be built on (ADR 0036)",
+                    manifest.title
+                ));
+            }
+        }
 
         let av = core.av_info();
         println!(
@@ -206,6 +226,8 @@ impl LibretroRunner {
             watcher,
             frame: 0,
             events: Vec::new(),
+            slot_events: Vec::new(),
+            ports,
             av,
             rom,
             rom_path,
@@ -374,7 +396,117 @@ impl LibretroRunner {
         // The watcher borrows RAM out of the core, so what it produces is
         // copied before the core is touched again.
         let observed = self.watcher.tick(ram, self.frame);
+        let start = self.events.len();
         self.events.extend_from_slice(observed);
+        let slots: Vec<Option<Slot>> = self.watcher.last_slots().to_vec();
+        self.slot_events.extend(
+            self.events[start..].iter().zip(slots).map(|(e, s)| SlotEvent { slot: s, event: e.clone() }),
+        );
+    }
+
+    /// One frame of the machine, observed: what `advance` does, for every
+    /// caller that advances.
+    fn step(&mut self) {
+        self.events.clear();
+        self.slot_events.clear();
+        self.frame += 1;
+        if self.manifest.libretro.settle.is_zero() {
+            self.run_core_frame();
+            self.observe();
+        } else {
+            // A threaded core's `retro_run` shows the frame that finished
+            // before it was called and starts the next before returning, so
+            // straight after it memory is moving. The frame it is about to
+            // show is the one that holds still now, once settled: read that,
+            // then let the next one start — with this frame's input landing
+            // at the frame boundary rather than wherever the thread had got
+            // to. The facts are the picture's, as they are for a console.
+            self.settle();
+            self.observe();
+            self.run_core_frame();
+        }
+        self.fresh = false;
+    }
+
+    /// Plug this many pads, for a sync test on a manifest that declares no
+    /// bout. Port 0 keeps its device.
+    pub fn plug(&mut self, ports: u8) {
+        self.core.plug_ports(ports);
+        self.ports = ports.clamp(1, libretro::MAX_PORTS);
+    }
+}
+
+/// `RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE`: a state that stays in
+/// this session and this address space, which a core may make fast.
+const SAVESTATE_SAME_INSTANCE: u32 = 1;
+
+impl SharedRunner for LibretroRunner {
+    fn slots(&self) -> u8 {
+        self.ports
+    }
+
+    fn set_input(&mut self, slot: Slot, input: SlotInput) {
+        libretro::set_joypad(slot.0, input.0);
+    }
+
+    fn advance_slots(&mut self, replaying: bool) -> Result<&[SlotEvent], RunnerError> {
+        libretro::set_replaying(replaying);
+        // The watcher's own log is a player's running commentary; a replay is
+        // not the player's.
+        let log = self.watcher.log;
+        if replaying {
+            self.watcher.log = false;
+        }
+        self.step();
+        self.watcher.log = log;
+        libretro::set_replaying(false);
+        Ok(&self.slot_events)
+    }
+
+    fn snapshot(&mut self) -> Result<Snapshot, RunnerError> {
+        self.settle();
+        libretro::set_savestate_context(SAVESTATE_SAME_INSTANCE);
+        let state = self.core.save_state();
+        libretro::set_savestate_context(0);
+        let state = state.map_err(RunnerError)?;
+        let observer = self.watcher.state();
+        let mut bytes = Vec::with_capacity(8 + 4 + observer.len() + state.len());
+        bytes.extend_from_slice(&self.frame.to_le_bytes());
+        bytes.extend_from_slice(&(observer.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&observer);
+        bytes.extend_from_slice(&state);
+        Ok(Snapshot(bytes))
+    }
+
+    fn restore(&mut self, snapshot: &Snapshot) -> Result<(), RunnerError> {
+        let b = &snapshot.0;
+        if b.len() < 12 {
+            return Err(RunnerError("snapshot is too short to be one of this runner's".into()));
+        }
+        let frame = u64::from_le_bytes(b[..8].try_into().expect("8 bytes"));
+        let n = u32::from_le_bytes(b[8..12].try_into().expect("4 bytes")) as usize;
+        let observer = b.get(12..12 + n).ok_or_else(|| RunnerError("snapshot is short".into()))?;
+        let state = &b[12 + n..];
+        self.settle();
+        libretro::set_savestate_context(SAVESTATE_SAME_INSTANCE);
+        let loaded = self.core.load_state(state);
+        libretro::set_savestate_context(0);
+        loaded.map_err(RunnerError)?;
+        self.watcher.restore(observer).map_err(RunnerError)?;
+        self.frame = frame;
+        self.events.clear();
+        self.slot_events.clear();
+        self.last_frame = Some(Instant::now());
+        Ok(())
+    }
+
+    fn digest(&self) -> Vec<u8> {
+        // What the facts are read from, and the observer that reads them:
+        // the spike proved these exact across machines; the core's own
+        // state blob carries headers and host buffers it did not.
+        let mut out = self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]).to_vec();
+        out.extend(self.watcher.state());
+        out
     }
 }
 
@@ -395,7 +527,7 @@ impl StageRunner for LibretroRunner {
         // a stage that starts with the player walking into a wall is not the
         // same stage for the next person.
         libretro::keys_clear();
-        libretro::JOYPAD.store(0, std::sync::atomic::Ordering::Relaxed);
+        libretro::pads_clear();
 
         // A threaded core restored mid-frame resumes the rest of that frame on
         // the restored machine, from wherever host timing had got it to. The
@@ -496,29 +628,13 @@ impl StageRunner for LibretroRunner {
         // (ADR 0005). Boot frames are before the stage, so they are not in it.
         self.frame = 0;
         self.events.clear();
+        self.slot_events.clear();
         self.events.push(SessionEvent::StageEntered { frame: 0, stage: spec.stage.clone() });
         Ok(())
     }
 
     fn advance(&mut self) -> Result<&[SessionEvent], RunnerError> {
-        self.events.clear();
-        self.frame += 1;
-        if self.manifest.libretro.settle.is_zero() {
-            self.run_core_frame();
-            self.observe();
-        } else {
-            // A threaded core's `retro_run` shows the frame that finished
-            // before it was called and starts the next before returning, so
-            // straight after it memory is moving. The frame it is about to
-            // show is the one that holds still now, once settled: read that,
-            // then let the next one start — with this frame's input landing
-            // at the frame boundary rather than wherever the thread had got
-            // to. The facts are the picture's, as they are for a console.
-            self.settle();
-            self.observe();
-            self.run_core_frame();
-        }
-        self.fresh = false;
+        self.step();
         Ok(&self.events)
     }
 

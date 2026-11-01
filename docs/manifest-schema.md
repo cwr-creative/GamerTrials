@@ -174,6 +174,7 @@ controller = "pad"             # optional, default "pad"; "pad" | "keyboard"
 pad_layout = "snes"            # "nes" | "snes"; only with controller = "pad"
 boot_seconds = 16.0            # optional; required by a `named` entry point
 settle_ms = 5                  # optional; only for a core that runs on its own thread
+netplay = "rollback"           # "rollback" | "packets"; required by a head_to_head challenge
 ```
 
 `controller` says how port 0 is driven.
@@ -210,6 +211,21 @@ on it, only whether the frames counted are the same on every machine — and it
 must be less than a frame, or a paced client could not keep the game's rate.
 It depends on the pinned cycles, which is why the manifest says it. A console
 manifest omits it.
+
+`netplay` says how this game's machine is shared when a `head_to_head`
+challenge is dealt (ADR 0036), and a manifest with such a challenge must say
+it. **`rollback`**: the client saves the core every frame and restores it
+when its guess about the other player's input was wrong, so the core's state
+must be exact and cheap — the console cores are; it is refused beside a
+`settle_ms` (a core on its own thread cannot be saved and restored every
+frame) or `controller = "keyboard"` (a shared machine's slots are pads), and
+a core that declares its own serialization incomplete is refused at load.
+The machine seats the biggest bout's `slots`, one pad per port. Prove a core
+before dealing on it: `harness --game <name> --synctest 1800 --slots 2`
+rolls it back on every frame and compares checksums. **`packets`**: the core
+brings its own network and keeps itself in step — dosbox-pure's emulated IPX
+driver, under which a DOS game's own netcode runs — and the client only
+carries its packets.
 
 ### `[runner.libretro.options]`
 

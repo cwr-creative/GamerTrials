@@ -124,6 +124,10 @@ struct LibretroDoc {
     /// Host milliseconds, not emulated time: see [`LibretroConfig::settle`].
     #[serde(default)]
     settle_ms: Option<u64>,
+    /// How a head-to-head machine is shared: `"rollback"` or `"packets"`
+    /// (ADR 0036). Required when any challenge is head-to-head.
+    #[serde(default)]
+    netplay: Option<String>,
     /// Core options this game is pinned to. Checked against what the core
     /// publishes once it has published it; an unknown key is an error.
     #[serde(default)]
@@ -261,6 +265,10 @@ struct RuleDoc {
     objective: Option<String>,
     #[serde(default)]
     log: Option<String>,
+    /// Head-to-head: whose fact this is, a slot from 0; absent is
+    /// everyone's (ADR 0036).
+    #[serde(default)]
+    slot: Option<u8>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -392,6 +400,8 @@ pub struct Rule {
     pub if_marked: Option<String>,
     pub emit: Emit,
     pub log: Option<String>,
+    /// Whose fact this is on a shared machine; `None` is everyone's.
+    pub slot: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -470,6 +480,30 @@ pub struct LibretroConfig {
     /// (invariant 4). It depends on the game's pinned cycles, which is why it
     /// is the manifest's to say.
     pub settle: Duration,
+    /// How this game's machine is shared for a bout, if it can be (ADR 0036).
+    pub netplay: Option<Netplay>,
+}
+
+/// The two ways a head-to-head machine is kept in step with the others
+/// (ADR 0036).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Netplay {
+    /// The frontend saves the core every frame and restores it when a guess
+    /// about a remote slot's input was wrong. For a core whose state is
+    /// exact and cheap: the console cores.
+    Rollback,
+    /// The core brings its own network and keeps itself in step; the
+    /// frontend carries its packets. dosbox-pure's emulated IPX.
+    Packets,
+}
+
+impl std::fmt::Display for Netplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Netplay::Rollback => "rollback",
+            Netplay::Packets => "packets",
+        })
+    }
 }
 
 /// A contiguous window of the address space the RAM discovery tools work over.
@@ -632,6 +666,12 @@ impl Manifest {
 
     pub fn challenge(&self, id: &str) -> Option<&Challenge> {
         self.challenges.iter().find(|c| c.id.0 == id)
+    }
+
+    /// How many players the biggest challenge here seats: 1 without a
+    /// head-to-head challenge, else its `slots` (ADR 0036).
+    pub fn max_slots(&self) -> u8 {
+        self.challenges.iter().map(|c| c.slots).max().unwrap_or(1).max(1)
     }
 
     /// Every challenge that runs on one stage, in declaration order.
@@ -952,6 +992,11 @@ impl Doc {
     /// `library` is the challenge half of the same text, already validated —
     /// including the schema version.
     fn into_manifest(self, source: &Path, library: Library) -> Result<Manifest, String> {
+        // How many players the biggest bout seats, before anything of the
+        // library moves: what a rule's `slot` and the pads plugged are
+        // checked against (ADR 0036).
+        let bout_slots: Option<u8> =
+            library.challenges.iter().filter(|c| c.is_head_to_head()).map(|c| c.slots).max();
         if self.runner.kind != "libretro" {
             return Err(format!(
                 "runner.kind is `{}`; this crate only runs `libretro` games",
@@ -1156,6 +1201,23 @@ impl Doc {
                     return Err(format!("{what}: unless `{n}` names no rule"));
                 }
             }
+            if let Some(slot) = r.slot {
+                match bout_slots {
+                    None => {
+                        return Err(format!(
+                            "{what}: slot = {slot}, but no challenge here is head_to_head; a \
+                             slot says whose fact this is on a shared machine (ADR 0036)"
+                        ))
+                    }
+                    Some(n) if slot >= n => {
+                        return Err(format!(
+                            "{what}: slot = {slot}, but the biggest bout here seats {n} (slots \
+                             count from 0)"
+                        ))
+                    }
+                    Some(_) => {}
+                }
+            }
             rules.push(Rule {
                 name: r.name.clone(),
                 field: r.field.clone(),
@@ -1167,6 +1229,7 @@ impl Doc {
                 if_marked: r.if_marked.clone(),
                 emit,
                 log: r.log.clone(),
+                slot: r.slot,
             });
         }
 
@@ -1202,6 +1265,40 @@ impl Doc {
                 settle.as_millis(),
                 framerate.0
             ));
+        }
+
+        // A manifest that deals a bout says how its machine is shared, and
+        // the way it says must be one this runner can do for this core
+        // (ADR 0036): rollback saves and restores every frame, which a core
+        // that emulates on its own thread cannot take, and drives pads, not
+        // a keyboard.
+        let netplay = match lr.netplay.as_deref() {
+            None => None,
+            Some("rollback") => Some(Netplay::Rollback),
+            Some("packets") => Some(Netplay::Packets),
+            Some(other) => {
+                return Err(format!(
+                    "runner.libretro.netplay is `{other}`; it is \"rollback\" or \"packets\""
+                ))
+            }
+        };
+        if bout_slots.is_some() && netplay.is_none() {
+            return Err("a head_to_head challenge needs runner.libretro.netplay to say how the \
+                        machine is shared: \"rollback\" for a core whose state is exact, \
+                        \"packets\" for one that brings its own network (ADR 0036)"
+                .to_string());
+        }
+        if netplay == Some(Netplay::Rollback) {
+            if !settle.is_zero() {
+                return Err("runner.libretro.netplay = \"rollback\" with a settle_ms: a core that \
+                            emulates on its own thread cannot be saved and restored every frame"
+                    .to_string());
+            }
+            if lr.controller.as_deref() == Some("keyboard") {
+                return Err("runner.libretro.netplay = \"rollback\" with controller = \
+                            \"keyboard\": a shared machine's slots are pads"
+                    .to_string());
+            }
         }
 
         let roms = build_roms(&self.rom, &game.console)?;
@@ -1274,6 +1371,7 @@ impl Doc {
                 pad_keys,
                 boot_frames,
                 settle,
+                netplay,
             },
             watches,
             labels,
@@ -1365,6 +1463,83 @@ entry = { state = "a.state" }
     fn an_unknown_key_is_an_error_not_a_silently_ignored_line() {
         let text = format!("{MINIMAL}\n[watch.bananas]\nadr = 0x057B\n");
         assert!(parse(&text).is_err());
+    }
+
+    // ------------------------------------------------------- head-to-head
+
+    /// A fight: one stage, a rounds-won counter per slot, a best-of-three.
+    const FIGHT: &str = r#"
+[watch.p1_rounds]
+at = 0x0100
+[watch.p2_rounds]
+at = 0x0101
+[[rule]]
+field = "p1_rounds"
+edge = "increases"
+emit = "count"
+counter = "rounds_won"
+slot = 0
+[[rule]]
+field = "p2_rounds"
+edge = "increases"
+emit = "count"
+counter = "rounds_won"
+slot = 1
+[[stage]]
+id = "vs"
+rom = "base"
+entry = { state = "vs.state" }
+[[challenge]]
+id = "best-of-three"
+stage = "vs"
+kind = "head_to_head"
+slots = 2
+complete_when = { counts = { rounds_won = 2 } }
+"#;
+
+    fn with_netplay(value: &str) -> String {
+        let runner = format!("core_dir = \"cores\"\nnetplay = \"{value}\"");
+        format!("{}{FIGHT}", MINIMAL.replace("core_dir = \"cores\"", &runner))
+    }
+
+    #[test]
+    fn a_head_to_head_manifest_says_how_its_machine_is_shared() {
+        let m = parse(&with_netplay("rollback")).unwrap();
+        assert_eq!(m.libretro.netplay, Some(Netplay::Rollback));
+        assert_eq!(m.max_slots(), 2);
+        let slots: Vec<Option<u8>> = m.rules.iter().map(|r| r.slot).collect();
+        assert_eq!(slots, [Some(0), Some(1)]);
+        assert_eq!(parse(&with_netplay("packets")).unwrap().libretro.netplay, Some(Netplay::Packets));
+        assert_eq!(parse(MINIMAL).unwrap().max_slots(), 1);
+    }
+
+    #[test]
+    fn a_head_to_head_challenge_without_netplay_is_refused() {
+        let e = parse(&format!("{MINIMAL}{FIGHT}")).unwrap_err();
+        assert!(e.contains("netplay"), "{e}");
+        let e = parse(&with_netplay("telepathy")).unwrap_err();
+        assert!(e.contains("rollback"), "{e}");
+    }
+
+    /// Rollback saves and restores every frame: a threaded core cannot take
+    /// it, and a keyboard is port 0's alone.
+    #[test]
+    fn rollback_is_refused_on_a_threaded_or_keyboard_core() {
+        let text = with_netplay("rollback").replace("netplay = \"rollback\"", "netplay = \"rollback\"\nsettle_ms = 5");
+        assert!(parse(&text).unwrap_err().contains("settle_ms"));
+        let text = with_netplay("rollback").replace("netplay = \"rollback\"", "netplay = \"rollback\"\ncontroller = \"keyboard\"");
+        assert!(parse(&text).unwrap_err().contains("keyboard"));
+        assert!(parse(&with_netplay("packets").replace("netplay = \"packets\"", "netplay = \"packets\"\nsettle_ms = 5")).is_ok());
+    }
+
+    #[test]
+    fn a_rules_slot_must_be_one_a_bout_seats() {
+        let text = with_netplay("rollback").replace("slot = 1", "slot = 2");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("seats 2"), "{e}");
+        let text = format!("{MINIMAL}{CLEARABLE}").replace("emit = \"stage_cleared\"", "emit = \"stage_cleared\"\nslot = 0");
+        let e = parse(&text).unwrap_err();
+        assert!(e.contains("no challenge here is head_to_head"), "{e}");
     }
 
     // ------------------------------------------------ the DOS-shaped fields

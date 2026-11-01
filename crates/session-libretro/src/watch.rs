@@ -32,7 +32,7 @@
 
 use std::collections::BTreeMap;
 
-use session_api::SessionEvent;
+use session_api::{SessionEvent, Slot};
 
 use crate::manifest::{Edge, Emit, Manifest, Marker, Rule, TestKind, WatchDef};
 use crate::memory::{AddressSpace, Field};
@@ -79,6 +79,8 @@ pub struct Watcher {
     ended: bool,
     marker_state: Vec<MarkerState>,
     events: Vec<SessionEvent>,
+    /// Whose each of `events` is, by index: the rule's `slot` (ADR 0036).
+    event_slots: Vec<Option<Slot>>,
 
     /// Extra raw addresses to report on change, from `--watch`.
     watched: Vec<usize>,
@@ -160,6 +162,7 @@ impl Watcher {
             ended: false,
             marker_state,
             events: Vec::new(),
+            event_slots: Vec::new(),
             prev_watched: vec![None; watched.len()],
             watched,
             log: true,
@@ -177,6 +180,108 @@ impl Watcher {
         }
         self.prev_watched.fill(None);
         self.events.clear();
+        self.event_slots.clear();
+    }
+
+    /// Whose each event of the last [`tick`](Watcher::tick) is: the slot its
+    /// rule names, or `None` for everyone's (ADR 0036).
+    pub fn last_slots(&self) -> &[Option<Slot>] {
+        &self.event_slots
+    }
+
+    /// Everything that carries across frames, as bytes: what each field held,
+    /// whether the attempt ended, every marker's arming, and the `--watch`
+    /// bytes. Saved with the machine by a rollback, so a restore puts the
+    /// observer back where the machine is and no edge fires twice or not at
+    /// all (ADR 0036).
+    pub fn state(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let put_opt = |out: &mut Vec<u8>, v: Option<u32>| match v {
+            Some(x) => {
+                out.push(1);
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+            None => out.push(0),
+        };
+        match &self.prev {
+            Some(prev) => {
+                out.push(1);
+                out.extend_from_slice(&(prev.len() as u32).to_le_bytes());
+                for v in prev {
+                    put_opt(&mut out, *v);
+                }
+            }
+            None => out.push(0),
+        }
+        out.push(u8::from(self.ended));
+        out.extend_from_slice(&(self.marker_state.len() as u32).to_le_bytes());
+        for m in &self.marker_state {
+            match m.armed_at {
+                Some(at) => {
+                    out.push(1);
+                    out.extend_from_slice(&at.to_le_bytes());
+                }
+                None => out.push(0),
+            }
+            out.extend_from_slice(&(m.captured.len() as u32).to_le_bytes());
+            out.extend(m.captured.iter().map(|c| u8::from(*c)));
+        }
+        out.extend_from_slice(&(self.prev_watched.len() as u32).to_le_bytes());
+        for w in &self.prev_watched {
+            match w {
+                Some(b) => {
+                    out.push(1);
+                    out.push(*b);
+                }
+                None => out.push(0),
+            }
+        }
+        out
+    }
+
+    /// The reverse of [`state`](Watcher::state).
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let mut r = Reader { bytes, at: 0 };
+        let prev = if r.u8()? == 1 {
+            let n = r.u32()? as usize;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(if r.u8()? == 1 { Some(r.u32()?) } else { None });
+            }
+            Some(v)
+        } else {
+            None
+        };
+        let ended = r.u8()? == 1;
+        let n = r.u32()? as usize;
+        if n != self.marker_state.len() {
+            return Err(format!(
+                "observer state has {n} markers, this watcher {}",
+                self.marker_state.len()
+            ));
+        }
+        let mut markers = Vec::with_capacity(n);
+        for _ in 0..n {
+            let armed_at = if r.u8()? == 1 { Some(r.u64()?) } else { None };
+            let c = r.u32()? as usize;
+            let mut captured = Vec::with_capacity(c);
+            for _ in 0..c {
+                captured.push(r.u8()? == 1);
+            }
+            markers.push(MarkerState { armed_at, captured });
+        }
+        let n = r.u32()? as usize;
+        let mut watched = Vec::with_capacity(n);
+        for _ in 0..n {
+            watched.push(if r.u8()? == 1 { Some(r.u8()?) } else { None });
+        }
+        self.prev = prev;
+        self.ended = ended;
+        self.marker_state = markers;
+        self.prev_watched = watched;
+        self.events.clear();
+        self.event_slots.clear();
+        Ok(())
     }
 
     /// Reads RAM and returns everything that fired this frame.
@@ -187,6 +292,7 @@ impl Watcher {
     /// happened.
     pub fn tick(&mut self, ram: &[u8], frame: u64) -> &[SessionEvent] {
         self.events.clear();
+        self.event_slots.clear();
         let cur: Vec<Option<u32>> = self.fields.iter().map(|f| f.read(&self.space, ram)).collect();
         self.report_watched(ram, frame);
 
@@ -391,6 +497,7 @@ impl Watcher {
             };
             if let Some(e) = event {
                 self.events.push(e);
+                self.event_slots.push(self.rules[i].rule.slot.map(Slot));
             }
             if self.log {
                 self.report(i, &emit, &label, (at, frame), (p, c));
@@ -565,6 +672,31 @@ fn holds(test: TestKind, value: Option<u32>) -> bool {
         TestKind::Le(x) => v <= x,
         TestKind::BitSet(b) => v & (1 << b) != 0,
         TestKind::BitCleared(b) => v & (1 << b) == 0,
+    }
+}
+
+
+/// Reads the little-endian fields [`Watcher::state`] wrote.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Reader<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+        let end = self.at + n;
+        let s = self.bytes.get(self.at..end).ok_or("observer state is short")?;
+        self.at = end;
+        Ok(s)
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
+    }
+    fn u64(&mut self) -> Result<u64, String> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
     }
 }
 

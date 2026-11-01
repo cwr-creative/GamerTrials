@@ -627,3 +627,13 @@ so rather than quietly running a rolled ROM.
 Walk right off the map tile, and watch `$0671`–`$0675` fill as the suns take actor
 slots. Rolling `b` (one sun) and `max` (three) against the same state is the
 cheapest end-to-end check that a slot table does what it claims.
+## Rollback
+
+Mesen rolls back exactly (ADR 0036). `harness --game smb3 --synctest 1800
+--slots 2 --check 3` and `--check 7` both pass over 1800 frames of scripted
+input on two pads, and two processes on the same script write the same
+`--digest-log` on every frame. The cost, measured headless on one Windows
+machine with a 36 KB state: about 1.1 ms per frame advanced and saved, so an
+eight-frame rollback is about 9 ms of a 16.7 ms frame — within budget, with
+less to spare than Snes9x. No shipped SMB3 challenge is head-to-head; this is
+the core proved, should a two-player NES game want it.
