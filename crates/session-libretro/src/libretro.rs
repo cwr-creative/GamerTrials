@@ -304,6 +304,17 @@ struct CoreOptionsIntl {
     local: *const CoreOptionDefinition,
 }
 
+/// `retro_throttle_state`: how fast the frontend is running the core.
+#[repr(C)]
+struct ThrottleState {
+    mode: c_uint,
+    rate: f32,
+}
+
+/// `RETRO_THROTTLE_NONE`: running at the core's own rate, which is always so
+/// here.
+const THROTTLE_NONE: c_uint = 0;
+
 /// What a core hands over when it wants to be told about key presses. Only the
 /// pointer is used; the callback is invoked on every edge so a core that reads
 /// its keyboard through events rather than through `input_state` still works.
@@ -418,6 +429,10 @@ static OPTION_VALUES: Mutex<BTreeMap<String, CString>> = Mutex::new(BTreeMap::ne
 static UNHANDLED_ENV: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
 
 static PIXEL_FORMAT: AtomicU32 = AtomicU32::new(PIXEL_FORMAT_0RGB1555);
+/// The core's own frame rate as an `f32`'s bits, from the last
+/// `retro_get_system_av_info`: what `GET_THROTTLE_STATE` reports, since this
+/// frontend always runs a core at its own rate.
+static CORE_FPS: AtomicU32 = AtomicU32::new(0);
 /// Per core, not per process: a match loads one core after another, and the
 /// second must not inherit the first's directories (its save directory is
 /// where a DOS core keeps the guest's disk). Replaced on every `Core::load`;
@@ -880,11 +895,26 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             *(data as *mut c_uint) = 0b11;
             true
         }
-        ENV_GET_FASTFORWARDING | ENV_GET_THROTTLE_STATE => {
+        ENV_GET_FASTFORWARDING => {
             if data.is_null() {
                 return false;
             }
             *(data as *mut bool) = false;
+            true
+        }
+        // Not a bool: a `retro_throttle_state`. This used to share the arm
+        // above and write one byte of it, which left the mode NONE and the
+        // rate whatever the core's struct already held. dosbox-pure reads the
+        // rate to decide how much sound to mix per frame and took a zero to
+        // mean "your own rate" — right by luck.
+        ENV_GET_THROTTLE_STATE => {
+            if data.is_null() {
+                return false;
+            }
+            *(data as *mut ThrottleState) = ThrottleState {
+                mode: THROTTLE_NONE,
+                rate: f32::from_bits(CORE_FPS.load(Ordering::Relaxed)),
+            };
             true
         }
         ENV_GET_INPUT_BITMASKS => true,
@@ -1526,6 +1556,7 @@ impl Core {
             },
         };
         unsafe { (self.fn_get_system_av_info)(&mut info) };
+        CORE_FPS.store((info.timing.fps as f32).to_bits(), Ordering::Relaxed);
         info
     }
 
