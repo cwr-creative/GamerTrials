@@ -1,0 +1,50 @@
+# Build and test on both platforms the client ships for (ADR 0035), on every
+# push and pull request, so a change made on one cannot quietly break the
+# other. Each run also leaves a portable build of the client and the server
+# for that platform under the run's Artifacts.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System libraries
+        if: runner.os == 'Linux'
+        run: bash tools/setup-ubuntu.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets --release
+
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/package.ps1 -SkipBuild
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: bash tools/package.sh --skip-build
+
+      # The folder on Windows; the tarball on Linux, since an artifact's own
+      # zip drops the executable bit.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamertrials-${{ runner.os }}
+          path: ${{ runner.os == 'Linux' && 'dist/*.tar.gz' || 'dist/GamerTrials-*/' }}
+          if-no-files-found: error

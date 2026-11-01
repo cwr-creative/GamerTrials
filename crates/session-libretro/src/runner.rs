@@ -72,7 +72,7 @@ impl LibretroRunner {
     /// the core is ready to be handed a state.
     ///
     /// `core_override` is the `--core` flag; without it the manifest's
-    /// `core_dir` must hold exactly one `*_libretro.dll`. Ambiguity is an
+    /// `core_dir` must hold exactly one core ([`CORE_SUFFIX`]). Ambiguity is an
     /// error, not a guess — picking the NES core for a SNES game by accident
     /// is a real possibility now that the library has two consoles in it.
     pub fn start(
@@ -524,6 +524,16 @@ fn save_dir_for(rom_path: &Path) -> PathBuf {
         .join(stem)
 }
 
+/// What a libretro core's file name ends in on this platform. A core
+/// directory may hold one build per platform side by side; each platform only
+/// ever sees its own.
+#[cfg(windows)]
+pub const CORE_SUFFIX: &str = "_libretro.dll";
+#[cfg(target_os = "macos")]
+pub const CORE_SUFFIX: &str = "_libretro.dylib";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub const CORE_SUFFIX: &str = "_libretro.so";
+
 /// Exactly one core in the manifest's core directory, or an error naming what
 /// it found.
 pub fn find_core(dir: &Path) -> Result<PathBuf, String> {
@@ -532,7 +542,7 @@ pub fn find_core(dir: &Path) -> Result<PathBuf, String> {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-            if name.ends_with("_libretro.dll") {
+            if name.ends_with(CORE_SUFFIX) {
                 found.push(path);
             }
         }
@@ -540,7 +550,7 @@ pub fn find_core(dir: &Path) -> Result<PathBuf, String> {
     match found.len() {
         1 => Ok(found.remove(0)),
         0 => Err(format!(
-            "no core found. Put a *_libretro.dll in {}/ or pass --core <PATH>",
+            "no core found. Put a *{CORE_SUFFIX} in {}/ or pass --core <PATH>",
             dir.display()
         )),
         _ => Err(format!(

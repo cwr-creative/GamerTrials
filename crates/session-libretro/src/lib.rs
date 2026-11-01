@@ -51,6 +51,8 @@ pub mod ramsearch;
 pub mod runner;
 pub mod statebind;
 pub mod watch;
+#[cfg(target_os = "linux")]
+pub mod x11;
 
 pub use manifest::Manifest;
 pub use runner::LibretroRunner;

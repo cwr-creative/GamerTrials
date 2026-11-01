@@ -283,10 +283,21 @@ async fn input_preview(app: tauri::AppHandle, state: State<'_, Shared>) -> Resul
 }
 
 fn main_hwnd(app: &tauri::AppHandle) -> Option<isize> {
-    app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize)
+    app.get_webview_window("main").and_then(|w| overlay::handle(&w))
 }
 
 fn main() {
+    // Every window of ours is an X11 window on Linux, XWayland under a
+    // Wayland desktop: Wayland lets no program place its window over
+    // another's, and the overlay is exactly that (ADR 0035). WebKitGTK's
+    // DMA-BUF renderer draws a blank page on several XWayland drivers; the
+    // overlay is too light to miss it. A player's own setting of either wins.
+    #[cfg(target_os = "linux")]
+    for (var, value) in [("GDK_BACKEND", "x11"), ("WEBKIT_DISABLE_DMABUF_RENDERER", "1")] {
+        if std::env::var_os(var).is_none() {
+            std::env::set_var(var, value);
+        }
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

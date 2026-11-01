@@ -211,6 +211,22 @@ pub mod window {
     }
 }
 
+/// The same on X11 (ADR 0035). The window manager's frame is a window of
+/// its own, so the client size is the window's size; borderless is the
+/// window manager's fullscreen, which puts the window back where it was.
+#[cfg(target_os = "linux")]
+pub mod window {
+    use session_libretro::x11;
+
+    pub fn set_client_size(hwnd: isize, w: u32, h: u32) {
+        x11::resize(hwnd, w, h);
+    }
+
+    pub fn set_borderless(hwnd: isize, on: bool) {
+        x11::set_fullscreen(hwnd, on);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

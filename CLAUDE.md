@@ -3,7 +3,8 @@
 Multiplayer retro-game challenge platform. Players race through stages drawn from
 multiple classic games simultaneously; live telemetry and spectating.
 
-Solo developer. Windows targets. Vertical slice = SMB3 (NES), DKC (SNES), Doom (DOS).
+Solo developer. Windows and Linux (X11) targets, from one tree (ADR 0035).
+Vertical slice = SMB3 (NES), DKC (SNES), Doom (DOS).
 
 ## Challenges
 
@@ -89,12 +90,12 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `challenge-core` | Stage sequencing, scoring, rules. Pure. |
 | `challenge-library` | The challenge half of a manifest: `[game]`, stage names, every `[[challenge]]`, and the emit vocabulary its criteria are checked against. What the server deals and judges from (ADR 0009/0024). No emulator, no `content-gen`, no I/O; `session-libretro` parses through it. |
 | `session-api` | `StageRunner`, `Presentable`, shared types. |
-| `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. |
+| `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. Also holds `x11`, the Linux twin of the Win32 calls the game window needs (ADR 0035). |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. Today: hashes a player's dump against the manifest's `sha1` and says what is missing. |
 | `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. Since ADR 0032 it also carries a watched player's picture and sound (`Video`, `Audio`) for the server to relay, their bytes in a binary frame after the packet, and the run's `Progress` for a watcher (ADR 0034). Says which messages are stream and may be dropped (`Lane`). Pure: no sockets. |
 | `transport` | One WebSocket's loop for both ends (ADR 0034): non-blocking, the match before the stream, a stream the link cannot deliver fresh dropped, the link timed by stamped pings, liveness kept. `app-client`'s link and each `server-net` connection run it. Held to the server's fence. |
-| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). While another player watches, encodes its own picture (H.264) and sound (ADPCM) off the game thread; when done or out, shows theirs on the overlay (ADR 0032). |
+| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). While another player watches, encodes its own picture (H.264) and sound (ADPCM) off the game thread; when done or out, shows theirs on the overlay (ADR 0032). Each Win32 call has an X11 twin beside it under `cfg(target_os = "linux")` (ADR 0035). |
 | `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Relays a watched player's stream to their watchers, and refuses a watch from a player still playing (ADR 0032). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `server-net` | The server process (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (a thread per socket, each running `transport`'s loop, and per lobby), each lobby a `server::Server`. Held to the same dependency fence as `server`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
@@ -157,7 +158,7 @@ server over the same socket (ADR 0032); ◀ ▶ or the pad switches players.
 The sender encodes only while watched. A link too slow for the stream
 drops pictures rather than the match, and a watcher whose picture cannot
 keep up sees the run's clock, attempt and events instead (ADR 0034; on the
-`spectate-degrade` branch, from the first match over the internet). `wss://host` in Settings › Profile
+`server-relay` branch, from the first match over the internet). `wss://host` in Settings › Profile
 or an invite reaches a server behind a TLS proxy (ADR 0033,
 `docs/server.md`). Settings binds keyboard, mouse and gamepad to the RetroPad once, overridable per core and per game, and sets video the
 same way; nothing in it reaches a core option or the frame clock (ADR 0028).
@@ -189,6 +190,11 @@ Open, roughly in order:
   the wire.
 - **Phase C owes:** the two-machine match (`docs/server.md`), on which
   **ADR 0013 stays Proposed**. Head-to-head comes last.
+- **Linux (ADR 0035, Proposed) is written but not hand-tested.** The overlay,
+  fullscreen and mouse capture under XWayland are unproven, and `cores/`
+  has no `.so` builds yet — they must match the DLLs' versions, since entry
+  states are savestates. `bash tools/setup-ubuntu.sh` installs what a build
+  needs; `bash tools/package.sh` is `package.ps1`'s twin.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
   zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
   a member overlay — wait on it (ADR 0020).

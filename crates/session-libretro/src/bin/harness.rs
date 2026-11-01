@@ -59,8 +59,8 @@ GAME:
     --list-addrs     Print the address table with its sources, and exit
 
 OPTIONS:
-    --core <PATH>    libretro core DLL. Default: the single *_libretro.dll in
-                     the manifest's core_dir
+    --core <PATH>    libretro core library. Default: the single *_libretro.dll
+                     (*_libretro.so on Linux) in the manifest's core_dir
     --rom <ID=PATH>  Run one of the manifest's [[rom]] entries from this file
                      instead of the declared one. The id is required: a manifest
                      may declare a base ROM and hacks of it, and a bare path no

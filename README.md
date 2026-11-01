@@ -61,6 +61,12 @@ cargo run -p app-client
 cargo run --release -p session-libretro --bin harness -- --game smb3 --challenge 1-1-time-trial
 ```
 
+It builds on Windows and on Linux. On Ubuntu, run `bash tools/setup-ubuntu.sh`
+first: it installs the libraries the client needs, and Rust. The client runs
+under X11, or XWayland on a Wayland desktop (ADR 0035). Every push builds both
+platforms in GitHub Actions and leaves a download of each under the run's
+Artifacts.
+
 `CLAUDE.md` has the crate layout, the invariants and the current phase;
 `docs/manifest-schema.md` is what a manifest contains; `docs/adr/` is why the
 architecture is the way it is — start with `docs/adr/README.md`. Per-game notes

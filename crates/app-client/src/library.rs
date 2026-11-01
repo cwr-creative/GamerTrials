@@ -95,9 +95,9 @@ impl Library {
             if let Err(e) = runner::find_core(dir) {
                 // The runner's wording names its own `--core` flag; say it plainly.
                 let problem = if e.starts_with("several") {
-                    "more than one *_libretro.dll there; keep one"
+                    format!("more than one *{} there; keep one", runner::CORE_SUFFIX)
                 } else {
-                    "no *_libretro.dll there"
+                    format!("no *{} there", runner::CORE_SUFFIX)
                 };
                 missing.push(MissingFile {
                     game: game.clone(),

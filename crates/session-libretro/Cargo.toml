@@ -29,9 +29,12 @@ content-gen = { path = "../content-gen" }
 challenge-core = { path = "../challenge-core" }
 
 libloading = "0.8"   # load the libretro core ourselves (ADR 0001)
-minifb = "0.27"      # window + framebuffer blit + keyboard
-cpal = "0.15"        # audio out (WASAPI on Windows)
-gilrs = "0.11"       # gamepad (XInput/DirectInput)
+# Window + framebuffer blit + keyboard. X11 only on Linux, never Wayland: the
+# client's overlay has to sit over this window, which Wayland does not allow
+# (ADR 0035), and XWayland runs it on a Wayland desktop.
+minifb = { version = "0.27", default-features = false, features = ["x11"] }
+cpal = "0.15"        # audio out (WASAPI on Windows, ALSA on Linux)
+gilrs = "0.11"       # gamepad (XInput/DirectInput; evdev on Linux)
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"         # manifests are TOML data in git (ADR 0010)
 
@@ -39,6 +42,11 @@ toml = "0.9"         # manifests are TOML data in git (ADR 0010)
 # Already in the tree through minifb, at the same version.
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.9", features = ["winuser", "windef"] }
+
+# The same on X11, and the client's X11 calls besides (`x11`). Loaded at run
+# time, as minifb loads it, so the build needs no X11 headers.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2.21"
 
 # The developer harness: run a manifest's game in a window and watch RAM. Not
 # the client — it prints events and scores nothing.

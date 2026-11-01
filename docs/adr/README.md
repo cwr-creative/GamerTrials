@@ -76,6 +76,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0032](0032-relay-spectator-video-through-the-server.md) | Relay spectator video through the server, superseding the media path of 0003 | Superseded by 0034 |
 | [0033](0033-terminate-tls-in-front-of-the-server.md) | Terminate TLS in front of the server, and let the client dial wss:// | Accepted |
 | [0034](0034-send-a-stream-only-while-the-link-keeps-up.md) | Send a spectator's stream only while the link keeps up, and show the run when it cannot | Accepted |
+| [0035](0035-build-the-client-for-linux-from-the-same-tree.md) | Build the client for Linux from the same tree, on X11 | Proposed |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is

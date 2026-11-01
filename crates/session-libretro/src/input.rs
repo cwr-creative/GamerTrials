@@ -453,9 +453,47 @@ mod cursor {
     }
 }
 
+/// On X11 (ADR 0035) the cursor is put back at the centre every frame and
+/// never held by a grab: a grab outlives a crash and holds the whole desktop.
+/// Under XWayland a warp is honoured while the cursor is hidden over the
+/// window, which is exactly while it is captured.
+#[cfg(target_os = "linux")]
+mod cursor {
+    use minifb::Window;
+
+    use crate::x11;
+
+    fn centre(window: &Window) -> Option<(isize, i32, i32)> {
+        let win = window.get_window_handle() as isize;
+        let (_, _, w, h) = x11::client_rect(win)?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some((win, w as i32 / 2, h as i32 / 2))
+    }
+
+    pub fn capture(window: &Window) -> bool {
+        let Some((win, x, y)) = centre(window) else {
+            return false;
+        };
+        x11::warp_pointer(win, x, y);
+        true
+    }
+
+    /// Motion since the last call, then the cursor back to the centre.
+    pub fn recentre(window: &Window) -> Option<(i32, i32)> {
+        let (win, cx, cy) = centre(window)?;
+        let (x, y) = x11::pointer_in(win)?;
+        x11::warp_pointer(win, cx, cy);
+        Some((x - cx, y - cy))
+    }
+
+    pub fn release() {}
+}
+
 /// Elsewhere there is no capture, and so no motion: the buttons still work.
-/// The project targets Windows; this is only here so the crate still builds.
-#[cfg(not(windows))]
+/// Only here so the crate still builds.
+#[cfg(not(any(windows, target_os = "linux")))]
 mod cursor {
     use minifb::Window;
 
