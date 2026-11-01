@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use challenge_library::Library;
 use content_gen::{Console, GroupDoc, PatchSlotDoc, PatchTable};
@@ -120,6 +121,9 @@ struct LibretroDoc {
     /// Authored in seconds, converted at load like every other duration.
     #[serde(default)]
     boot_seconds: Option<f64>,
+    /// Host milliseconds, not emulated time: see [`LibretroConfig::settle`].
+    #[serde(default)]
+    settle_ms: Option<u64>,
     /// Core options this game is pinned to. Checked against what the core
     /// publishes once it has published it; an unknown key is an error.
     #[serde(default)]
@@ -448,6 +452,24 @@ pub struct LibretroConfig {
     /// Zero for a console, where `Named` is not used at all; ~900 frames for a
     /// DOS bundle that has to start DOS first.
     pub boot_frames: u64,
+    /// How long the core needs after `retro_run` returns before its machine
+    /// holds still. Zero for a core that emulates inside `retro_run`, which
+    /// is every console core here.
+    ///
+    /// dosbox-pure emulates on a thread of its own: `retro_run` waits for the
+    /// frame in flight, then sets the next one running and returns. Until that
+    /// frame finishes, memory is moving, a key handed over lands mid-frame at
+    /// a point host timing decides, and a state restored interrupts it
+    /// wherever it got to. So the runner lets at least this long pass after a
+    /// frame before it reads memory, restores a state, or runs the next one.
+    /// A paced client has most of a frame to spare and pays nothing; a
+    /// headless run pays this per frame.
+    ///
+    /// Host time, and never a measurement: no frame count or score depends on
+    /// it, only whether the frames counted are the same ones on every machine
+    /// (invariant 4). It depends on the game's pinned cycles, which is why it
+    /// is the manifest's to say.
+    pub settle: Duration,
 }
 
 /// A contiguous window of the address space the RAM discovery tools work over.
@@ -1170,6 +1192,18 @@ impl Doc {
             }
         };
 
+        // Longer than a frame and a paced client could no longer keep the
+        // game's rate; a core that needs that long is not one this runner can
+        // drive.
+        let settle = Duration::from_millis(lr.settle_ms.unwrap_or(0));
+        if settle.as_secs_f64() * framerate.0 >= 1.0 {
+            return Err(format!(
+                "runner.libretro.settle_ms is {} ms, which is a whole frame or more at {} Hz",
+                settle.as_millis(),
+                framerate.0
+            ));
+        }
+
         let roms = build_roms(&self.rom, &game.console)?;
 
         // The same `[[stage]]` array, read twice: `challenge-library` has the
@@ -1239,6 +1273,7 @@ impl Doc {
                 options: lr.options,
                 pad_keys,
                 boot_frames,
+                settle,
             },
             watches,
             labels,
@@ -1417,6 +1452,21 @@ controller = \"keyboard\"
     fn a_negative_boot_time_is_refused() {
         let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\nboot_seconds = -1.0");
         assert!(parse(&text).unwrap_err().contains("boot_seconds"));
+    }
+
+    #[test]
+    fn a_core_settles_for_nothing_unless_its_manifest_says() {
+        assert_eq!(parse(MINIMAL).unwrap().libretro.settle, Duration::ZERO);
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\nsettle_ms = 5");
+        assert_eq!(parse(&text).unwrap().libretro.settle, Duration::from_millis(5));
+    }
+
+    /// A settle as long as a frame is a game a paced client cannot keep up
+    /// with, so it is refused at load rather than found in a match.
+    #[test]
+    fn a_settle_of_a_whole_frame_is_refused() {
+        let text = MINIMAL.replace("core_dir = \"cores\"", "core_dir = \"cores\"\nsettle_ms = 17");
+        assert!(parse(&text).unwrap_err().contains("settle_ms"));
     }
 
     /// A window of nothing would send the discovery tools searching an empty

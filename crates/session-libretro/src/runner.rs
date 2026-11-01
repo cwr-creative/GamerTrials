@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use session_api::{
     AssetKey, EntryPoint, Presentable, RunnerError, SessionEvent, StageRunner, StageSpec,
@@ -65,7 +66,21 @@ pub struct LibretroRunner {
     /// is otherwise a mistake, and the core refusing it is the mistake being
     /// caught.
     rebind_state: bool,
+    /// When `retro_run` last returned, for a core that keeps emulating after
+    /// it does (`LibretroConfig::settle`).
+    last_frame: Option<Instant>,
 }
+
+/// How long a threaded core is given to finish booting after the frame
+/// [`LibretroRunner::start`] spends.
+///
+/// dosbox-pure carries on booting on its own thread after that frame returns,
+/// and a state restored while it is still booting is restored without the
+/// thread paused: the stage then starts a frame further on or not, by timing
+/// alone. Measured on the input-replay spike, a replay that reached its first
+/// entry sooner than its recording ran exactly one frame ahead from the start;
+/// 50 ms of waiting was enough to stop it. Five times that, once per runner.
+const BOOT_SETTLE: Duration = Duration::from_millis(250);
 
 impl LibretroRunner {
     /// Loads the core and the ROM the manifest names, and runs one frame so
@@ -199,6 +214,7 @@ impl LibretroRunner {
             fresh: true,
             content_key,
             rebind_state: rebindable,
+            last_frame: None,
         };
 
         // Some cores are not ready to unserialize until they have produced a
@@ -206,7 +222,10 @@ impl LibretroRunner {
         // `fresh` survives it deliberately: one frame in, a DOS machine has not
         // finished its BIOS, and calling that "already booted" is what saves
         // the first `Named` entry a redundant fifteen-second boot.
-        runner.core.run_frame();
+        runner.run_core_frame();
+        if !runner.manifest.libretro.settle.is_zero() {
+            std::thread::sleep(BOOT_SETTLE);
+        }
 
         // Which addresses this core can actually reach, said once. The NES
         // harness had to write this warning by hand for one address; it is
@@ -293,6 +312,8 @@ impl LibretroRunner {
     /// Capture on the *base* ROM. A state taken while a generated ROM is loaded
     /// describes that ROM's board, and rebinding cannot undo that (ADR 0019).
     pub fn capture_state(&self) -> Result<Vec<u8>, String> {
+        // At a frame boundary, so the state is one a replay could reach.
+        self.settle();
         self.core.save_state()
     }
 
@@ -320,8 +341,39 @@ impl LibretroRunner {
     /// Advance a frame without reading RAM. Only the dev harness needs this,
     /// to spin the core while a menu is up.
     pub fn run_frame_raw(&mut self) {
-        self.core.run_frame();
+        self.run_core_frame();
         self.fresh = false;
+    }
+
+    /// One `retro_run`, and when it returned.
+    fn run_core_frame(&mut self) {
+        self.core.run_frame();
+        self.last_frame = Some(Instant::now());
+    }
+
+    /// Wait until a threaded core has finished the frame it started, if it
+    /// may not have yet. Nothing for a core that emulates inside `retro_run`,
+    /// and nothing for a paced caller, which has already waited longer than
+    /// this for the frame's turn.
+    fn settle(&self) {
+        let settle = self.manifest.libretro.settle;
+        if let Some(t) = self.last_frame.filter(|_| !settle.is_zero()) {
+            if let Some(left) = settle.checked_sub(t.elapsed()) {
+                std::thread::sleep(left);
+            }
+        }
+    }
+
+    /// Hand the watcher the machine as it stands and keep what it reports.
+    fn observe(&mut self) {
+        // An empty slice is the honest input for a core that publishes no
+        // system RAM: `AddressSpace::read` then finds every byte through the
+        // memory map, which is the route such a manifest declares anyway.
+        let ram = self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]);
+        // The watcher borrows RAM out of the core, so what it produces is
+        // copied before the core is touched again.
+        let observed = self.watcher.tick(ram, self.frame);
+        self.events.extend_from_slice(observed);
     }
 }
 
@@ -343,6 +395,10 @@ impl StageRunner for LibretroRunner {
         // same stage for the next person.
         libretro::keys_clear();
         libretro::JOYPAD.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // A threaded core restored mid-frame resumes the rest of that frame on
+        // the restored machine, from wherever host timing had got it to.
+        self.settle();
 
         match &spec.entry {
             EntryPoint::State(key) => {
@@ -424,7 +480,7 @@ impl StageRunner for LibretroRunner {
                 }
                 println!("[stage] booting {} to `{name}` ({boot} frames)", spec.stage);
                 for _ in 0..boot {
-                    self.core.run_frame();
+                    self.run_core_frame();
                 }
             }
         }
@@ -441,18 +497,24 @@ impl StageRunner for LibretroRunner {
     }
 
     fn advance(&mut self) -> Result<&[SessionEvent], RunnerError> {
-        self.core.run_frame();
-        self.fresh = false;
-        self.frame += 1;
         self.events.clear();
-        // An empty slice is the honest input for a core that publishes no
-        // system RAM: `AddressSpace::read` then finds every byte through the
-        // memory map, which is the route such a manifest declares anyway.
-        let ram = self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]);
-        // The watcher borrows RAM out of the core, so what it produces is
-        // copied before the core is touched again.
-        let observed = self.watcher.tick(ram, self.frame);
-        self.events.extend_from_slice(observed);
+        self.frame += 1;
+        if self.manifest.libretro.settle.is_zero() {
+            self.run_core_frame();
+            self.observe();
+        } else {
+            // A threaded core's `retro_run` shows the frame that finished
+            // before it was called and starts the next before returning, so
+            // straight after it memory is moving. The frame it is about to
+            // show is the one that holds still now, once settled: read that,
+            // then let the next one start — with this frame's input landing
+            // at the frame boundary rather than wherever the thread had got
+            // to. The facts are the picture's, as they are for a console.
+            self.settle();
+            self.observe();
+            self.run_core_frame();
+        }
+        self.fresh = false;
         Ok(&self.events)
     }
 

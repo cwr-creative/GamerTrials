@@ -173,6 +173,7 @@ core_dir = "cores/snes"        # must hold exactly one *_libretro.dll
 controller = "pad"             # optional, default "pad"; "pad" | "keyboard"
 pad_layout = "snes"            # "nes" | "snes"; only with controller = "pad"
 boot_seconds = 16.0            # optional; required by a `named` entry point
+settle_ms = 5                  # optional; only for a core that runs on its own thread
 ```
 
 `controller` says how port 0 is driven.
@@ -196,6 +197,19 @@ boot_seconds = 16.0            # optional; required by a `named` entry point
 the bundle's `[autoexec]` running. It converts to frames at `game.framerate` at
 load, like every other duration, and it is only consulted by a `named` entry
 point. A console manifest omits it.
+
+`settle_ms` is for a core that keeps emulating after `retro_run` returns.
+dosbox-pure does: it waits for the frame in flight, sets the next one running
+on its own thread and returns, so until that frame finishes its memory is
+moving, input handed over lands mid-frame at a point host timing decides, and a
+restored state interrupts it wherever it got to. The runner lets at least this
+many milliseconds pass after a frame before reading memory, restoring a state
+or running the next frame, and reads each frame's facts from the frame its
+picture shows. It is host time, never a measurement — no frame count depends
+on it, only whether the frames counted are the same on every machine — and it
+must be less than a frame, or a paced client could not keep the game's rate.
+It depends on the pinned cycles, which is why the manifest says it. A console
+manifest omits it.
 
 ### `[runner.libretro.options]`
 
