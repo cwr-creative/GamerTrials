@@ -139,7 +139,8 @@ rejected for non-obvious reasons.
 ## Current phase
 
 **Phase B — the client — is built; Phase C — spectating and a server beyond
-the LAN — is built and not yet hand-tested.** `cargo run -p
+the LAN — is built, and has played matches over the internet with live
+players.** `cargo run -p
 app-client` opens a menu. Host game opens a lobby on the `gamertrials-server`
 named in Settings › Profile, or a lobby of one on an in-process `server` when
 none is (ADR 0009). Join game takes an invite, `host[:port]/CODE` (ADR 0030).
@@ -157,8 +158,8 @@ another's picture and hears their sound on the overlay, relayed by the
 server over the same socket (ADR 0032); ◀ ▶ or the pad switches players.
 The sender encodes only while watched. A link too slow for the stream
 drops pictures rather than the match, and a watcher whose picture cannot
-keep up sees the run's clock, attempt and events instead (ADR 0034; on the
-`server-relay` branch, from the first match over the internet). `wss://host` in Settings › Profile
+keep up sees the run's clock, attempt and events instead (ADR 0034, from
+the first match over the internet). `wss://host` in Settings › Profile
 or an invite reaches a server behind a TLS proxy (ADR 0033,
 `docs/server.md`). Settings binds keyboard, mouse and gamepad to the RetroPad once, overridable per core and per game, and sets video the
 same way; nothing in it reaches a core option or the frame clock (ADR 0028).
@@ -196,7 +197,10 @@ Open, roughly in order:
   player are unseen. `cores/` holds each core for both platforms from one
   nightly — update both at once, since entry states are savestates. `bash
   tools/setup-ubuntu.sh` installs what a build needs; `bash
-  tools/package.sh` is `package.ps1`'s twin.
+  tools/package.sh` is `package.ps1`'s twin. Closing the client mid-round
+  may hang there: dosbox-pure's static destructors wait on its thread, as a
+  harness that exited with the core loaded showed under WSL, and the end of
+  Tauri's event loop exits the same way. Not checked.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
   zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
   a member overlay — wait on it (ADR 0020).
