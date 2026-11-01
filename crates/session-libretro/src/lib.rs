@@ -48,6 +48,7 @@ pub mod manifest;
 pub mod memory;
 pub mod prep;
 pub mod ramsearch;
+pub mod replay;
 pub mod runner;
 pub mod statebind;
 pub mod watch;

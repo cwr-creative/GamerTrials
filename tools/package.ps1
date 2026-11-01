@@ -15,7 +15,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 if (-not $SkipBuild) {
-    cargo build --release -p app-client -p server-net
+    cargo build --release -p app-client -p server-net -p session-libretro --bin harness
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 
@@ -39,6 +39,10 @@ function Copy-Tree($from, $to, $filter = '*', [switch]$Flat) {
 
 Copy-Item target\release\app-client.exe (Join-Path $out 'GamerTrials.exe')
 Copy-Item target\release\gamertrials-server.exe $out
+# The developer harness, for the input-replay spike's second-machine test
+# (docs/replay-spike.md): it replays a recording made on another machine.
+Copy-Item target\release\harness.exe $out
+Copy-Item docs\replay-spike.md $out
 # The server links the MSVC runtime dynamically and a fresh Windows may lack
 # it; Microsoft allows this one file to sit beside the program that needs it.
 Copy-Item (Join-Path $env:SystemRoot 'System32\vcruntime140.dll') $out
@@ -112,6 +116,9 @@ Set-Content -Encoding ascii (Join-Path $out 'README.txt') @(
     'To host a server on this machine, run "Start server.cmd" and forward TCP'
     '7878 to it. Every player must run the same build: a client whose manifests'
     'hash differently from the server''s is refused, and says which hash it holds.'
+    ''
+    'harness.exe replays an input recording made on another machine and says'
+    'whether this one played the same game: see replay-spike.md.'
     ''
     'Settings are kept in %APPDATA%\com.cwr.gamertrials\settings.toml.'
     'Needs Windows 10 or 11 with the WebView2 runtime (Windows 11 has it).'

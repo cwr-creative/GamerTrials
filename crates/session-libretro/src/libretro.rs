@@ -402,6 +402,12 @@ static MOUSE_BUTTONS: AtomicU32 = AtomicU32::new(0);
 /// these out of `input_state`; see [`key_down`].
 static KEYS_DOWN: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
+/// Every key edge since the last [`take_key_edges`], in order, while
+/// recording for the replay spike. An edge rather than the held set because a
+/// core with a keyboard callback is told about each one, and the order it was
+/// told in is part of what it saw.
+static KEY_EDGES: Mutex<Option<Vec<(bool, u32)>>> = Mutex::new(None);
+
 /// What the core published about its own options: key, legal values, default.
 /// Printed by `harness --dump-options`, and the reason a manifest's
 /// `[runner.libretro.options]` can be checked rather than trusted.
@@ -622,6 +628,9 @@ pub fn key_down(code: u32) {
     if !lock(&KEYS_DOWN).insert(code) {
         return;
     }
+    if let Some(edges) = lock(&KEY_EDGES).as_mut() {
+        edges.push((true, code));
+    }
     let cb = *lock(&KEYBOARD_CB);
     if let Some(cb) = cb {
         unsafe { cb(true, code, 0, 0) };
@@ -631,6 +640,9 @@ pub fn key_down(code: u32) {
 pub fn key_up(code: u32) {
     if !lock(&KEYS_DOWN).remove(&code) {
         return;
+    }
+    if let Some(edges) = lock(&KEY_EDGES).as_mut() {
+        edges.push((false, code));
     }
     let cb = *lock(&KEYBOARD_CB);
     if let Some(cb) = cb {
@@ -657,6 +669,40 @@ pub fn set_mouse(dx: i32, dy: i32, buttons: u32) {
     MOUSE_DX.store(dx, Ordering::Relaxed);
     MOUSE_DY.store(dy, Ordering::Relaxed);
     MOUSE_BUTTONS.store(buttons, Ordering::Relaxed);
+}
+
+/// What [`set_mouse`] last latched: motion, then buttons.
+pub fn mouse() -> (i32, i32, u32) {
+    (
+        MOUSE_DX.load(Ordering::Relaxed),
+        MOUSE_DY.load(Ordering::Relaxed),
+        MOUSE_BUTTONS.load(Ordering::Relaxed),
+    )
+}
+
+/// Start or stop keeping key edges for [`take_key_edges`]. Starting forgets
+/// anything kept before.
+pub fn record_key_edges(on: bool) {
+    *lock(&KEY_EDGES) = on.then(Vec::new);
+}
+
+/// The key edges since the last call, oldest first. Empty while not recording.
+pub fn take_key_edges() -> Vec<(bool, u32)> {
+    lock(&KEY_EDGES).as_mut().map(std::mem::take).unwrap_or_default()
+}
+
+/// Calls `f` with every published region a game can write to — readable, not
+/// `CONST` — and the address it starts at, in the order the core published
+/// them. Only on the emulator thread, between frames.
+pub fn with_writable_regions(f: &mut dyn FnMut(usize, &[u8])) {
+    let map = lock(&MEMORY_MAP);
+    for r in map.iter().filter(|r| r.readable() && r.flags & MEMDESC_CONST == 0) {
+        // Safe for the reason `read_addr` is: core-owned, live while the core
+        // is loaded, bounded by `len`, and read only on the emulator thread.
+        let bytes =
+            unsafe { std::slice::from_raw_parts((r.ptr as *const u8).add(r.offset), r.len) };
+        f(r.start, bytes);
+    }
 }
 
 /// Whether the core has asked to be shut down. Running frames past this drives

@@ -26,7 +26,8 @@ use session_libretro::manifest::{Challenge, Controller, Manifest};
 use session_libretro::memory::{AddressSpace, Width};
 use session_libretro::prep::{self, RomOverrides};
 use session_libretro::ramsearch::{Filter, Probe, Search};
-use session_libretro::runner::LibretroRunner;
+use session_libretro::replay::{self, Log, Recorder, Script};
+use session_libretro::runner::{self, LibretroRunner};
 use session_libretro::{audio, input};
 
 /// Where a bare `--game dkc` looks.
@@ -122,6 +123,35 @@ OPTIONS:
     --no-audio       Run without sound, paced off the wall clock instead
     -h, --help       This text
 
+INPUT REPLAY (a spike: does another machine fed the same input play the same
+game? - docs/replay-spike.md):
+    --record <PATH>  Write every frame's input and a digest of the machine
+                     after it - RAM, picture, sound - to PATH. In the window,
+                     play; F2 and every re-entry are marked. F1 and F9 are
+                     refused while recording, since the replay cannot repeat
+                     them. With --frames, --script plays instead of a person
+    --script <SEED>  With --frames: press buttons and keys at random, from this
+                     seed, instead of holding nothing
+    --replay <PATH>  Replay a recording headless and report the first frame
+                     each part of the machine stopped matching. The game,
+                     stage, challenge and seed come from the recording unless
+                     given. Exits 2 if anything diverged
+    --passes <N>     With --replay: play it N times in one process, each from
+                     where the last left the core. Pass 1 is a fresh core like
+                     the recorder's; later passes are a core with a history, as
+                     a spectator's would be. Default: 2
+    --settle <MS>    With --frames or --replay: wait this long after every
+                     frame. A core that emulates on its own thread (dosbox-
+                     pure) keeps running after a frame returns and takes input
+                     mid-frame; waiting parks it at the frame boundary, which
+                     says whether that race is what diverged. Default: 0,
+                     or for --replay, what the recording used
+    --warmup <N>     With --frames or --replay: enter the stage and run N
+                     frames holding nothing before the first recorded entry,
+                     so the recording starts on a core that has already run,
+                     as a spectator's has. Default: 0, or for --replay,
+                     what the recording used
+
 KEYS (pad games - SMB3, DKC):
     Arrows  d-pad
     Z  B      X  A      A  Y      S  X      Q  L      W  R
@@ -173,6 +203,12 @@ struct Args {
     audio: bool,
     frames: Option<u64>,
     capture: Option<PathBuf>,
+    record: Option<PathBuf>,
+    script: Option<u64>,
+    replay: Option<PathBuf>,
+    passes: u32,
+    settle: Option<Duration>,
+    warmup: Option<u64>,
 }
 
 fn main() {
@@ -183,13 +219,63 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args = match parse_args()? {
+    let mut args = match parse_args()? {
         Some(a) => a,
         None => {
             print!("{HELP}");
             return Ok(());
         }
     };
+
+    // A replay names what it was recorded on, so the machine that replays it
+    // needs only the file. Anything passed on the command line still wins.
+    let replay_log = match &args.replay {
+        Some(path) => {
+            let log = Log::read(path)?;
+            if args.game.is_none() {
+                args.game = log.get("game").map(str::to_string);
+            }
+            if args.stage.is_none() && args.challenge.is_none() {
+                match log.get("challenge") {
+                    Some(c) => args.challenge = Some(c.to_string()),
+                    None => args.stage = log.get("stage").map(str::to_string),
+                }
+            }
+            // How the recording was driven, so a replay drives the core the
+            // same way unless told otherwise.
+            // A played recording was paced by the clock, which leaves a threaded
+            // core most of a frame to park in; a replay has to wait for that
+            // itself, and a few milliseconds is several times what Doom needs.
+            if args.settle.is_none() {
+                args.settle = match log.get("settle") {
+                    Some("paced") => Some(Duration::from_millis(5)),
+                    Some(ms) => ms.parse().ok().map(Duration::from_millis),
+                    None => None,
+                };
+            }
+            if args.warmup.is_none() {
+                args.warmup = log.get("warmup").and_then(|v| v.parse().ok());
+            }
+            if args.seed.is_none() {
+                if let Some(seed) = log.get("seed") {
+                    args.seed = Some(seed.parse().map_err(|_| format!("the log's seed `{seed}`"))?);
+                }
+            }
+            Some(log)
+        }
+        None => None,
+    };
+    if args.record.is_some() && args.replay.is_some() {
+        return Err("--record and --replay are two halves of one test; run them apart".into());
+    }
+    if args.script.is_some() && args.frames.is_none() {
+        return Err("--script plays instead of a person, and only --frames has no person".into());
+    }
+    if args.record.is_some() && args.frames.is_some() && args.script.is_none() {
+        return Err("a headless --record needs --script <SEED> to play it; holding nothing \
+                    for every frame tests very little"
+            .into());
+    }
 
     let game = args.game.as_deref().ok_or("--game is required; try --help")?;
     let path = manifest_path(game);
@@ -301,6 +387,45 @@ fn run() -> Result<(), String> {
     });
     let mut run = judged.as_ref().map(start_run).transpose()?;
 
+    // What a replay checks it is replaying onto: the same bytes, entered from
+    // the same state. The core is named but not required to match, since a
+    // Windows and a Linux build of one version are different files.
+    let settle = args.settle.unwrap_or(Duration::ZERO);
+    let warmup = args.warmup.unwrap_or(0);
+    let mut header: Vec<(String, String)> = Vec::new();
+    if args.record.is_some() || replay_log.is_some() {
+        let core_path = match &args.core {
+            Some(p) => p.clone(),
+            None => runner::find_core(&manifest.libretro.core_dir)?,
+        };
+        let core_sha1 = fs::read(&core_path)
+            .map(|b| content_gen::sha1_hex(&b))
+            .map_err(|e| format!("cannot read {}: {e}", core_path.display()))?;
+        let entry = match &spec.entry {
+            session_api::EntryPoint::State(k) => match fs::read(&k.0) {
+                Ok(b) => format!("state {}", content_gen::sha1_hex(&b)),
+                Err(e) => return Err(format!("cannot read entry state {}: {e}", k.0)),
+            },
+            session_api::EntryPoint::Named(n) => format!("named {n}"),
+        };
+        let core_name = core_path.file_name().unwrap_or_default().to_string_lossy();
+        header.push(("game".into(), game.to_string()));
+        header.push(("stage".into(), stage.id.0.clone()));
+        if let Some(c) = &challenge {
+            header.push(("challenge".into(), c.id.0.clone()));
+        }
+        if let Some(seed) = args.seed {
+            header.push(("seed".into(), seed.to_string()));
+        }
+        header.push(("content".into(), content.key.0.clone()));
+        header.push(("entry".into(), entry));
+        header.push(("core".into(), format!("{core_name} {core_sha1}")));
+        header.push((
+            "platform".into(),
+            format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        ));
+    }
+
     print_addrs(&manifest);
     let space = manifest.libretro.space;
     let controller = manifest.libretro.controller;
@@ -338,22 +463,81 @@ fn run() -> Result<(), String> {
     let (width, height) =
         (av.geometry.base_width as usize, av.geometry.base_height as usize);
 
+    // `LibretroRunner::start` spends one frame before anything is loaded, and
+    // dosbox-pure carries on booting on its own thread after that frame
+    // returns. A state restored while it is still booting is restored without
+    // the thread paused, and the stage then starts a frame further on or not,
+    // by timing alone; measured, a replay that reached its first entry sooner
+    // than its recording ran one frame ahead from the start. Both halves wait
+    // the boot out, so both start from the same place.
+    if args.record.is_some() || replay_log.is_some() {
+        replay::settle(Duration::from_millis(250));
+    }
+    if let Some(log) = &replay_log {
+        // Armed before the warm-up, as the recorder is, so the first frame's
+        // sound holds the same samples on both sides.
+        replay::arm(&runner, false);
+        warm_up(&mut runner, &spec, warmup, settle)?;
+        return replay_main(&mut runner, &spec, log, &header, args.passes, settle, warmup);
+    }
+    let mut recorder = match &args.record {
+        Some(path) => {
+            let labels = replay::region_labels(&runner);
+            header.push(("fps".into(), av.timing.fps.to_string()));
+            header.push((
+                "input".into(),
+                match args.script {
+                    Some(seed) => format!("script {seed}"),
+                    None => "play".into(),
+                },
+            ));
+            header.push((
+                "settle".into(),
+                match args.frames {
+                    Some(_) => settle.as_millis().to_string(),
+                    None => "paced".into(),
+                },
+            ));
+            // Only a headless recording warms up; a played one starts cold.
+            let warmed = if args.frames.is_some() { warmup } else { 0 };
+            header.push(("warmup".into(), warmed.to_string()));
+            header.push(("regions".into(), labels.join(" ")));
+            replay::arm(&runner, true);
+            println!("[record] {} - digesting {}, video, audio", path.display(), labels.join(", "));
+            Some(Recorder::create(path, &header)?)
+        }
+        None => None,
+    };
+
     // Headless: enter the stage, run a fixed number of frames as fast as the
     // core will go, and print what fired. No window, no sound, no pacing — the
     // frame numbers are identical either way, which is the point of counting
     // emulated frames rather than time (ADR 0005). This is how a manifest's
     // rules get exercised against a real ROM in one command.
     if let Some(n) = args.frames {
+        warm_up(&mut runner, &spec, warmup, settle)?;
         runner.enter(&spec).map_err(|e| e.to_string())?;
         if let Some(r) = run.as_mut() {
             r.enter();
         }
+        if let Some(rec) = recorder.as_mut() {
+            rec.entered()?;
+        }
+        let mut script = args.script.map(|seed| Script::new(seed, runner.manifest()));
         for _ in 0..n {
             if runner.shutdown_requested() {
                 println!("[core] the game asked to shut down at frame {}", runner.frame());
                 break;
             }
+            if let Some(s) = script.as_mut() {
+                s.drive();
+            }
+            let input = recorder.as_ref().map(|_| replay::capture_input());
             let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
+            replay::settle(settle);
+            if let (Some(rec), Some(input)) = (recorder.as_mut(), input) {
+                rec.frame(input, replay::digest(&mut runner, &events))?;
+            }
             for event in &events {
                 if let SessionEvent::StageCleared { .. } | SessionEvent::StageExited { .. } = event
                 {
@@ -361,8 +545,14 @@ fn run() -> Result<(), String> {
                 }
             }
             if let Some(r) = run.as_mut() {
-                if judge(r, &mut runner, &spec, &events)? == Judged::Finished {
-                    break;
+                match judge(r, &mut runner, &spec, &events, &mut |_| Ok(()))? {
+                    Judged::Finished => break,
+                    Judged::Reentered => {
+                        if let Some(rec) = recorder.as_mut() {
+                            rec.entered()?;
+                        }
+                    }
+                    Judged::Continue => {}
                 }
             }
         }
@@ -374,6 +564,10 @@ fn run() -> Result<(), String> {
             );
         }
         println!("[done] {} frames", runner.frame());
+        if let Some(rec) = recorder {
+            let (frames, attempts) = rec.finish()?;
+            println!("[record] wrote {frames} frames over {attempts} attempt(s)");
+        }
         if let Some(path) = &args.capture {
             write_state(&runner, path)?;
         }
@@ -453,6 +647,14 @@ fn run() -> Result<(), String> {
     if let Some(r) = run.as_mut() {
         r.enter();
     }
+    if let Some(rec) = recorder.as_mut() {
+        rec.entered()?;
+    }
+    // The frame whose digest is still owed. Read straight after `retro_run`,
+    // a core that runs on its own thread (dosbox-pure) is already emulating
+    // the next frame and memory is moving; by the next frame's turn it has
+    // long parked at the frame boundary, so that is when the digest is taken.
+    let mut pending: Option<(replay::Input, Vec<SessionEvent>)> = None;
     if let Some(p) = probe.as_mut() {
         p.reset();
     }
@@ -513,17 +715,27 @@ fn run() -> Result<(), String> {
         // presenting `update` at the bottom of the previous iteration saw, and
         // moving the wait above would have bought nothing.
         window.update();
+        flush(&mut recorder, &mut pending, &mut runner)?;
 
         for key in hotkeys.pressed(&window) {
             match key {
+                Key::F1 | Key::F9 if recorder.is_some() => {
+                    println!(
+                        "[record] F1 and F9 are off while recording: a replay cannot repeat them"
+                    );
+                }
                 Key::F1 => {
                     if let Err(e) = write_state(&runner, &state_path) {
                         eprintln!("[state] {e}");
                     }
                 }
                 Key::F2 => {
+                    flush(&mut recorder, &mut pending, &mut runner)?;
                     if let Err(e) = runner.enter(&spec) {
                         eprintln!("[state] {e}");
+                    }
+                    if let Some(rec) = recorder.as_mut() {
+                        rec.entered()?;
                     }
                     // Neither kind allows a manual re-entry mid-run, so under
                     // a challenge F2 starts a fresh run rather than an attempt
@@ -616,7 +828,9 @@ fn run() -> Result<(), String> {
             }
         }
 
+        let input = recorder.as_ref().map(|_| replay::capture_input());
         let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
+        pending = input.map(|i| (i, events.clone()));
         for event in &events {
             // The watcher has already printed a line for each of these; what is
             // worth repeating is how the stage ended, because it is the one
@@ -631,8 +845,12 @@ fn run() -> Result<(), String> {
         }
         // A finished run stays on screen, playable, until F2 starts another.
         if let Some(r) = run.as_mut().filter(|r| r.result().is_none()) {
-            match judge(r, &mut runner, &spec, &events)? {
+            let mut owed = |rn: &mut LibretroRunner| flush(&mut recorder, &mut pending, rn);
+            match judge(r, &mut runner, &spec, &events, &mut owed)? {
                 Judged::Reentered => {
+                    if let Some(rec) = recorder.as_mut() {
+                        rec.entered()?;
+                    }
                     if let Some(p) = probe.as_mut() {
                         p.reset();
                     }
@@ -660,6 +878,107 @@ fn run() -> Result<(), String> {
         }
     }
 
+    flush(&mut recorder, &mut pending, &mut runner)?;
+    if let Some(rec) = recorder {
+        let (frames, attempts) = rec.finish()?;
+        println!("[record] wrote {frames} frames over {attempts} attempt(s)");
+    }
+    Ok(())
+}
+
+/// Write the frame whose digest a windowed recording still owes. Normally
+/// called at the next frame's turn; before a re-entry or at the end it is
+/// called early, so it first gives a threaded core the moment it needs to
+/// park.
+fn flush(
+    recorder: &mut Option<Recorder>,
+    pending: &mut Option<(replay::Input, Vec<SessionEvent>)>,
+    runner: &mut LibretroRunner,
+) -> Result<(), String> {
+    match (recorder.as_mut(), pending.take()) {
+        (Some(rec), Some((input, events))) => rec.frame(input, replay::digest(runner, &events)),
+        _ => Ok(()),
+    }
+}
+
+/// Enter the stage and run `frames` frames holding nothing, so what follows
+/// starts on a core with a history rather than a freshly loaded one.
+fn warm_up(
+    runner: &mut LibretroRunner,
+    spec: &StageSpec,
+    frames: u64,
+    settle: Duration,
+) -> Result<(), String> {
+    if frames == 0 {
+        return Ok(());
+    }
+    runner.enter(spec).map_err(|e| e.to_string())?;
+    for _ in 0..frames {
+        runner.advance().map_err(|e| e.to_string())?;
+        replay::settle(settle);
+    }
+    println!("[replay] warmed up: {frames} frames in the stage before the first entry");
+    Ok(())
+}
+
+/// Replay a recording `passes` times in this process and report each pass.
+/// Refuses one recorded on other bytes or from another entry state: that would
+/// measure the content, not the emulator.
+fn replay_main(
+    runner: &mut LibretroRunner,
+    spec: &StageSpec,
+    log: &Log,
+    here: &[(String, String)],
+    passes: u32,
+    settle: Duration,
+    warmup: u64,
+) -> Result<(), String> {
+    let mine = |k: &str| here.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    for key in ["content", "entry"] {
+        if log.get(key) != mine(key) {
+            return Err(format!(
+                "the recording's {key} is {} and this machine's is {}: replaying it would \
+                 compare different games",
+                log.get(key).unwrap_or("absent"),
+                mine(key).unwrap_or("absent")
+            ));
+        }
+    }
+    let labels = replay::region_labels(runner);
+    if labels != log.regions() {
+        return Err(format!(
+            "the core here publishes regions [{}] and the recording digested [{}]",
+            labels.join(" "),
+            log.regions().join(" ")
+        ));
+    }
+    println!(
+        "[replay] recorded on {} with {} ({}, settle {} ms); replaying on {} with {} \
+         (settle {} ms)",
+        log.get("platform").unwrap_or("?"),
+        log.get("core").unwrap_or("?"),
+        log.get("input").unwrap_or("?"),
+        log.get("settle").unwrap_or("0"),
+        mine("platform").unwrap_or("?"),
+        mine("core").unwrap_or("?"),
+        settle.as_millis(),
+    );
+    let mut clean = true;
+    for pass in 1..=passes.max(1) {
+        let report = replay::replay(runner, spec, log, settle)?;
+        let title = if pass == 1 && warmup == 0 {
+            "pass 1 (fresh core)".to_string()
+        } else if pass == 1 {
+            format!("pass 1 (core warmed for {warmup} frames)")
+        } else {
+            format!("pass {pass} (core with a history)")
+        };
+        report.print(&title);
+        clean &= report.clean();
+    }
+    if !clean {
+        std::process::exit(2);
+    }
     Ok(())
 }
 
@@ -728,11 +1047,14 @@ enum Judged {
 
 /// Hands one frame to `challenge-core` and does what it says. The harness
 /// carries out the verdict and never forms one.
+/// `before_enter` runs just before a re-entry replaces the machine, for a
+/// recording that still owes the frame in flight its digest.
 fn judge(
     run: &mut Run,
     runner: &mut LibretroRunner,
     spec: &StageSpec,
     events: &[SessionEvent],
+    before_enter: &mut dyn FnMut(&mut LibretroRunner) -> Result<(), String>,
 ) -> Result<Judged, String> {
     let frame = runner.frame();
     match run.observe(frame, events) {
@@ -743,6 +1065,7 @@ fn judge(
                 run.attempts(),
                 run.frames()
             );
+            before_enter(runner)?;
             runner.enter(spec).map_err(|e| e.to_string())?;
             run.enter();
             Ok(Judged::Reentered)
@@ -1116,6 +1439,12 @@ fn parse_args() -> Result<Option<Args>, String> {
         audio: true,
         frames: None,
         capture: None,
+        record: None,
+        script: None,
+        replay: None,
+        passes: 2,
+        settle: None,
+        warmup: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -1166,6 +1495,28 @@ fn parse_args() -> Result<Option<Args>, String> {
                     Some(v.parse().map_err(|_| format!("--frames wants a count, got {v}"))?);
             }
             "--capture" => args.capture = Some(PathBuf::from(value("--capture")?)),
+            "--record" => args.record = Some(PathBuf::from(value("--record")?)),
+            "--replay" => args.replay = Some(PathBuf::from(value("--replay")?)),
+            "--script" => {
+                let v = value("--script")?;
+                args.script =
+                    Some(v.parse().map_err(|_| format!("--script wants a seed, got {v}"))?);
+            }
+            "--settle" => {
+                let v = value("--settle")?;
+                let ms: u64 =
+                    v.parse().map_err(|_| format!("--settle wants milliseconds, got {v}"))?;
+                args.settle = Some(Duration::from_millis(ms));
+            }
+            "--warmup" => {
+                let v = value("--warmup")?;
+                args.warmup =
+                    Some(v.parse().map_err(|_| format!("--warmup wants a count, got {v}"))?);
+            }
+            "--passes" => {
+                let v = value("--passes")?;
+                args.passes = v.parse().map_err(|_| format!("--passes wants a count, got {v}"))?;
+            }
             "--no-probe" => args.probe = false,
             "--list-addrs" => args.list_addrs = true,
             "--list-stages" => args.list_stages = true,
