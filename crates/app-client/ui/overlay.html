@@ -130,6 +130,12 @@
     <div id="sp-note"></div>
   </div>
   <div id="waiting" class="hidden"></div>
+  <div id="backing" class="sheet hidden"><div class="card">
+    <h2>Pick a side</h2>
+    <div id="b-text"></div>
+    <div id="b-buttons"></div>
+    <div id="b-note"></div>
+  </div></div>
   <div id="round" class="sheet hidden"><div class="card">
     <h2 id="r-title"></h2>
     <table id="r-entries"></table>
@@ -180,6 +186,41 @@
     : 'Waiting for the round to end…';
   function showWaiting(text) { $('waiting').innerHTML = text; show('waiting'); }
 
+  // ---- backing a slot in a bout (ADR 0036) --------------------------------
+  // Not seated this round: pick who to back before the window closes, or be
+  // given a side. The pick is one click; the sheet stays until the bout goes.
+  let backingRound = null, backingTimer = null, backed = null;
+  function showBacking(p) {
+    backingRound = p.round; backed = null;
+    $('b-text').textContent = "You're not in this bout. Back a player to share their result:";
+    $('b-buttons').innerHTML = '';
+    for (const name of p.players || []) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.onclick = () => { backed = name; invoke('back', { player: name }); paintBacking(); };
+      $('b-buttons').appendChild(b);
+    }
+    const until = now() + (p.seconds || 15) * 1000;
+    clearInterval(backingTimer);
+    backingTimer = setInterval(() => {
+      const left = Math.max(0, Math.ceil((until - now()) / 1000));
+      if (!backed) $('b-note').textContent = left + 's until a side is picked for you';
+      if (left === 0) clearInterval(backingTimer);
+    }, 250);
+    paintBacking();
+    show('backing');
+    hud('backing, round ' + p.round);
+  }
+  function paintBacking() {
+    for (const b of $('b-buttons').children) b.classList.toggle('focus', b.textContent === backed);
+    if (backed) $('b-note').textContent = 'Backing ' + backed;
+  }
+  function onSides(p) {
+    if (p.round !== backingRound) return;
+    for (const [who, target] of p.backing || []) if (who === p.me) { backed = target; paintBacking(); }
+  }
+  function hideBacking() { clearInterval(backingTimer); backingRound = null; hide('backing'); }
+
   // The round will not be played: whatever was on the way to a countdown stops.
   function dropRound() {
     goWanted = false; introUp = false;
@@ -195,7 +236,8 @@
     $('i-title').textContent = p.title || '';
     $('i-name').textContent = p.name || '';
     $('i-goal').textContent = p.goal || '';
-    $('i-kind').textContent = (p.challenge_kind || '').toUpperCase() + (p.custom ? ' · CUSTOM' : '');
+    $('i-kind').textContent = (p.challenge_kind || '').toUpperCase() + (p.custom ? ' · CUSTOM' : '') +
+      ((p.vs || []).length ? ' · VS ' + p.vs.join(', ') : '');
     $('intro').classList.remove('out');
     $('intro').classList.add('in');
     introUp = true; introAt = now();
@@ -552,13 +594,16 @@
         showWaiting("You're out. " + waitingText());
         hud('eliminated, round ' + p.round);
         break;
+      case 'backing': playing = p.players || []; dropRound(); showBacking(p); break;
+      case 'sides': onSides(p); break;
+      case 'bout_go': hideBacking(); break;
       case 'voided':
-        dropRound(); hideClock(); closeSpectate();
+        dropRound(); hideClock(); closeSpectate(); hideBacking();
         showWaiting(esc(p.text));
         hud('round ' + p.round + ' void');
         break;
-      case 'round': hideClock(); closeSpectate(); showRound(p); break;
-      case 'score': hideClock(); closeSpectate(); showScore(p); break;
+      case 'round': hideClock(); closeSpectate(); hideBacking(); showRound(p); break;
+      case 'score': hideClock(); closeSpectate(); hideBacking(); showScore(p); break;
       case 'pause': showPause(p); break;
       case 'resume': hidePause(); hud('playing'); break;
       case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;

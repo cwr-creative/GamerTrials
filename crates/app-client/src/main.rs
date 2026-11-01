@@ -224,6 +224,12 @@ fn watch(state: State<'_, Shared>, player: String) {
     state.send(UiCmd::Watch { player });
 }
 
+/// From the backing sheet: back this seated player in the bout (ADR 0036).
+#[tauri::command]
+fn back(state: State<'_, Shared>, player: String) {
+    state.send(UiCmd::Back { player });
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, Shared>) -> serde_json::Value {
     serde_json::json!({
@@ -358,6 +364,7 @@ fn main() {
             resume,
             give_up,
             watch,
+            back,
             get_settings,
             put_settings,
             settings_meta,

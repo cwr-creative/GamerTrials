@@ -76,6 +76,7 @@ dependencies = [
  "asset-store",
  "challenge-core",
  "challenge-library",
+ "head-to-head",
  "minifb",
  "openh264",
  "protocol",

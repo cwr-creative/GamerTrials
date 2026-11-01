@@ -487,7 +487,8 @@
     else {
       $('s-body').innerHTML = '<table class="form"><tr><td>Display name</td><td><input id="pname" maxlength="24" value="' + esc(S.name) + '"></td></tr>' +
         '<tr><td>Server</td><td><input id="pserver" maxlength="255" spellcheck="false" placeholder="host:port or wss://host" value="' + esc(S.server || '') + '"></td></tr>' +
-        '<tr><td>Stream</td><td><input id="pstream" type="number" min="100" max="2000" step="50" value="' + S.stream_kbps + '"> kbit/s</td></tr></table>' +
+        '<tr><td>Stream</td><td><input id="pstream" type="number" min="100" max="2000" step="50" value="' + S.stream_kbps + '"> kbit/s</td></tr>' +
+        '<tr><td>Bout input delay</td><td><input id="pdelay" type="number" min="0" max="10" value="' + (S.bout_input_delay ?? 2) + '"> frames</td></tr></table>' +
         '<p class="note">The <code>gamertrials-server</code> that Host game opens a lobby on, and that a bare invite code joins. ' +
         'Leave it blank to play on this machine alone. Without a port it means 7878, or 443 for <code>wss://</code>, which is a server behind TLS (ADR 0033).</p>' +
         '<p class="note">Stream is the picture you send a player watching you, 100 to 2000 kbit/s; 500 unless you change it. ' +
@@ -589,6 +590,8 @@
       S.server = t.value.trim();
     } else if (t.id === 'pstream') {
       S.stream_kbps = parseInt(t.value) || 500;
+    } else if (t.id === 'pdelay') {
+      S.bout_input_delay = Math.max(0, Math.min(10, parseInt(t.value) || 0));
     } else return;
     save();
   };

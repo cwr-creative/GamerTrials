@@ -217,14 +217,25 @@ console cores are proved:** `harness --synctest` rolls a stage back on
 every frame with no network and compares checksums, and Snes9x and Mesen
 both pass 1800 frames at three and at seven replays per advance, with two
 processes on one script writing the same digests on every frame
-(`docs/games/dkc.md`, `smb3.md`, with the cost per frame). Not yet: an SF2
+(`docs/games/dkc.md`, `smb3.md`, with the cost per frame). And the client
+plays a bout: the lobby's "Allow head-to-head challenges" toggle; a seated
+player's game thread binds a UDP socket, probes the server, reports its
+`Endpoint`, takes the `Peers`, puts the runner into a `Rollback` session and
+says `Prepared` only once the machines have found each other (ten seconds,
+else `Unprepared`); on `Go` it pumps the session once a frame, paced on the
+clock, judges every slot's confirmed facts with a provisional `Bout`,
+reports its own slot's frames (and an empty one every fifteen), claims its
+verdict, reports `PeerLost` when the link dies, and forfeits on a desync; a
+pause cannot hold the shared machine but the menu still gives up; a player
+not seated sees the backing sheet, picks a side or is given one, and
+spectates as the eliminated do; Settings › Profile sets the input delay.
+**Not hand-tested**: no shipped manifest carries a bout. Next is an SF2
 manifest (needs a dump and its addresses found with the harness: a
 rounds-won counter per slot, a `stage_exited` rule, an entry state at the
-character select, `netplay = "rollback"`), the client's bout flow and
-backing sheet, and Doom over the netpacket interface (`Networked`, `netplay
-= "packets"`). The client logs `Sides` and `Peers` and plays no bout; no
-shipped manifest carries one, so nothing changes for a player until the
-rest lands.
+character select, `netplay = "rollback"`), then two clients on one machine
+through `gamertrials-server`, then two machines over the internet with
+ggrs's numbers recorded against ADR 0036; and Doom over the netpacket
+interface (`Networked`, `netplay = "packets"`).
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`

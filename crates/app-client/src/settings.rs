@@ -471,6 +471,10 @@ pub struct Settings {
     /// this player's uplink and their watchers' downlinks feel it; a link
     /// that cannot carry it drops pictures rather than falling behind.
     pub stream_kbps: u32,
+    /// In a bout (ADR 0036): frames this player's own input is delayed so the
+    /// other machine's has time to arrive and fewer frames are guessed. Felt
+    /// on one's own buttons; fewer rollbacks for the other side.
+    pub bout_input_delay: u8,
     pub input: InputSettings,
     /// By core id: `mesen`, `snes9x`, `dosbox_pure`.
     pub cores: BTreeMap<String, Layer>,
@@ -486,6 +490,7 @@ impl Default for Settings {
             name: "Player".into(),
             server: String::new(),
             stream_kbps: DEFAULT_STREAM_KBPS,
+            bout_input_delay: 2,
             input: InputSettings::default(),
             cores: BTreeMap::new(),
             games: BTreeMap::new(),
@@ -732,6 +737,7 @@ impl Settings {
         }
         self.server = self.server.trim().chars().take(255).collect();
         self.stream_kbps = self.stream_kbps.clamp(STREAM_KBPS.0, STREAM_KBPS.1);
+        self.bout_input_delay = self.bout_input_delay.min(10);
         let clamp =|v: f32, lo: f32, hi: f32, default: f32| if v.is_finite() { v.clamp(lo, hi) } else { default };
         self.input.deadzone = clamp(self.input.deadzone, 0.1, 0.95, 0.5);
         self.input.mouse_sensitivity = clamp(self.input.mouse_sensitivity, 0.1, 10.0, 1.0);

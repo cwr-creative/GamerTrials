@@ -20,6 +20,9 @@ transport = { path = "../transport" }
 # remote server will run, over a channel instead of a socket.
 server = { path = "../server" }
 asset-store = { path = "../asset-store" }
+# A bout: the rollback session over the runner and the UDP link to the other
+# player's machine (ADR 0036).
+head-to-head = { path = "../head-to-head" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

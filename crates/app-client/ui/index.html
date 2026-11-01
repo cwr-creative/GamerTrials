@@ -150,6 +150,7 @@
         <input id="fn" type="number" min="1" max="999" value="10"></label>
       <label>Time limit per challenge <input id="limit" type="number" min="1" max="3600" value="180"> s</label>
       <label><input id="custom" type="checkbox" checked> Allow custom challenges</label>
+      <label><input id="h2h" type="checkbox"> Allow head-to-head challenges</label>
       <label>Group by
         <select id="grouping">
           <option value="console">system</option>
@@ -224,10 +225,11 @@
       format: { kind: $('fkind').value, n: Math.max(1, parseInt($('fn').value) || 1) },
       default_limit_seconds: Math.max(1, parseFloat($('limit').value) || 180),
       allow_custom: $('custom').checked,
+      allow_head_to_head: $('h2h').checked,
       grouping: $('grouping').value,
     };
   }
-  for (const id of ['mode', 'fkind', 'fn', 'limit', 'custom', 'grouping']) {
+  for (const id of ['mode', 'fkind', 'fn', 'limit', 'custom', 'h2h', 'grouping']) {
     $(id).onchange = () => invoke('set_settings', { settings: settingsFromForm() });
   }
   $('start').onclick = () => invoke('start');
@@ -239,6 +241,7 @@
     $('fn').value = s.format.n;
     $('limit').value = s.default_limit_seconds;
     $('custom').checked = s.allow_custom;
+    $('h2h').checked = !!s.allow_head_to_head;
     $('grouping').value = s.grouping;
   }
 
