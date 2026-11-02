@@ -13,8 +13,8 @@ a RASTATE v1 block whose `MEM ` section is a Snes9x snapshot
 (`#!s9xsnp:0014`), the same format version this tree's core writes. The
 snapshot is what the manifest names; the container is not a state the core
 can take, which is what `retro_unserialize refused 129885 bytes` meant.
-Unpacking is twenty lines of Python (chunks, then the `MEM ` block); worth a
-harness flag if it comes up again.
+Unpacking is twenty lines of Python (chunks, then the `MEM ` block). It came up
+again with U.N. Squadron, and is now `tools/rzip-unpack.py`.
 
 ## The addresses
 

@@ -49,8 +49,9 @@ directly between them (ADR 0036).
 
 ## Status
 
-Vertical slice: a five-game library — Super Mario Bros. 3 (NES), Donkey Kong
-Country (SNES), Doom and Doom II (DOS) and Street Fighter II Turbo (SNES) — and matches
+Vertical slice: a six-game library — Super Mario Bros. 3 (NES), Donkey Kong
+Country (SNES), Doom and Doom II (DOS), Street Fighter II Turbo (SNES) and
+U.N. Squadron (SNES) — and matches
 that play end to end across them, solo on one machine or in a lobby of several
 over the internet. Players supply their own game files; the client verifies
 them by hash.
