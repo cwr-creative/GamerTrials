@@ -20,7 +20,7 @@ use challenge_core::{Bout, Next, Run, RunResult};
 use head_to_head::relay::RelayState;
 use head_to_head::{Relay, Rollback, Settings as RollbackSettings, State as RollbackState, Udp};
 use minifb::{Scale, ScaleMode, Window, WindowOptions};
-use session_api::{ChallengeKind, Presentable, SessionEvent, Slot, SlotInput, StageRunner, StageSpec};
+use session_api::{ChallengeKind, Networked, Presentable, SessionEvent, Slot, SlotInput, StageRunner, StageSpec};
 use session_libretro::audio::{self, Audio};
 use session_libretro::input::PadState;
 use session_libretro::libretro;
@@ -498,9 +498,19 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
         .as_ref()
         .map(|a| (audio::TARGET_QUEUED_FRAMES as f64 * a.device_rate / av.timing.fps) as usize);
     window.set_title(&format!("{title} \u{2014} GamerTrials"));
+    let packets = runner.manifest().libretro.netplay == Some(Netplay::Packets);
+    if let (true, Some(b)) = (packets, l.bout.as_ref()) {
+        // The game's own network driver must be up before the game boots and
+        // looks for it (ADR 0036): join now, with every other slot present.
+        runner.join(Slot(b.slot), b.slots).map_err(|e| e.to_string())?;
+        for i in 0..b.slots {
+            if i != b.slot {
+                runner.peer_joined(Slot(i));
+            }
+        }
+    }
     runner.enter(&spec).map_err(|e| e.to_string())?;
     let timed = matches!(judged.kind, ChallengeKind::TimeTrial);
-    let packets = runner.manifest().libretro.netplay == Some(Netplay::Packets);
     let bout = match l.bout {
         Some(b) => {
             if judged.kind != ChallengeKind::HeadToHead {
@@ -859,7 +869,7 @@ fn connect_bout(l: &mut Loaded, peers: Vec<(u8, Vec<SocketAddr>)>) -> Result<(),
         }
     };
     if b.packets {
-        l.machine = Machine::Relay(Box::new(Relay::connect(runner, udp, b.slot, b.slots)));
+        l.machine = Machine::Relay(Box::new(Relay::connect_joined(runner, udp, b.slot, b.slots)));
         b.syncing_since = Some(Instant::now());
         return Ok(());
     }
@@ -907,11 +917,17 @@ fn step_relay(
     }
     window.update();
 
-    let bits = if in_front { keys::joypad(&l.input, pad) } else { 0 };
+    let frame_now = l.machine.runner().frame() + 1;
+    let scripted = l.script.is_some();
+    let bits = match l.script.as_mut() {
+        Some(state) => scripted_pad(state, frame_now),
+        None if in_front => keys::joypad(&l.input, pad),
+        None => 0,
+    };
     match l.input.keyboard.as_ref() {
         None => libretro::JOYPAD.store(bits, Ordering::Relaxed),
         Some(kb) => {
-            if in_front {
+            if in_front || scripted {
                 keys::keyboard_game(kb, bits, pad, l.input.deadzone);
                 if let Some(m) = l.mouse.as_mut() {
                     m.pump(window);
@@ -926,8 +942,12 @@ fn step_relay(
     let streaming = l.streaming();
     let watchers = l.watchers;
     let (Some(b), Machine::Relay(r)) = (l.bout.as_mut(), &mut l.machine) else { return Ok(()) };
-    let events = r.pump().map_err(|e| e.to_string())?;
+    r.pump().map_err(|e| e.to_string())?;
     let frame = r.machine().frame();
+    // A game in lockstep simulates every player on every machine, so its
+    // facts are tagged per slot and every slot is judged here, as on a
+    // rolled-back machine; only this slot's go to the server.
+    let events = r.machine().slot_events().to_vec();
     if watchers > 0 {
         r.machine().take_audio(&mut |samples, rate| {
             if streaming {
@@ -936,11 +956,25 @@ fn step_relay(
         });
     }
     if !l.done {
-        if !events.is_empty() || frame % HEARTBEAT == 0 {
-            let _ = reports.send(Report::Frame { round, frame, events: events.clone() });
+        let mine: Vec<SessionEvent> = events
+            .iter()
+            .filter(|e| e.slot.is_none() || e.slot == Some(b.slot))
+            .map(|e| e.event.clone())
+            .collect();
+        let mut verdicts = Vec::new();
+        for slot in 0..b.slots {
+            let theirs: Vec<SessionEvent> = events
+                .iter()
+                .filter(|e| e.slot.is_none() || e.slot == Some(Slot(slot)))
+                .map(|e| e.event.clone())
+                .collect();
+            verdicts.extend(b.judge.observe(Slot(slot), frame, &theirs));
         }
-        let verdicts = b.judge.observe(b.slot, frame, &events);
-        if let Some((_, result)) = verdicts.into_iter().find(|(s, _)| *s == b.slot) {
+        let settled = verdicts.into_iter().find(|(s, _)| *s == b.slot).map(|(_, r)| r);
+        if !mine.is_empty() || frame % HEARTBEAT == 0 || settled.is_some() {
+            let _ = reports.send(Report::Frame { round, frame, events: mine });
+        }
+        if let Some(result) = settled {
             l.done = true;
             let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
         }

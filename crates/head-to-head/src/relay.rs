@@ -72,6 +72,9 @@ pub struct Relay<M: Networked, L: Link> {
     answered: HashMap<Slot, bool>,
     last_hello: Option<Instant>,
     reliable: HashMap<Slot, Reliable>,
+    /// The machine has already joined its session: a DOS core's network
+    /// driver must be up before the game boots and looks for it.
+    joined: bool,
 }
 
 impl<M: Networked, L: Link> Relay<M, L> {
@@ -88,7 +91,17 @@ impl<M: Networked, L: Link> Relay<M, L> {
             answered,
             last_hello: None,
             reliable: HashMap::new(),
+            joined: false,
         }
+    }
+
+    /// [`connect`](Relay::connect) for a machine the caller has already
+    /// joined to its session, with every other slot present, before
+    /// booting the game: [`join`](Relay::join) then only goes live.
+    pub fn connect_joined(machine: M, link: L, local: Slot, slots: u8) -> Relay<M, L> {
+        let mut r = Relay::connect(machine, link, local, slots);
+        r.joined = true;
+        r
     }
 
     /// [`connect`](Relay::connect) and [`join`](Relay::join) at once, for a
@@ -150,11 +163,14 @@ impl<M: Networked, L: Link> Relay<M, L> {
         if self.state == RelayState::Live {
             return Ok(());
         }
-        self.machine.join(self.local, self.slots)?;
-        for i in 0..self.slots {
-            if i != self.local.0 {
-                self.machine.peer_joined(Slot(i));
+        if !self.joined {
+            self.machine.join(self.local, self.slots)?;
+            for i in 0..self.slots {
+                if i != self.local.0 {
+                    self.machine.peer_joined(Slot(i));
+                }
             }
+            self.joined = true;
         }
         self.state = RelayState::Live;
         Ok(())

@@ -428,6 +428,13 @@ impl LibretroRunner {
         self.fresh = false;
     }
 
+    /// What the last frame reported, each fact tagged with whose it is: the
+    /// same facts `advance` returned, for a caller judging every slot of a
+    /// machine that keeps itself in step (ADR 0036).
+    pub fn slot_events(&self) -> &[SlotEvent] {
+        &self.slot_events
+    }
+
     /// Plug this many pads, for a sync test on a manifest that declares no
     /// bout. Port 0 keeps its device.
     pub fn plug(&mut self, ports: u8) {

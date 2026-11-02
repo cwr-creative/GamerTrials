@@ -49,8 +49,8 @@ directly between them (ADR 0036).
 
 ## Status
 
-Vertical slice: a four-game library — Super Mario Bros. 3 (NES), Donkey Kong
-Country (SNES), Doom (DOS) and Street Fighter II Turbo (SNES) — and matches
+Vertical slice: a five-game library — Super Mario Bros. 3 (NES), Donkey Kong
+Country (SNES), Doom and Doom II (DOS) and Street Fighter II Turbo (SNES) — and matches
 that play end to end across them, solo on one machine or in a lobby of several
 over the internet. Players supply their own game files; the client verifies
 them by hash.
@@ -63,10 +63,9 @@ ports and Windows-era PC games are out of scope.
 What has been played: networked matches between live players on separate
 machines, with generated challenges dealt and every artifact hash agreeing;
 spectating, picture and sound, relayed through the server; and head-to-head
-bouts in Street Fighter II between two and three clients on one machine
-through the server. Not yet: a bout between two machines over the internet,
-and Doom deathmatch, whose plumbing is built but whose stage needs a bundle
-that boots into IPX (`docs/games/doom.md`).
+bouts between two and three clients on one machine through the server, in
+Street Fighter II by rollback and in Doom II deathmatch over Doom's own
+netcode. Not yet: a bout between two machines over the internet.
 
 ## Running it
 

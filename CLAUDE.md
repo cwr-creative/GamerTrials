@@ -243,11 +243,15 @@ sync test and RAM log — `docs/games/sf2.md`) on two clients on one machine
 through `gamertrials-server`, with `--script` pressing the buttons: both
 found each other through the rendezvous, judged the same verdict on the
 same frame, and the server agreed; and with three, the third backing a
-side by the deadline and taking that side's entry. **Not yet**: two
-machines over the internet with ggrs's numbers recorded against ADR 0036
-(which stays Proposed until then), and a bout with hands on the pads. Doom's deathmatch needs a bundle of its own whose `[autoexec]` runs
-`IPXSETUP` (`docs/games/doom.md`); the shipped bundle warps to E1M1 alone,
-so no `deathmatch` stage ships until that bundle exists.
+side by the deadline and taking that side's entry. **And the second
+mechanism**: `manifests/doom2.toml`, a DOOM II deathmatch on a bundle the
+player builds (the shareware engine, id's `IPXSETUP.EXE`, the commercial
+WAD — `docs/games/doom.md`), joined to the core's network before the boot
+and relayed packet by packet; two clients on one machine booted, found
+each other, and ran the level in lockstep with both players present until
+the limit. **Not yet**: two machines over the internet with ggrs's numbers
+recorded against ADR 0036 (which stays Proposed until then), a frag scored
+by anything but random keys, and a bout with hands on the pads.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`

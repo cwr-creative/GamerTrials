@@ -1,0 +1,191 @@
+# DOOM II deathmatch (DOS), head-to-head over the game's own netcode.
+#
+# The second mechanism of ADR 0036: each player runs their own emulated DOS
+# machine, Doom's lockstep netcode keeps the two in step over dosbox-pure's
+# emulated IPX driver, and the client only carries the packets. Doom
+# simulates every player on every machine, so both players' structs are
+# read here, each fact tagged with whose it is — as on a rolled-back
+# machine.
+#
+# The bundle is the shareware 1.9 engine (DOOM.EXE), id's IPXSETUP.EXE from
+# the same distribution, and the full DOOM2.WAD, with a dosbox.conf whose
+# autoexec runs IPXSETUP so both machines sit waiting for each other once
+# booted. The engine is the shipped shareware one, so every address below is
+# `doom.toml`'s: players[0] at 0x389E78, players[1] one player_t (0x118)
+# after it. docs/games/doom.md.
+
+schema_version = 3
+
+[game]
+id = "doom2"
+title = "DOOM II"
+console = "dos"
+region = "usa"
+genre = "fps"
+year = 1994
+framerate = 70.0866
+
+[[rom]]
+id = "base"
+name = "DOOM II deathmatch (DOOM.EXE 1.9 + IPXSETUP.EXE + DOOM2.WAD + dosbox.conf + DEFAULT.CFG)"
+path = "assets/ROMs/dos/doom2-dm.zip"
+header = "none"
+# Members, not the container:
+#   DOOM.EXE      sha1 aa0668fae2f743ee5e3e5634ee42d3c8ace7d907 (shareware 1.9)
+#   IPXSETUP.EXE  sha1 c76c6eb16dd2d27acfd8da049d0727744381095b (doom19s)
+#   DOOM2.WAD     sha1 7ec7652fcfce8ddc6e801839291f0e28ef1d5ae7 (v1.9)
+#   DEFAULT.CFG   sha1 f193767bde9b9b36a27d14d23780b27db79a74e3
+sha1 = "f03356f10dc79523644e194ad6ad853f091fd78a"
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+core_dir = "cores/dos"
+controller = "keyboard"
+# Cold boot: DOS starts, the [autoexec] runs IPXSETUP, which waits for the
+# other machine. The game itself starts only once both are in, after `Go`.
+boot_seconds = 16.0
+settle_ms = 10
+# The machine brings its own network (ADR 0036): the client joins it before
+# the game boots and relays its packets to the other player's machine.
+netplay = "packets"
+
+[runner.libretro.pad_keys]
+up = "up"
+down = "down"
+left = "left"
+right = "right"
+b = "lctrl"
+r2 = "lctrl"
+a = "space"
+y = "lshift"
+l = "comma"
+r = "period"
+l2 = "lalt"
+x = "enter"
+start = "escape"
+select = "tab"
+
+[runner.libretro.options]
+dosbox_pure_cycles = "77000"
+dosbox_pure_force60fps = "false"
+dosbox_pure_menu_time = "0"
+dosbox_pure_conf = "inside"
+dosbox_pure_savestate = "on"
+dosbox_pure_on_screen_keyboard = "false"
+
+[runner.libretro.memory]
+base = 0x0
+size = 0x1000000
+prefer = "memory_map"
+endian = "little"
+default_width = "u32"
+
+[runner.libretro.memory.scan]
+at = 0x380000
+size = 0x10000
+
+# ---------------------------------------------------------------- what to read
+
+[watch.p1_health]
+at = 0x389E98
+note = "players[0].health, as doom.toml has it."
+
+[watch.p2_health]
+at = 0x389FB0
+note = "players[1].health: players[0].health + sizeof(player_t) = 0x118."
+
+[watch.p1_state]
+at = 0x389E7C
+note = "players[0].playerstate: 0 live, 1 dead, 2 reborn."
+
+[watch.p2_state]
+at = 0x389F94
+note = "players[1].playerstate."
+
+[watch.p1_frags]
+at = 0x389EDC
+note = """players[0].frags[1]: how many times player 1 killed player 2. frags[] \
+is at +0x60 in player_t, one int per player; a suicide counts under frags[0] \
+and is not counted here."""
+
+[watch.p2_frags]
+at = 0x389FF0
+note = "players[1].frags[0]: how many times player 2 killed player 1."
+
+[watch.gamestate]
+at = 0x38A3F4
+note = "gamestate_t: 0 in a level."
+
+[watch.gamemap]
+at = 0x38A3E8
+
+[display]
+fields = ["gamestate", "gamemap", "p1_health", "p2_health", "p1_frags", "p2_frags"]
+
+# -------------------------------------------------------------------- rules
+
+[[rule]]
+field = "p1_frags"
+edge = "increases"
+emit = "count"
+counter = "frags"
+slot = 0
+
+[[rule]]
+field = "p2_frags"
+edge = "increases"
+emit = "count"
+counter = "frags"
+slot = 1
+
+[[rule]]
+field = "p1_health"
+edge = "decreases"
+emit = "damaged"
+slot = 0
+
+[[rule]]
+field = "p2_health"
+edge = "decreases"
+emit = "damaged"
+slot = 1
+
+# A death respawns in a deathmatch; a fact, not an ending (ADR 0036).
+[[rule]]
+field = "p1_state"
+edge = "enters"
+value = 1
+emit = "died"
+slot = 0
+
+[[rule]]
+field = "p2_state"
+edge = "enters"
+value = 1
+emit = "died"
+slot = 1
+
+# ------------------------------------------------------------------- stages
+
+[[stage]]
+id = "map01-deathmatch"
+name = "MAP01: Entryway, deathmatch"
+# A cold boot into IPXSETUP, which waits for the other machine; the netpacket
+# contract forbids restoring a state while connected, so there is no `state`
+# entry for a bout.
+rom = "base"
+entry = { named = "MAP01" }
+
+# --------------------------------------------------------------- challenges
+
+[[challenge]]
+id = "map01-deathmatch"
+name = "Deathmatch"
+stage = "map01-deathmatch"
+kind = "head_to_head"
+slots = 2
+complete_when = { counts = { frags = 3 } }
+goal = "Three frags!"
+limit_seconds = 150
