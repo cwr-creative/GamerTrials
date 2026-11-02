@@ -21,6 +21,15 @@ else crosses it — the two players then talk to each other directly. `--udp
 <port>` moves it, `--udp off` deals no bouts, and on a host whose firewall
 is open for the listen port, open it for UDP too.
 
+The players' own machines talk on their **bout port**, UDP 7879 unless
+Settings › Profile says otherwise. Two players behind ordinary home routers
+usually find each other without help. A player on a phone, behind a VPN or
+a carrier's NAT usually cannot be reached, so the other side must be: forward
+UDP 7879 on that player's router to their machine, and allow the client
+through its firewall. A player who hosts the server and plays on the same
+machine forwards both, 7878 and 7879. Two players who both cannot be reached
+cannot play a bout; the round is voided (ADR 0029).
+
 ## Beyond the LAN: behind TLS
 
 The server never holds a certificate (ADR 0033). Put a proxy in front of

@@ -64,6 +64,8 @@ pub struct BoutLoad {
     pub rendezvous: Option<SocketAddr>,
     /// Frames this player's own input is delayed (Settings).
     pub input_delay: u8,
+    /// The UDP port to take, so a router can forward it (Settings); 0 for any.
+    pub port: u16,
 }
 
 /// What the client tells the game thread.
@@ -516,7 +518,7 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             if judged.kind != ChallengeKind::HeadToHead {
                 return Err(format!("{} is not a head-to-head challenge", judged.id));
             }
-            let udp = Udp::bind("0.0.0.0:0".parse().unwrap()).map_err(|e| format!("cannot open a UDP socket: {e}"))?;
+            let udp = bind_bout(b.port)?;
             let judge = Bout::new(judged.clone(), Some(l.limit)).map_err(|e| e.to_string())?;
             let token = token_for(&udp);
             Some(BoutState {
@@ -726,6 +728,23 @@ fn token_for(udp: &Udp) -> u64 {
     z ^ (z >> 31)
 }
 
+/// The bout's UDP side, on the port Settings names so a router can forward
+/// it; any port when that one is taken, as by a second client on this
+/// machine, or when Settings says 0.
+fn bind_bout(port: u16) -> Result<Udp, String> {
+    let any = || Udp::bind("0.0.0.0:0".parse().unwrap()).map_err(|e| format!("cannot open a UDP socket: {e}"));
+    if port == 0 {
+        return any();
+    }
+    match Udp::bind(SocketAddr::from(([0, 0, 0, 0], port))) {
+        Ok(udp) => Ok(udp),
+        Err(e) => {
+            eprintln!("[bout] UDP port {port}: {e}; taking any port, which a router will not forward");
+            any()
+        }
+    }
+}
+
 /// The address this machine's UDP side is at on its own network: the
 /// interface that reaches the server, and the bound port. What a peer on the
 /// same LAN or the same machine uses, since the address the server saw may
@@ -855,8 +874,16 @@ fn bout_prepare(l: &mut Loaded, reports: &Sender<Report>) {
 fn connect_bout(l: &mut Loaded, peers: Vec<(u8, Vec<SocketAddr>)>) -> Result<(), String> {
     let Some(b) = l.bout.as_mut() else { return Ok(()) };
     let Some(mut udp) = b.udp.take() else { return Ok(()) };
+    let mine: Option<SocketAddr> = local_address(&udp, b.rendezvous).parse().ok();
     for (slot, candidates) in peers {
         if slot != b.slot.0 {
+            // A peer on the server's own network is, from out here, at the
+            // server's public address. This machine's own address is not
+            // the peer, whatever two networks with one private range say.
+            let candidates: Vec<SocketAddr> = head_to_head::reach(candidates, b.rendezvous)
+                .into_iter()
+                .filter(|c| Some(*c) != mine)
+                .collect();
             println!("[bout] slot {slot} at {candidates:?}");
             udp.peer(Slot(slot), candidates);
         }

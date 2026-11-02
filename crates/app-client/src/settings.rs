@@ -41,6 +41,11 @@ pub const STREAM_KBPS: (u32, u32) = (100, 2000);
 
 pub const SETTINGS_VERSION: u32 = 1;
 
+/// The bout's UDP port unless Settings says otherwise: one above the
+/// server's 7878, so a player hosting the server and playing on one machine
+/// forwards the pair.
+pub const DEFAULT_BOUT_PORT: u16 = 7879;
+
 // ------------------------------------------------------------------ inputs
 
 /// A physical pad button, by position. Same order as
@@ -475,6 +480,11 @@ pub struct Settings {
     /// other machine's has time to arrive and fewer frames are guessed. Felt
     /// on one's own buttons; fewer rollbacks for the other side.
     pub bout_input_delay: u8,
+    /// The UDP port a bout's inputs arrive on (ADR 0036): fixed, so a player
+    /// at home can forward it on their router and be reached by a player
+    /// whose own network cannot be (a phone, a VPN). 0 takes any free port.
+    /// Taken already — a second client on this machine — means any port.
+    pub bout_port: u16,
     pub input: InputSettings,
     /// By core id: `mesen`, `snes9x`, `dosbox_pure`.
     pub cores: BTreeMap<String, Layer>,
@@ -491,6 +501,7 @@ impl Default for Settings {
             server: String::new(),
             stream_kbps: DEFAULT_STREAM_KBPS,
             bout_input_delay: 2,
+            bout_port: DEFAULT_BOUT_PORT,
             input: InputSettings::default(),
             cores: BTreeMap::new(),
             games: BTreeMap::new(),

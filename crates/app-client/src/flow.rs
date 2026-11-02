@@ -435,8 +435,11 @@ impl Flow {
                 }
                 let bout = bout.then(|| {
                     let slot = players.iter().position(|p| *p == me).unwrap_or(0) as u8;
-                    let input_delay = self.settings.lock().unwrap().bout_input_delay;
-                    BoutLoad { slot, slots: players.len() as u8, rendezvous: self.rendezvous_addr(), input_delay }
+                    let (input_delay, port) = {
+                        let s = self.settings.lock().unwrap();
+                        (s.bout_input_delay, s.bout_port)
+                    };
+                    BoutLoad { slot, slots: players.len() as u8, rendezvous: self.rendezvous_addr(), input_delay, port }
                 });
                 let load = Load {
                     round,

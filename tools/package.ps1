@@ -20,7 +20,7 @@ if (-not $SkipBuild) {
 }
 
 $commit = (git rev-parse --short HEAD).Trim()
-if (git status --porcelain) { $commit = "$commit-dirty" }
+if (git status --porcelain --untracked-files=no) { $commit = "$commit-dirty" }
 $name = "GamerTrials-$commit"
 $dist = Join-Path $root 'dist'
 $out = Join-Path $dist $name
@@ -112,7 +112,14 @@ Set-Content -Encoding ascii (Join-Path $out 'README.txt') @(
     'To host a server on this machine, run "Start server.cmd" and forward TCP'
     '7878 and UDP 7878 to it: the lobby and the match ride the TCP port, and a'
     'head-to-head bout probes the UDP one so the two players can find each'
-    'other and then play directly. Every player must run the same build: a'
+    'other and then play directly.'
+    ''
+    'The players then talk directly on the bout port, UDP 7879 (Settings >'
+    'Profile). Forward UDP 7879 to this machine too if your opponent plays from'
+    'a phone or behind a VPN: one side of every pair must be reachable, and'
+    'two that both cannot be reached cannot play a bout.'
+    ''
+    'Every player must run the same build: a'
     'client whose manifests hash differently from the server''s is refused,'
     'and says which hash it holds.'
     ''

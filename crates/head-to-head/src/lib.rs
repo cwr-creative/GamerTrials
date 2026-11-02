@@ -29,6 +29,6 @@ pub mod link;
 pub mod relay;
 pub mod rollback;
 
-pub use link::{Channels, Link, Udp};
+pub use link::{is_public, reach, Channels, Link, Udp};
 pub use relay::Relay;
 pub use rollback::{Confirmed, Error, Rollback, Settings, State, Stats};
