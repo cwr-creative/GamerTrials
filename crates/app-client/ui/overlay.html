@@ -349,7 +349,8 @@
   const LEAD_MS = 150;
   const spec = { players: [], player: null, decoder: null, size: null, needKey: true,
                  frames: [], raf: null, audio: null, nextTime: 0, timer: null, padWas: null,
-                 painted: [], since: 0, slow: false, run: null, said: [] };
+                 painted: [], since: 0, slow: false, run: null, said: [],
+                 configuring: false, failures: 0, broken: null };
   const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
   function closeFeed() {
@@ -376,8 +377,7 @@
     const several = spec.players.length > 1;
     $('sp-prev').classList.toggle('hidden', !several);
     $('sp-next').classList.toggle('hidden', !several);
-    $('sp-note').textContent = '';
-    if (!('VideoDecoder' in window)) $('sp-note').textContent = 'This webview cannot decode video.';
+    $('sp-note').textContent = !('VideoDecoder' in window) ? 'This webview cannot decode video.' : spec.broken || '';
     show('spectate'); hide('waiting');
     if (!spec.timer) spec.timer = setInterval(() => { pollSpectatePad(); checkFeed(); showRun(); }, 50);
     if (!spec.raf) spec.raf = requestAnimationFrame(paintDue);
@@ -402,20 +402,26 @@
 
   async function onVideo(p) {
     if (!('VideoDecoder' in window) || !spec.player || p.player !== spec.player) return;
+    if (spec.broken || spec.configuring) return;
     const size = p.width + 'x' + p.height;
     if (!spec.decoder || spec.size !== size) {
-      if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} }
+      if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} spec.decoder = null; }
       const config = { codec: 'avc1.42E01E', optimizeForLatency: true };
+      // One check at a time: pictures keep arriving while it is awaited, and
+      // each would otherwise build a decoder of its own.
+      spec.configuring = true;
       try {
         const ok = await VideoDecoder.isConfigSupported(config);
-        if (!ok.supported) { $('sp-note').textContent = 'This webview cannot decode H.264.'; return; }
-      } catch (e) { $('sp-note').textContent = 'Cannot decode: ' + e.message; return; }
-      spec.decoder = new VideoDecoder({
-        output: frame => { spec.frames.push({ frame, due: now() + LEAD_MS }); },
-        error: e => { hud('decode error: ' + e.message); spec.needKey = true; },
+        if (!ok.supported) { giveUp('This webview cannot decode H.264.'); return; }
+      } catch (e) { giveUp('Cannot decode: ' + e.message); return; }
+      finally { spec.configuring = false; }
+      if (p.player !== spec.player) return;
+      const d = new VideoDecoder({
+        output: frame => { spec.failures = 0; spec.frames.push({ frame, due: now() + LEAD_MS }); },
+        error: e => decodeFailed(d, e.message),
       });
-      spec.decoder.configure(config);
-      spec.size = size; spec.needKey = true;
+      d.configure(config);
+      spec.decoder = d; spec.size = size; spec.needKey = true;
       fitFeed(p.width, p.height, p.aspect);
     }
     if (spec.needKey && !p.key) return;
@@ -424,7 +430,26 @@
       spec.decoder.decode(new EncodedVideoChunk({
         type: p.key ? 'key' : 'delta', timestamp: p.frame * 16667, data: b64(p.data),
       }));
-    } catch (e) { hud('decode: ' + e.message); spec.needKey = true; }
+    } catch (e) { decodeFailed(spec.decoder, e.message); }
+  }
+
+  // A decoder that fails is closed for good — WebKitGTK closes one whose
+  // GStreamer element cannot handle the stream, and every decode() after
+  // that throws "not configured" — so it is dropped and the next key frame
+  // builds another. One that fails every time is this machine's, not this
+  // picture's: after a few the picture is given up, and the run stands in.
+  const DECODE_TRIES = 3;
+  function decodeFailed(d, why) {
+    if (!d || d !== spec.decoder) return;
+    try { d.close(); } catch (e) {}
+    spec.decoder = null; spec.size = null; spec.needKey = true;
+    hud('decode error: ' + why);
+    if (++spec.failures >= DECODE_TRIES) giveUp('This machine cannot decode the video: ' + why);
+  }
+  function giveUp(why) {
+    spec.broken = why;
+    $('sp-note').textContent = why;
+    slowText();
   }
 
   // Paints the newest frame that is due, and lets the older ones go.
@@ -461,7 +486,12 @@
     spec.slow = slow;
     $('spectate').classList.toggle('slow', slow);
     $('sp-slow').classList.toggle('hidden', !slow);
+    slowText();
     if (spec.player) hud(slow ? 'feed too slow: following the run' : 'feed back');
+  }
+  function slowText() {
+    $('sp-slow').innerHTML = (spec.broken ? 'No live video on this machine.'
+                                          : 'Connection too slow for live video.') + '<br>Following the run instead.';
   }
 
   // A Progress report: the clock as the server judged it on `frame`. It

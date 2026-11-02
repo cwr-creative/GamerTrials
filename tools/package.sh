@@ -97,8 +97,9 @@ To host a server on this machine, run ./start-server.sh and forward TCP
 hash differently from the server's is refused, and says which hash it holds.
 
 Settings are kept in ~/.config/com.cwr.gamertrials/settings.toml.
-Needs an X11 session or XWayland (every Ubuntu desktop has one) and the
-WebKitGTK 4.1 runtime: sudo apt install libwebkit2gtk-4.1-0
+Needs an X11 session or XWayland (every Ubuntu desktop has one), the
+WebKitGTK 4.1 runtime, and libav's H.264 decoder to watch another player:
+sudo apt install libwebkit2gtk-4.1-0 gstreamer1.0-libav
 EOF
 
 tar -C "$root/dist" -czf "$out.tar.gz" "$name"

@@ -325,6 +325,23 @@ fn main() {
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11");
     }
+    // A watched player's picture is decoded by WebKitGTK through GStreamer
+    // (ADR 0032), which picks a hardware H.264 decoder over a software one
+    // whatever their ranks — and NVIDIA's and VA-API's fail on this stream,
+    // closing the decoder at its first frame. Ranked out, it falls to libav's
+    // avdec_h264 (`gstreamer1.0-libav`), which a 256x240 picture costs
+    // nothing. Inherited by WebKit's own processes; a player's ranks come
+    // after these, so they win.
+    #[cfg(target_os = "linux")]
+    {
+        const HARDWARE_H264: &str = "nvh264dec:NONE,nvh264sldec:NONE,vah264dec:NONE,vaapih264dec:NONE,\
+            v4l2h264dec:NONE,v4l2slh264dec:NONE,msdkh264dec:NONE,qsvh264dec:NONE,nvv4l2decoder:NONE";
+        let ranks = match std::env::var("GST_PLUGIN_FEATURE_RANK") {
+            Ok(theirs) if !theirs.is_empty() => format!("{HARDWARE_H264},{theirs}"),
+            _ => HARDWARE_H264.to_string(),
+        };
+        std::env::set_var("GST_PLUGIN_FEATURE_RANK", ranks);
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
