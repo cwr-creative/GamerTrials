@@ -40,11 +40,14 @@ function Copy-Tree($from, $to, $filter = '*', [switch]$Flat) {
     }
 }
 
-Copy-Item target\release\app-client.exe (Join-Path $out 'GamerTrials.exe')
-Copy-Item target\release\gamertrials-server.exe $out
+# CARGO_TARGET_DIR when set: a build beside a running server cannot replace
+# its locked exe in target\release.
+$release = Join-Path $(if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }) 'release'
+Copy-Item (Join-Path $release 'app-client.exe') (Join-Path $out 'GamerTrials.exe')
+Copy-Item (Join-Path $release 'gamertrials-server.exe') $out
 # The developer harness, for the input-replay spike's second-machine test
 # (docs/replay-spike.md): it replays a recording made on another machine.
-Copy-Item target\release\harness.exe $out
+Copy-Item (Join-Path $release 'harness.exe') $out
 Copy-Item docs\replay-spike.md $out
 # The server links the MSVC runtime dynamically and a fresh Windows may lack
 # it; Microsoft allows this one file to sit beside the program that needs it.
