@@ -116,7 +116,7 @@ Set-Content -Encoding ascii (Join-Path $out 'README.txt') @(
     ''
     'The players then talk directly on the bout port, UDP 7879 (Settings >'
     'Profile). Forward UDP 7879 to this machine too if your opponent plays from'
-    'a phone or behind a VPN: one side of every pair must be reachable, and'
+    'behind a VPN or a carrier''s NAT: one side of every pair must be reachable, and'
     'two that both cannot be reached cannot play a bout.'
     ''
     'Every player must run the same build: a'

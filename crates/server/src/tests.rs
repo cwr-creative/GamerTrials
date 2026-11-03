@@ -593,7 +593,33 @@ fn a_player_leaving_mid_match_ends_it() {
 // ------------------------------------------------------------- spectating
 
 fn video(round: u64, frame: u64) -> ToServer {
-    ToServer::Video { round, frame, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into() }
+    ToServer::Video { round, frame, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into(), thumb: false }
+}
+
+fn thumb(round: u64, frame: u64) -> ToServer {
+    ToServer::Video { round, frame, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into(), thumb: true }
+}
+
+fn thumbs_from(t: &Table, who: usize) -> Vec<(String, u64)> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Video { player, frame, thumb: true, .. } => Some((player.clone(), *frame)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn thumbed(t: &Table, who: usize) -> Vec<u32> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Watched { thumbs, .. } => Some(*thumbs),
+            _ => None,
+        })
+        .collect()
 }
 
 fn videos_from(t: &Table, who: usize) -> Vec<(String, u64)> {
@@ -601,7 +627,7 @@ fn videos_from(t: &Table, who: usize) -> Vec<(String, u64)> {
         .inbox
         .iter()
         .filter_map(|m| match m {
-            ToClient::Video { player, frame, .. } => Some((player.clone(), *frame)),
+            ToClient::Video { player, frame, thumb: false, .. } => Some((player.clone(), *frame)),
             _ => None,
         })
         .collect()
@@ -739,6 +765,55 @@ fn an_eliminated_player_watches_from_the_deal() {
     t.play(0, round, &spec, limit);
     t.play(2, round, &spec, limit);
     assert!(t.errors(1).is_empty());
+}
+
+#[test]
+fn players_still_playing_show_each_other_in_the_sidebar() {
+    let mut t = Table::new(11);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.join("other", ace);
+    t.settings(LobbySettings { format: Format::Challenges(1), ..Default::default() });
+    t.start();
+    let (round, cref, limit) = t.last_dealt(0).unwrap();
+    let spec = t.spec(&cref);
+    for who in 0..3 {
+        t.send(who, ToServer::Prepared { round, artifact: "abc".into() });
+    }
+    for who in 0..3 {
+        t.take(who);
+    }
+    // Both still playing, and seeing ahead is allowed (ADR 0038).
+    t.send(0, ToServer::Thumbs { round, players: vec!["guest".into(), "other".into()] });
+    t.send(1, ToServer::Thumbs { round, players: vec!["other".into()] });
+    assert!(refusals(&t, 0).is_empty() && refusals(&t, 1).is_empty(), "{:?}", refusals(&t, 0));
+    assert_eq!(thumbed(&t, 1), [1]);
+    assert_eq!(thumbed(&t, 2), [1, 2], "told on each change");
+    assert_eq!(watched(&t, 2), [0, 0], "nobody watches them full-size");
+    t.send(2, thumb(round, 5));
+    t.send(2, video(round, 5));
+    assert_eq!(thumbs_from(&t, 0), [("other".to_string(), 5)]);
+    assert_eq!(thumbs_from(&t, 1), [("other".to_string(), 5)]);
+    assert!(videos_from(&t, 0).is_empty(), "a full picture goes only to a full watcher");
+    // Replacing the set tells only whoever it changed for.
+    for who in 0..3 {
+        t.take(who);
+    }
+    t.send(0, ToServer::Thumbs { round, players: vec!["other".into()] });
+    assert_eq!(thumbed(&t, 1), [0]);
+    assert!(thumbed(&t, 2).is_empty(), "still shown by both");
+    t.send(1, thumb(round, 6));
+    assert!(thumbs_from(&t, 0).is_empty());
+    // The limits.
+    t.send(0, ToServer::Thumbs { round, players: vec!["host".into()] });
+    assert_eq!(refusals(&t, 0), ["you cannot show yourself"]);
+    t.take(0);
+    t.send(0, ToServer::Thumbs { round, players: vec!["a".into(), "b".into(), "c".into(), "d".into()] });
+    assert_eq!(refusals(&t, 0), ["at most 3 thumbnails"]);
+    for who in 0..3 {
+        t.play(who, round, &spec, limit);
+    }
+    assert!(t.errors(0).is_empty());
 }
 
 // ------------------------------------------------------------ head-to-head

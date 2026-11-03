@@ -96,7 +96,7 @@ cargo run --release -p server-net -- --listen 0.0.0.0:7878 --manifests manifests
 It listens for WebSockets on that port and for head-to-head probes on the
 same port over UDP, so open both on the host's firewall. In a bout the two
 players' machines then talk directly on UDP 7879, the bout port in Settings ›
-Profile; a player at home whose opponent is on a phone or a VPN forwards
+Profile; a player at home whose opponent is behind a VPN or a carrier's NAT forwards
 that port too, since one side of every pair must be reachable. Players put the
 host's address in Settings › Profile, or paste the invite the lobby shows. A
 server behind a TLS proxy, which players reach as `wss://host`, and the

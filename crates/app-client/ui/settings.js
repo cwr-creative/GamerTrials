@@ -488,6 +488,7 @@
       $('s-body').innerHTML = '<table class="form"><tr><td>Display name</td><td><input id="pname" maxlength="24" value="' + esc(S.name) + '"></td></tr>' +
         '<tr><td>Server</td><td><input id="pserver" maxlength="255" spellcheck="false" placeholder="host:port or wss://host" value="' + esc(S.server || '') + '"></td></tr>' +
         '<tr><td>Stream</td><td><input id="pstream" type="number" min="100" max="2000" step="50" value="' + S.stream_kbps + '"> kbit/s</td></tr>' +
+        '<tr><td>Thumbnail</td><td><input id="pthumb" type="number" min="50" max="2000" step="25" value="' + (S.thumb_kbps ?? 250) + '"> kbit/s</td></tr>' +
         '<tr><td>Bout input delay</td><td><input id="pdelay" type="number" min="0" max="10" value="' + (S.bout_input_delay ?? 2) + '"> frames</td></tr>' +
         '<tr><td>Bout UDP port</td><td><input id="pport" type="number" min="0" max="65535" value="' + (S.bout_port ?? 7879) + '"></td></tr></table>' +
         '<p class="note">The <code>gamertrials-server</code> that Host game opens a lobby on, and that a bare invite code joins. ' +
@@ -495,8 +496,10 @@
         '<p class="note">Stream is the picture you send a player watching you, 100 to 2000 kbit/s; 500 unless you change it. ' +
         'Higher is sharper and needs more of your upload. A link that cannot carry it drops pictures rather than falling behind, ' +
         'so too high costs a watcher smoothness, never the match. Takes effect from the next picture, even while someone watches.</p>' +
+        '<p class="note">Thumbnail is the small picture of your game in the other players\' sidebars while you play, 50 to 2000 kbit/s; 250 unless you change it. ' +
+        'It is sent for your whole run once anyone shows you, at the full frame rate, beside the stream when someone also watches you full-size.</p>' +
         '<p class="note">In a head-to-head bout your machine and your opponent\'s talk directly, over UDP on the bout port; 7879 unless you change it, 0 for any. ' +
-        'Forward that port on your router to this machine and anyone can reach you, even from a phone or behind a VPN. ' +
+        'Forward that port on your router to this machine and anyone can reach you, even from behind a VPN or a carrier\'s NAT. ' +
         'Two players who both cannot be reached cannot play a bout.</p>' +
         '<p class="note">Settings are saved to <code>' + esc(settingsPath || 'nowhere — no config directory') + '</code>. They never leave this machine.</p>';
     }
@@ -594,6 +597,8 @@
       S.server = t.value.trim();
     } else if (t.id === 'pstream') {
       S.stream_kbps = parseInt(t.value) || 500;
+    } else if (t.id === 'pthumb') {
+      S.thumb_kbps = parseInt(t.value) || 250;
     } else if (t.id === 'pdelay') {
       S.bout_input_delay = Math.max(0, Math.min(10, parseInt(t.value) || 0));
     } else if (t.id === 'pport') {

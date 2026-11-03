@@ -110,7 +110,7 @@ known the server tells each the other's candidates, and the clients send to
 all of them until one answers. That is what lets two clients on one machine,
 two on a LAN and two across the internet connect without a STUN service.
 Two refinements came from the first try across the internet, a player on the
-server's home network against a laptop on a phone. A player who reaches the
+server's home network against a laptop on another network. A player who reaches the
 server from its own network is seen only at private addresses, so the other
 client also tries the server's public address, the one it dialled, on that
 player's port. And a carrier's NAT gives each destination its own port, so a
@@ -174,7 +174,7 @@ in it. The server's `Seat` keeps meaning a connection.
 **A UDP port beside the WebSocket one**, and a flag to say where it is when a
 proxy fronts the WebSocket (ADR 0033). `docs/server.md` says which to open.
 And a player's own bout port, UDP 7879 by default, which a player at home
-forwards to be reachable from a phone or a VPN.
+forwards to be reachable from behind a VPN or a carrier's NAT.
 
 **Protocol version 5.** The new messages are all control lane and the stream
 is untouched; only ggrs traffic leaves the WebSocket.

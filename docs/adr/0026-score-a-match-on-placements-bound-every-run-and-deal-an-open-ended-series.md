@@ -1,7 +1,7 @@
 # 0026. Score a match on placements, bound every run, and deal an open-ended series
 
 Date: 2026-10-28
-Status: Accepted
+Status: Accepted; its spectating paragraph superseded by 0038
 
 ## Context
 
@@ -74,7 +74,7 @@ exhausted. The seed a generated challenge is rolled from is derived from the
 match seed and the challenge's index, so every player derives the same
 artifact (ADR 0013).
 
-**Spectating does not leak a generated layout.** ADR 0013 left this open. Only
+**Spectating does not leak a generated layout.** *(Withdrawn by ADR 0038: seeing ahead is allowed.)* ADR 0013 left this open. Only
 finished or eliminated players spectate, and neither plays that challenge
 again, so there is nothing for a spectator to carry back in.
 

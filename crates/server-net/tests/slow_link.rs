@@ -1,7 +1,7 @@
-//! A player on a slow link, as the first match over the internet had: a
-//! phone's 0.2 Mbit/s down and a few hundred kbit/s up (ADR 0034). Each
+//! A player on a slow link, as a test machine had in the first match over
+//! the internet: 0.2 Mbit/s down and a few hundred kbit/s up (ADR 0034). Each
 //! client runs `transport`'s loop, as `app-client`'s link does, and one of
-//! them reaches the server through a relay that holds its link to a phone's
+//! them reaches the server through a relay that holds its link to those
 //! rates. A watched player streams about what the client sends — 0.5 Mbit/s
 //! of picture and 64 kbit/s of sound — while still playing.
 //!
@@ -23,9 +23,9 @@ use session_api::{ChallengeSpec, StageRunner};
 use session_fake::{stage_for, Attempt, FakeRunner};
 use transport::{Ends, Next, Rules};
 
-/// A phone's link, as measured on the one that failed: bytes a second.
-const PHONE_DOWN: u64 = 25_000;
-const PHONE_UP: u64 = 50_000;
+/// The narrow link, as measured on the one that failed: bytes a second.
+const SLOW_DOWN: u64 = 25_000;
+const SLOW_UP: u64 = 50_000;
 
 /// How long the watched player streams for.
 const STREAM_FOR: Duration = Duration::from_secs(6);
@@ -53,7 +53,7 @@ impl Wired {
                 Ok(()) => Next::Go,
                 Err(_) => Next::Stop,
             };
-            transport::run(&mut ws, Rules::DEFAULT, &out, Ends { incoming: &mut incoming, key_wanted: &mut || {}, label: "test" })
+            transport::run(&mut ws, Rules::DEFAULT, &out, Ends { incoming: &mut incoming, key_wanted: &mut |_| {}, label: "test" })
         });
         Wired { tx, rx, inbox: Vec::new() }
     }
@@ -95,7 +95,7 @@ impl Wired {
 
 /// A relay holding the link between a client and `server` to `down` and
 /// `up` bytes a second. What it cannot pass on yet waits in its sockets'
-/// buffers, as it would in a phone network's.
+/// buffers, as it would in a congested network's.
 fn throttled(server: SocketAddr, down: u64, up: u64) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -179,14 +179,14 @@ fn age(epoch: Instant, at: Instant, data: &[u8]) -> Duration {
 }
 
 /// One match: `guest` finishes, then watches `host` stream while still
-/// playing. `slow_host` puts the host behind the phone's link, else the
+/// playing. `slow_host` puts the host behind the narrow link, else the
 /// guest is behind it.
 fn watch_over_a_slow_link(slow_host: bool) {
     let catalog = server_net::load_catalog(&manifests()).unwrap();
     let hash = format!("{:016x}", catalog.hash());
     let server = server_net::spawn("127.0.0.1:0", catalog.clone(), Rules::DEFAULT).unwrap();
-    let phone = throttled(server, PHONE_DOWN, PHONE_UP);
-    let (host_at, guest_at) = if slow_host { (phone, server) } else { (server, phone) };
+    let slow = throttled(server, SLOW_DOWN, SLOW_UP);
+    let (host_at, guest_at) = if slow_host { (slow, server) } else { (server, slow) };
 
     let mut host = Wired::connect(host_at);
     host.send(ToServer::Hello { name: "host".into(), library_hash: hash.clone(), lobby: None });
@@ -230,7 +230,7 @@ fn watch_over_a_slow_link(slow_host: bool) {
         let key = frame % 120 == 1;
         host.send(ToServer::Video {
             round, frame, key, width: 256, height: 240, aspect: 1.0,
-            data: stamped(epoch, if key { 6_000 } else { 1_000 }).into(),
+            data: stamped(epoch, if key { 6_000 } else { 1_000 }).into(), thumb: false,
         });
         host.send(ToServer::Audio { round, frame, rate: 16_000, channels: 1, data: stamped(epoch, 140).into() });
         sent += 1;

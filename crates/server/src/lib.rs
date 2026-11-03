@@ -19,7 +19,7 @@ use challenge_core::{Bout, Deal, Entry, Match, Next, Run, RunResult, Settings};
 use challenge_library::{Catalog, Challenge, Library};
 use protocol::{
     ChallengeRef, FileReport, LobbyPlayer, LobbySettings, LobbyState, Peer, RunOutcome,
-    ToClient, ToServer,
+    ToClient, ToServer, MAX_THUMBS,
 };
 use session_api::{PlayerId, Slot};
 
@@ -77,6 +77,8 @@ struct RoundState {
     /// Who watches whom (ADR 0032). Dropped with the round, so nothing is
     /// watched across one.
     watching: BTreeMap<PlayerId, PlayerId>,
+    /// Whom each player shows in their sidebar (ADR 0038). Likewise.
+    thumbs: BTreeMap<PlayerId, Vec<PlayerId>>,
     /// When the deal was first seen by the clock, for the backing window.
     dealt_at: Option<Instant>,
     peers_sent: bool,
@@ -225,9 +227,13 @@ impl Server {
                 let player = self.seats[seat].id.clone();
                 self.watch(conn, player, round, target.map(PlayerId))
             }
-            ToServer::Video { round, frame, key, width, height, aspect, data } => {
+            ToServer::Thumbs { round, players } => {
                 let player = self.seats[seat].id.clone();
-                self.relay(&player, round, |player| ToClient::Video {
+                self.thumbs(conn, player, round, players.into_iter().map(PlayerId).collect())
+            }
+            ToServer::Video { round, frame, key, width, height, aspect, data, thumb } => {
+                let player = self.seats[seat].id.clone();
+                let msg = |player| ToClient::Video {
                     round,
                     player,
                     frame,
@@ -236,7 +242,13 @@ impl Server {
                     height,
                     aspect,
                     data: data.clone(),
-                })
+                    thumb,
+                };
+                if thumb {
+                    self.relay_thumb(&player, round, msg)
+                } else {
+                    self.relay(&player, round, msg)
+                }
             }
             ToServer::Audio { round, frame, rate, channels, data } => {
                 let player = self.seats[seat].id.clone();
@@ -492,6 +504,7 @@ impl Server {
                     bout,
                     started: false,
                     watching: BTreeMap::new(),
+                    thumbs: BTreeMap::new(),
                     dealt_at: None,
                     peers_sent: false,
                     lost_at: None,
@@ -868,9 +881,10 @@ impl Server {
     }
 
     /// `player` wants to watch `target` this round, or nobody. Only a player
-    /// whose run is over, or who is not in the round, may watch: a player
-    /// still on a generated layout must not see another's (ADR 0026). The
-    /// targets whose count changed are told how many watch them now.
+    /// whose run is over, or who is not in the round, may watch: one still
+    /// playing has their own game in the main view, and the sidebar for the
+    /// rest (ADR 0038). The targets whose count changed are told how many
+    /// watch them now.
     fn watch(&mut self, conn: ConnId, player: PlayerId, round: u64, target: Option<PlayerId>) -> Outbox {
         let Some(rs) = self.live.as_mut().and_then(|l| l.round.as_mut()) else { return Vec::new() };
         if rs.deal.index != round {
@@ -901,9 +915,51 @@ impl Server {
         }
         let mut out = Vec::new();
         for t in changed {
-            let watchers = rs.watching.values().filter(|w| **w == t).count() as u32;
+            let (watchers, thumbs) = audience(rs, &t);
             if let Some(seat) = self.seats.iter().find(|s| s.id == t) {
-                out.push((seat.conn, ToClient::Watched { round, watchers }));
+                out.push((seat.conn, ToClient::Watched { round, watchers, thumbs }));
+            }
+        }
+        out
+    }
+
+    /// `player` shows `targets` in their sidebar this round, replacing whom
+    /// they showed (ADR 0038). Anyone in the match may, playing or not, and
+    /// for anyone in the round: seeing ahead is allowed. The targets whose
+    /// count changed are told how many show them now.
+    fn thumbs(&mut self, conn: ConnId, player: PlayerId, round: u64, mut targets: Vec<PlayerId>) -> Outbox {
+        let Some(rs) = self.live.as_mut().and_then(|l| l.round.as_mut()) else { return Vec::new() };
+        if rs.deal.index != round {
+            return Vec::new();
+        }
+        let refuse = |reason: &str| vec![(conn, ToClient::Refused { reason: reason.into() })];
+        targets.dedup();
+        if targets.len() > MAX_THUMBS {
+            return refuse(&format!("at most {MAX_THUMBS} thumbnails"));
+        }
+        for t in &targets {
+            if *t == player {
+                return refuse("you cannot show yourself");
+            }
+            if !rs.seats.contains_key(t) {
+                return refuse(&format!("{t} is not playing this round"));
+            }
+        }
+        let before = rs.thumbs.remove(&player).unwrap_or_default();
+        let changed: Vec<PlayerId> = before
+            .iter()
+            .filter(|t| !targets.contains(t))
+            .chain(targets.iter().filter(|t| !before.contains(t)))
+            .cloned()
+            .collect();
+        if !targets.is_empty() {
+            rs.thumbs.insert(player, targets);
+        }
+        let mut out = Vec::new();
+        for t in changed {
+            let (watchers, thumbs) = audience(rs, &t);
+            if let Some(seat) = self.seats.iter().find(|s| s.id == t) {
+                out.push((seat.conn, ToClient::Watched { round, watchers, thumbs }));
             }
         }
         out
@@ -920,6 +976,21 @@ impl Server {
         rs.watching
             .iter()
             .filter(|(_, t)| *t == player)
+            .filter_map(|(w, _)| self.seats.iter().find(|s| s.id == *w))
+            .map(|s| (s.conn, msg(player.0.clone())))
+            .collect()
+    }
+
+    /// One of `player`'s thumbnail pictures, to everyone showing them this
+    /// round (ADR 0038). Never refused, as [`Server::relay`].
+    fn relay_thumb(&self, player: &PlayerId, round: u64, msg: impl Fn(String) -> ToClient) -> Outbox {
+        let Some(rs) = self.live.as_ref().and_then(|l| l.round.as_ref()) else { return Vec::new() };
+        if rs.deal.index != round {
+            return Vec::new();
+        }
+        rs.thumbs
+            .iter()
+            .filter(|(_, ts)| ts.contains(player))
             .filter_map(|(w, _)| self.seats.iter().find(|s| s.id == *w))
             .map(|s| (s.conn, msg(player.0.clone())))
             .collect()
@@ -997,6 +1068,14 @@ impl Server {
 
 fn standings_of(m: &Match) -> Vec<protocol::Standing> {
     m.standings().iter().map(Into::into).collect()
+}
+
+/// How many watch `player` full-size this round, and how many show them in
+/// their sidebar.
+fn audience(rs: &RoundState, player: &PlayerId) -> (u32, u32) {
+    let watchers = rs.watching.values().filter(|w| *w == player).count() as u32;
+    let thumbs = rs.thumbs.values().filter(|ts| ts.contains(player)).count() as u32;
+    (watchers, thumbs)
 }
 
 fn rs_seated(rs: &RoundState, player: &PlayerId) -> bool {

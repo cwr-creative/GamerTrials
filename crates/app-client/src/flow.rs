@@ -12,7 +12,9 @@
 //! leaving means: a host's closed window ends the match and keeps the lobby,
 //! a guest's leaves the lobby.
 
+use std::collections::hash_map::RandomState;
 use std::collections::BTreeMap;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -102,6 +104,16 @@ struct Current {
     playing: Vec<String>,
 }
 
+/// The sidebar of a round (ADR 0038): present for every round of a match
+/// of several but a bout, whoever is left to show in it.
+struct Thumbs {
+    round: u64,
+    /// Who is still playing this round, not counting this player.
+    active: Vec<String>,
+    /// Who is in each box, top to bottom: at most `MAX_THUMBS`.
+    shown: Vec<String>,
+}
+
 /// A round this player is watching rather than playing (ADR 0032): their
 /// run is over, or they are out of the match.
 struct Spectate {
@@ -134,6 +146,7 @@ pub struct Flow {
     waiting_load: Option<Load>,
     current: Option<Current>,
     spectate: Option<Spectate>,
+    thumbs: Option<Thumbs>,
     /// Which challenge each dealt round was, for the cards.
     dealt: BTreeMap<u64, ChallengeRef>,
     /// Who plays each dealt round, in slot order (ADR 0036).
@@ -197,6 +210,7 @@ impl Flow {
                     waiting_load: None,
                     current: None,
                     spectate: None,
+                    thumbs: None,
                     dealt: BTreeMap::new(),
                     slots: BTreeMap::new(),
                     rendezvous: None,
@@ -394,6 +408,17 @@ impl Flow {
                 let me = self.player.clone().unwrap_or_default();
                 let bout = kind == Kind::HeadToHead;
                 self.stop_spectating();
+                // The other players beside the game, in every round of a
+                // match of several but a bout, whose seats share one
+                // picture (ADR 0038).
+                let sidebar = !bout && self.lobby.as_ref().is_some_and(|l| l.players.len() > 1);
+                self.thumbs = sidebar.then(|| Thumbs {
+                    round,
+                    active: players.iter().filter(|p| **p != me).cloned().collect(),
+                    shown: Vec::new(),
+                });
+                self.emit_thumbs();
+                self.refresh_thumbs();
                 if !players.contains(&me) {
                     // Out of the match, or not seated in this bout: nothing
                     // to play, so watch (ADR 0032) — and in a bout, back a
@@ -451,6 +476,7 @@ impl Flow {
                     input,
                     video,
                     display,
+                    sidebar,
                     bout,
                     script: self.auto.script,
                 };
@@ -493,6 +519,7 @@ impl Flow {
                     self.current = None;
                 }
                 self.stop_spectating();
+                self.clear_thumbs();
                 let who = if self.player.as_deref() == Some(player.as_str()) { "you".to_string() } else { player };
                 self.emit(json!({
                     "kind": "voided", "round": round,
@@ -546,14 +573,27 @@ impl Flow {
                         self.emit_spectate();
                     }
                 }
-            }
-            ToClient::Watched { round, watchers } => {
-                println!("[match] round {round}: {watchers} watching");
-                if let Some(g) = &self.game {
-                    let _ = g.send(Command::Stream(watchers));
+                // Done, so out of the sidebar; another takes the box.
+                if let Some(th) = self.thumbs.as_mut().filter(|th| th.round == round) {
+                    th.active.retain(|p| p != &player);
+                    self.refresh_thumbs();
                 }
             }
-            ToClient::Video { round, player, frame, key, width, height, aspect, data } => {
+            ToClient::Watched { round, watchers, thumbs } => {
+                println!("[match] round {round}: {watchers} watching, {thumbs} in a sidebar");
+                if let Some(g) = &self.game {
+                    let _ = g.send(Command::Stream { watchers, thumbs });
+                }
+            }
+            ToClient::Video { round, player, frame, key, width, height, aspect, data, thumb: true } => {
+                if self.thumbs.as_ref().is_some_and(|th| th.round == round && th.shown.contains(&player)) {
+                    self.emit(json!({
+                        "kind": "thumb", "player": player, "frame": frame, "key": key,
+                        "width": width, "height": height, "aspect": aspect, "data": protocol::to_base64(&data.0),
+                    }));
+                }
+            }
+            ToClient::Video { round, player, frame, key, width, height, aspect, data, thumb: false } => {
                 if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
                     self.emit(json!({
                         "kind": "video", "player": player, "frame": frame, "key": key,
@@ -614,6 +654,7 @@ impl Flow {
                     println!("         {:>2}. {} {:?}", e.place, e.player, e.outcome.ending);
                 }
                 self.stop_spectating();
+                self.clear_thumbs();
                 let challenge = self.dealt.get(&round).cloned();
                 let title = challenge.as_ref().map(|c| self.describe(c)).unwrap_or_default();
                 let mode = self.lobby.as_ref().map(|l| l.settings.mode);
@@ -634,6 +675,8 @@ impl Flow {
                 }
                 self.current = None;
                 self.stop_spectating();
+                self.thumbs = None;
+                self.emit_thumbs();
                 let mode = self.lobby.as_ref().map(|l| l.settings.mode);
                 let format = self.lobby.as_ref().map(|l| l.settings.format);
                 self.emit(json!({
@@ -664,6 +707,7 @@ impl Flow {
                         let tracker = ov.clone();
                         thread::spawn(move || tracker.track());
                         self.overlay = Some(ov);
+                        self.emit_thumbs();
                     }
                     Err(e) => eprintln!("[overlay] cannot create: {e}"),
                 }
@@ -738,8 +782,8 @@ impl Flow {
                     self.start_spectating(round, others);
                 }
             }
-            Report::Video { round, frame, key, width, height, aspect, data } => {
-                self.send(ToServer::Video { round, frame, key, width, height, aspect, data: data.into() });
+            Report::Video { round, frame, key, width, height, aspect, data, thumb } => {
+                self.send(ToServer::Video { round, frame, key, width, height, aspect, data: data.into(), thumb });
             }
             Report::Audio { round, frame, rate, channels, data } => {
                 self.send(ToServer::Audio { round, frame, rate, channels, data: data.into() });
@@ -847,6 +891,8 @@ impl Flow {
         let round = s.round;
         self.send(ToServer::Watch { round, player });
         self.emit_spectate();
+        // Whoever is watched full-size is not also in the sidebar.
+        self.refresh_thumbs();
     }
 
     fn emit_spectate(&self) {
@@ -865,8 +911,59 @@ impl Flow {
             }
         }
         if let Some(g) = &self.game {
-            let _ = g.send(Command::Stream(0));
+            let _ = g.send(Command::Stream { watchers: 0, thumbs: 0 });
         }
+    }
+
+    // ------------------------------------------------------------- sidebar
+
+    /// Keeps the sidebar to at most `MAX_THUMBS` players still playing,
+    /// never this one nor the one watched full-size, drawn at random when
+    /// there are more (ADR 0038). A box whose player is done takes another
+    /// in its place, so the rest stay where they are. The server and the
+    /// page are told whenever who is shown changes.
+    fn refresh_thumbs(&mut self) {
+        let watching = self.spectate.as_ref().and_then(|s| s.watching.clone());
+        let Some(th) = self.thumbs.as_mut() else { return };
+        let ok = |p: &String| th.active.contains(p) && watching.as_ref() != Some(p);
+        let kept: Vec<String> = th.shown.iter().filter(|p| ok(p)).cloned().collect();
+        let free = |shown: &[String]| -> Vec<String> {
+            th.active.iter().filter(|p| ok(p) && !kept.contains(p) && !shown.contains(p)).cloned().collect()
+        };
+        let mut shown: Vec<String> = Vec::new();
+        for p in &th.shown {
+            let next = if ok(p) { Some(p.clone()) } else { pick(&free(&shown)) };
+            shown.extend(next);
+        }
+        while shown.len() < protocol::MAX_THUMBS {
+            match pick(&free(&shown)) {
+                Some(p) => shown.push(p),
+                None => break,
+            }
+        }
+        if shown == th.shown {
+            return;
+        }
+        th.shown = shown.clone();
+        let round = th.round;
+        self.send(ToServer::Thumbs { round, players: shown });
+        self.emit_thumbs();
+    }
+
+    /// The round is over: nobody left to show, though the sidebar stays
+    /// until the next deal says whether it is wanted. The server forgets
+    /// the round's sidebars itself.
+    fn clear_thumbs(&mut self) {
+        if let Some(th) = self.thumbs.as_mut() {
+            th.active.clear();
+            th.shown.clear();
+        }
+        self.emit_thumbs();
+    }
+
+    fn emit_thumbs(&self) {
+        let shown = self.thumbs.as_ref().map(|th| th.shown.clone()).unwrap_or_default();
+        self.emit(json!({ "kind": "thumbs", "sidebar": self.thumbs.is_some(), "players": shown }));
     }
 
     /// This client cannot run the round; the server voids it (ADR 0029).
@@ -1018,6 +1115,7 @@ impl Flow {
         }
         self.current = None;
         self.spectate = None;
+        self.thumbs = None;
         // `Report::Closed` follows and shows the lobby again.
     }
 
@@ -1056,6 +1154,18 @@ impl Flow {
             "custom": ch.is_custom(),
         })
     }
+}
+
+/// One of `from` at random, for the sidebar.
+fn pick(from: &[String]) -> Option<String> {
+    if from.is_empty() {
+        return None;
+    }
+    // Every `RandomState` is keyed afresh, so its hash of anything is a
+    // fresh random number: enough to choose a thumbnail by.
+    let mut h = RandomState::new().build_hasher();
+    h.write_usize(from.len());
+    Some(from[(h.finish() % from.len() as u64) as usize].clone())
 }
 
 /// A watched player's event in a few words, for the panel a watcher sees

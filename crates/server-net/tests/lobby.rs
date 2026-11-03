@@ -319,7 +319,7 @@ fn a_finished_player_watches_the_other_over_the_wire() {
     });
     assert_eq!(watchers, 1);
     guest.send(&ToServer::Video {
-        round, frame: 42, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into(),
+        round, frame: 42, key: true, width: 256, height: 240, aspect: 1.0, data: vec![0, 0, 1].into(), thumb: false,
     });
     guest.send(&ToServer::Audio { round, frame: 42, rate: 32040, channels: 2, data: vec![0].into() });
     let (player, frame) = host.until(|m| match m {

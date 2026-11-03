@@ -29,7 +29,7 @@ use session_libretro::runner::LibretroRunner;
 use session_libretro::{input, prep};
 
 use crate::keys;
-use crate::stream::{Picture, Sound, Streamer};
+use crate::stream::{Feed, Picture, Sound, Streamer};
 use crate::settings::{self, Display, ResolvedInput, VideoPrefs};
 use crate::video::{self, Canvas};
 
@@ -47,6 +47,9 @@ pub struct Load {
     /// The player's video settings for this game's core.
     pub video: VideoPrefs,
     pub display: Display,
+    /// Leave the sidebar free on the right of the window, for the overlay's
+    /// thumbnails of the other players (ADR 0038).
+    pub sidebar: bool,
     /// A bout (ADR 0036): this player's slot on the shared machine, and how
     /// to find the others.
     pub bout: Option<BoutLoad>,
@@ -82,9 +85,11 @@ pub enum Command {
     Unload,
     /// The overlay's window handle, so keys typed into it count as ours.
     Overlay(isize),
-    /// How many are watching this run (ADR 0032). Above zero, the picture
-    /// and sound are encoded and reported; a rise starts on a key frame.
-    Stream(u32),
+    /// How many are watching this run (ADR 0032), and how many show it in
+    /// their sidebar (ADR 0038). Above zero, that feed is encoded and
+    /// reported — the sound with the full picture — and a rise starts it on
+    /// a key frame.
+    Stream { watchers: u32, thumbs: u32 },
     /// A bout: where each other slot's machine might be (ADR 0036). The
     /// session starts on this and `Loaded` follows once it has synchronised.
     Peers(Vec<(u8, Vec<SocketAddr>)>),
@@ -118,8 +123,8 @@ pub enum Report {
     /// The player pressed the pause key; the game is held.
     Paused,
     /// One encoded picture for whoever is watching (ADR 0032): the bytes
-    /// `ToServer::Video` carries.
-    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Vec<u8> },
+    /// `ToServer::Video` carries. `thumb` for the sidebar's (ADR 0038).
+    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Vec<u8>, thumb: bool },
     /// The sound under the pictures, likewise.
     Audio { round: u64, frame: u64, rate: u32, channels: u8, data: Vec<u8> },
     /// A bout: this machine's UDP side is up and probing the server with
@@ -228,6 +233,10 @@ struct Loaded {
     watchers: u32,
     /// The next picture sent starts a group: a watcher just arrived.
     want_key: bool,
+    /// Who shows this run in their sidebar, and the thumbnail's own key.
+    thumbs: u32,
+    want_thumb_key: bool,
+    sidebar: bool,
     /// Random buttons, when the round was loaded with a script.
     script: Option<(u64, u32)>,
 }
@@ -253,6 +262,11 @@ impl Loaded {
     /// Sending to a spectator right now.
     fn streaming(&self) -> bool {
         self.watchers > 0 && self.live && !self.done
+    }
+
+    /// Sending a thumbnail to the other players' sidebars right now.
+    fn thumbing(&self) -> bool {
+        self.thumbs > 0 && self.live && !self.done
     }
 }
 
@@ -285,6 +299,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
     let streamer = Streamer::spawn(reports.clone());
     // Watchers can arrive before the round has loaded.
     let mut watchers = 0u32;
+    let mut thumbs = 0u32;
     let mut pause_edge = settings::Edge::default();
     let mut give_up_edge = settings::Edge::default();
     let mut canvas = Canvas::default();
@@ -311,6 +326,8 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                             }
                             x.0.watchers = watchers;
                             x.0.want_key = watchers > 0;
+                            x.0.thumbs = thumbs;
+                            x.0.want_thumb_key = thumbs > 0;
                             x.0.machine.runner().tap_audio(watchers > 0);
                             loaded = Some(x.0);
                             held = false;
@@ -379,15 +396,20 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     loaded = None;
                 }
                 Ok(Command::Overlay(h)) => ours = vec![hwnd, h],
-                Ok(Command::Stream(n)) => {
+                Ok(Command::Stream { watchers: n, thumbs: t }) => {
                     if let Some(l) = loaded.as_mut() {
                         if n > l.watchers {
                             l.want_key = true;
                         }
+                        if t > l.thumbs {
+                            l.want_thumb_key = true;
+                        }
                         l.watchers = n;
+                        l.thumbs = t;
                         l.machine.runner().tap_audio(n > 0);
                     }
                     watchers = n;
+                    thumbs = t;
                 }
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
                     let _ = reports.send(Report::Closed);
@@ -573,6 +595,9 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             last_seq: 0,
             watchers: 0,
             want_key: false,
+            thumbs: 0,
+            want_thumb_key: false,
+            sidebar: l.sidebar,
             script: l.script.map(|seed| (seed, 0)),
         },
         artifact,
@@ -1107,32 +1132,39 @@ fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &
     let mut painted = false;
     let mut paint_error = None;
     let client = window.get_size();
-    let (video, aspect) = (l.video, l.core_aspect);
-    // For a spectator: the core's own picture, before the player's settings
-    // shape it (ADR 0032). One copy here; the encoder runs on its own thread
-    // and a picture it has no time for is simply not offered.
-    let (streaming, want_key, round, frame) = (l.streaming(), l.want_key, l.round, l.machine.runner().frame());
-    let mut keyed = false;
+    let (video, aspect, sidebar) = (l.video, l.core_aspect, l.sidebar);
+    // For a spectator, and for the other players' sidebars: the core's own
+    // picture, before the player's settings shape it (ADR 0032, 0038). One
+    // copy per feed here; each encoder runs on its own thread and a picture
+    // it has no time for is simply not offered.
+    let (round, frame) = (l.round, l.machine.runner().frame());
+    let feeds = [(Feed::Full, l.streaming(), l.want_key), (Feed::Thumb, l.thumbing(), l.want_thumb_key)];
+    let mut keyed = [false; 2];
     l.last_seq = l.machine.runner().present(l.last_seq, &mut |f| {
         painted = true;
-        if streaming {
-            keyed |= streamer.offer(|| Picture {
-                round,
-                frame,
-                width: f.width,
-                height: f.height,
-                aspect,
-                pixels: f.pixels.to_vec(),
-                key: want_key,
-            });
+        for (i, &(feed, on, key)) in feeds.iter().enumerate() {
+            if on {
+                keyed[i] |= streamer.offer(feed, || Picture {
+                    round,
+                    frame,
+                    width: f.width,
+                    height: f.height,
+                    aspect,
+                    pixels: f.pixels.to_vec(),
+                    key,
+                });
+            }
         }
-        let (buf, w, h) = canvas.draw(&f, client, aspect, &video);
+        let (buf, w, h) = canvas.draw(&f, client, aspect, &video, sidebar);
         if let Err(e) = window.update_with_buffer(buf, w, h) {
             paint_error = Some(e.to_string());
         }
     });
-    if keyed {
+    if keyed[0] {
         l.want_key = false;
+    }
+    if keyed[1] {
+        l.want_thumb_key = false;
     }
     if let Some(e) = paint_error {
         return Err(format!("cannot present frame: {e}"));
@@ -1160,7 +1192,7 @@ fn place_window(hwnd: isize, l: &Loaded, borderless: &mut bool, sized_for: &mut 
     if frame.0 == 0 || frame.1 == 0 {
         return;
     }
-    let size = video::window_size(frame, l.core_aspect, &l.video);
+    let size = video::window_size(frame, l.core_aspect, &l.video, l.sidebar);
     if *sized_for != Some(size) {
         video::window::set_client_size(hwnd, size.0, size.1);
         *sized_for = Some(size);

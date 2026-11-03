@@ -12,6 +12,10 @@
 //!
 //! Spectating (ADR 0003) must encode the core's own frame, not this canvas:
 //! a viewer's settings are theirs.
+//!
+//! In a match of several the right of the window is the sidebar, where the
+//! overlay shows the other players (ADR 0038): the picture is placed in
+//! what is left, against the left edge.
 
 use session_api::VideoFrame;
 
@@ -80,11 +84,23 @@ pub fn target(client: (usize, usize), picture: (usize, usize), da: f64, scaling:
     ((cw - w) / 2.0, (ch - h) / 2.0, w, h)
 }
 
-pub fn layout(client: (usize, usize), frame: (usize, usize), core_aspect: f32, prefs: &VideoPrefs) -> Layout {
+/// The sidebar's width, in client pixels (ADR 0038): three 4:3 thumbnails
+/// stacked, so four ninths of the height, and never more than two fifths of
+/// the width. The overlay page reckons it the same way.
+pub fn sidebar_width(client: (usize, usize)) -> usize {
+    (client.1 * 4 / 9).min(client.0 * 2 / 5)
+}
+
+/// `sidebar`: leave the sidebar's width free on the right, and put the
+/// picture against the left edge of the rest.
+pub fn layout(client: (usize, usize), frame: (usize, usize), core_aspect: f32, prefs: &VideoPrefs, sidebar: bool) -> Layout {
     let client = (client.0.max(1), client.1.max(1));
     let picture = cropped(frame, prefs.crop);
     let da = display_aspect(frame, picture, core_aspect, prefs.aspect);
-    let (x, y, w, h) = target(client, picture, da, prefs.scaling);
+    let side = if sidebar { sidebar_width(client) } else { 0 };
+    let area = ((client.0 - side).max(1), client.1);
+    let (x, y, w, h) = target(area, picture, da, prefs.scaling);
+    let x = if sidebar { 0.0 } else { x };
     // Canvas pixels per client pixel, on each axis, such that the picture
     // copied at 1:1 is stretched onto exactly (w, h).
     let fx = picture.0 as f64 / w;
@@ -97,12 +113,14 @@ pub fn layout(client: (usize, usize), frame: (usize, usize), core_aspect: f32, p
 }
 
 /// The client size a window wants for a picture at `window_scale`: the
-/// picture's height times the scale, and its width at the display aspect.
-pub fn window_size(frame: (usize, usize), core_aspect: f32, prefs: &VideoPrefs) -> (u32, u32) {
+/// picture's height times the scale, and its width at the display aspect,
+/// with the sidebar beside it when there is one.
+pub fn window_size(frame: (usize, usize), core_aspect: f32, prefs: &VideoPrefs, sidebar: bool) -> (u32, u32) {
     let picture = cropped(frame, prefs.crop);
     let da = display_aspect(frame, picture, core_aspect, prefs.aspect);
     let h = picture.1 as f64 * prefs.window_scale as f64;
-    ((h * da).round() as u32, h as u32)
+    let side = if sidebar { h * 4.0 / 9.0 } else { 0.0 };
+    ((h * da + side).round() as u32, h as u32)
 }
 
 /// Builds canvases, keeping the buffer between frames so the black around
@@ -114,8 +132,15 @@ pub struct Canvas {
 }
 
 impl Canvas {
-    pub fn draw(&mut self, f: &VideoFrame<'_>, client: (usize, usize), core_aspect: f32, prefs: &VideoPrefs) -> (&[u32], usize, usize) {
-        let l = layout(client, (f.width, f.height), core_aspect, prefs);
+    pub fn draw(
+        &mut self,
+        f: &VideoFrame<'_>,
+        client: (usize, usize),
+        core_aspect: f32,
+        prefs: &VideoPrefs,
+        sidebar: bool,
+    ) -> (&[u32], usize, usize) {
+        let l = layout(client, (f.width, f.height), core_aspect, prefs, sidebar);
         if self.last != Some(l) {
             self.buf.clear();
             self.buf.resize(l.canvas.0 * l.canvas.1, 0);
@@ -245,14 +270,14 @@ mod tests {
 
     #[test]
     fn stretch_fills_the_window() {
-        let l = layout((1000, 500), (256, 240), 4.0 / 3.0, &prefs(Scaling::Stretch, Aspect::Core));
+        let l = layout((1000, 500), (256, 240), 4.0 / 3.0, &prefs(Scaling::Stretch, Aspect::Core), false);
         assert_eq!(l, Layout { canvas: (256, 240), at: (0, 0), picture: (256, 240) });
     }
 
     #[test]
     fn fit_keeps_the_cores_aspect_and_centres() {
         let client = (1920, 1080);
-        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Fit, Aspect::Core));
+        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Fit, Aspect::Core), false);
         let (x, y, w, h) = on_screen(client, &l);
         assert!((h - 1080.0).abs() < 1.0 && (w - 1440.0).abs() < 4.0, "{w}x{h}");
         assert!((x - 240.0).abs() < 4.0 && y.abs() < 1.0);
@@ -261,7 +286,7 @@ mod tests {
     #[test]
     fn square_pixels_are_square() {
         let client = (1920, 1080);
-        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Fit, Aspect::Square));
+        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Fit, Aspect::Square), false);
         let (_, _, w, h) = on_screen(client, &l);
         assert!((w / h - 256.0 / 240.0).abs() < 0.01);
     }
@@ -269,12 +294,12 @@ mod tests {
     #[test]
     fn integer_is_a_whole_multiple_of_the_height() {
         let client = (1920, 1080);
-        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Integer, Aspect::Square));
+        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Integer, Aspect::Square), false);
         let (x, y, w, h) = on_screen(client, &l);
         assert_eq!((w.round(), h.round()), (1024.0, 960.0), "4x");
         assert_eq!((x.round(), y.round()), (448.0, 60.0));
         // DOS's 320x200 at 4:3 in a window too small for 2x: 1x.
-        let l = layout((500, 300), (320, 200), 4.0 / 3.0, &prefs(Scaling::Integer, Aspect::Core));
+        let l = layout((500, 300), (320, 200), 4.0 / 3.0, &prefs(Scaling::Integer, Aspect::Core), false);
         let (_, _, w, h) = on_screen((500, 300), &l);
         assert!((h - 200.0).abs() < 1.0 && (w - 266.7).abs() < 2.0, "{w}x{h}");
     }
@@ -293,9 +318,32 @@ mod tests {
     #[test]
     fn the_window_is_the_scale_times_the_height() {
         let p = VideoPrefs { window_scale: 3, aspect: Aspect::Square, ..Default::default() };
-        assert_eq!(window_size((256, 240), 4.0 / 3.0, &p), (768, 720));
+        assert_eq!(window_size((256, 240), 4.0 / 3.0, &p, false), (768, 720));
         let p = VideoPrefs { window_scale: 2, ..Default::default() };
-        assert_eq!(window_size((320, 200), 4.0 / 3.0, &p), (533, 400));
+        assert_eq!(window_size((320, 200), 4.0 / 3.0, &p, false), (533, 400));
+        // And a sidebar beside it, four ninths of the height.
+        assert_eq!(window_size((320, 200), 4.0 / 3.0, &p, true), (711, 400));
+    }
+
+    #[test]
+    fn a_sidebar_puts_the_picture_against_the_left_edge() {
+        let client = (1920, 1080);
+        assert_eq!(sidebar_width(client), 480);
+        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Fit, Aspect::Core), true);
+        let (x, y, w, h) = on_screen(client, &l);
+        assert!((h - 1080.0).abs() < 1.0 && (w - 1440.0).abs() < 4.0, "{w}x{h}");
+        assert!(x.abs() < 1.0 && y.abs() < 1.0, "{x},{y}");
+        // A window too narrow for both: the picture shrinks to leave it.
+        let client = (1200, 1080);
+        assert_eq!(sidebar_width(client), 480);
+        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Fit, Aspect::Core), true);
+        let (x, y, w, h) = on_screen(client, &l);
+        assert!((w - 720.0).abs() < 4.0 && (h - 540.0).abs() < 4.0, "{w}x{h}");
+        assert!(x.abs() < 1.0 && (y - 270.0).abs() < 4.0, "{x},{y}");
+        // Stretch fills what the sidebar leaves.
+        let l = layout(client, (256, 240), 4.0 / 3.0, &prefs(Scaling::Stretch, Aspect::Core), true);
+        let (x, _, w, h) = on_screen(client, &l);
+        assert!(x.abs() < 1.0 && (w - 720.0).abs() < 4.0 && (h - 1080.0).abs() < 1.0, "{w}x{h}");
     }
 
     #[test]
@@ -305,7 +353,7 @@ mod tests {
         let mut p = prefs(Scaling::Fit, Aspect::Square);
         p.crop = Crop { top: 2, bottom: 2, left: 0, right: 0 };
         let mut c = Canvas::default();
-        let (buf, w, h) = c.draw(&f, (32, 32), 0.0, &p);
+        let (buf, w, h) = c.draw(&f, (32, 32), 0.0, &p, false);
         // 16x16 picture in a square window: no border at all.
         assert_eq!((w, h), (16, 16));
         assert_eq!(buf[0], 32, "row 2 of the frame is row 0 of the picture");

@@ -5,10 +5,10 @@ Status: Accepted
 
 ## Context
 
-The first match between two machines (`docs/server.md`) put one player on a
-phone's tethered link: 0.2 Mbit/s down, 0.7 up. ADR 0032's stream was about
-1.9 Mbit/s once base64 was counted — a megabit of picture and 48 kHz stereo
-ADPCM — and nothing in its path could shed load. The sender's channel, the
+The first match between two machines (`docs/server.md`) put one test machine
+on a deliberately narrow link, to isolate its connection: 0.2 Mbit/s down,
+0.7 up. ADR 0032's stream was about 1.9 Mbit/s once base64 was counted — a
+megabit of picture and 48 kHz stereo ADPCM — and nothing in its path could shed load. The sender's channel, the
 lobby's channel to each watcher and the socket buffers all queued without
 bound, so the picture fell further behind the longer it ran: a 30-second run
 took three minutes to watch. The match messages the server judges from rode
@@ -16,9 +16,9 @@ the same first-in-first-out socket behind it, the pings with them, and every
 watched round ended in a timeout. Two clients on one machine had never shown
 any of this: loopback has no limit to exceed.
 
-A link that slow is ordinary — a phone, a hotel, a shared house in the
-evening — and the stream is the one thing on the socket that can be lost
-without losing the match.
+Players are on a router, by wire or wifi, and a link that slow is not
+theirs. But no link is guaranteed, and the stream is the one thing on the
+socket that can be lost without losing the match.
 
 ## Decision
 
@@ -39,7 +39,7 @@ until a key frame, since none decodes without it, and the sender is asked to
 start one. The server cannot ask for one on a watcher's behalf, so the
 sender also makes one every two seconds.
 
-**The link is timed, not trusted.** A phone network holds seconds of data in
+**The link is timed, not trusted.** A congested link holds seconds of data in
 buffers no socket sees, so the send buffer filling is not enough to notice.
 While a stream flows the loop pings every 100 ms, each ping carrying the
 moment it left; a round trip longer than the shortest seen is time spent in a
@@ -64,7 +64,7 @@ flicker.
 ## Alternatives considered
 
 **A bounded queue alone.** Dropping the oldest when a queue is full bounds
-memory, not latency: the queue in the phone network is outside it, and fills
+memory, not latency: the queue in the network is outside it, and fills
 first.
 
 **Adapting the encoder's bitrate to the slowest watcher.** One encoder serves
@@ -94,8 +94,8 @@ its own queue short.
 relay: every progress report reaches the watcher within about 1.3 s, the
 pictures that arrive are under about 1.6 s old, and the round completes.
 
-**A slow watcher sees about 12 pictures a second** on a phone's downlink, or
-the run panel; on a home link, the whole stream.
+**A watcher on a link as narrow as the test's sees about 12 pictures a
+second**, or the run panel; on a home link, the whole stream.
 
 **The loop polls.** An idle connection sleeps 2 ms between looks, which is
 the latency it adds and a little CPU per connection. Fine for lobbies of

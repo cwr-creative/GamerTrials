@@ -109,10 +109,10 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `session-libretro` | SMB3, DKC, Doom, and every later game. Software cores only for now. One crate, no per-game code: a game is a manifest (ADR 0016). DOS games run here too, under dosbox-pure (ADR 0018) — same crate, same schema, same events. Also holds `x11`, the Linux twin of the Win32 calls the game window needs (ADR 0035). |
 | `session-fake` | Scripted telemetry. Used by all integration tests. |
 | `asset-store` | ROM hash verification, content-addressed bundles, and the cache of artifacts derived from them. Today: hashes a player's dump against the manifest's `sha1` and says what is missing. |
-| `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. Since ADR 0032 it also carries a watched player's picture and sound (`Video`, `Audio`) for the server to relay, their bytes in a binary frame after the packet, and the run's `Progress` for a watcher (ADR 0034). Says which messages are stream and may be dropped (`Lane`). Pure: no sockets. |
+| `protocol` | The wire between client and server (ADR 0024): versioned messages with types of their own, never `session-api`'s or `challenge-core`'s on the wire. Conversions live here. Since ADR 0032 it also carries a watched player's picture and sound (`Video`, `Audio`) for the server to relay, their bytes in a binary frame after the packet, and the run's `Progress` for a watcher (ADR 0034). v6 adds the sidebar's thumbnails: `Thumbs`, `Video.thumb`, `Watched.thumbs` (ADR 0038). Says which messages are stream and may be dropped (`Lane`), each picture stream apart. Pure: no sockets. |
 | `transport` | One WebSocket's loop for both ends (ADR 0034): non-blocking, the match before the stream, a stream the link cannot deliver fresh dropped, the link timed by stamped pings, liveness kept. `app-client`'s link and each `server-net` connection run it. Held to the server's fence. |
-| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). While another player watches, encodes its own picture (H.264) and sound (ADPCM) off the game thread; when done or out, shows theirs on the overlay (ADR 0032). Each Win32 call has an X11 twin beside it under `cfg(target_os = "linux")` (ADR 0035). |
-| `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Relays a watched player's stream to their watchers, and refuses a watch from a player still playing (ADR 0032). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
+| `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). While another player watches, encodes its own picture (H.264) and sound (ADPCM) off the game thread; when done or out, shows theirs on the overlay (ADR 0032). In a match of several the game sits at the left and a sidebar on the right shows up to three other players still playing, drawn at random, as thumbnails from a second encoder at their own bitrate (ADR 0038). Each Win32 call has an X11 twin beside it under `cfg(target_os = "linux")` (ADR 0035). |
+| `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Relays a watched player's stream to their watchers, and refuses a watch from a player still playing (ADR 0032); relays each player's thumbnail to whoever shows it in their sidebar, playing or not (ADR 0038). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
 | `server-net` | The server process (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (a thread per socket, each running `transport`'s loop, and per lobby), each lobby a `server::Server`. Also the UDP side a head-to-head player probes so the server can tell the other slot where they are (ADR 0036); it carries nothing else. Held to the same dependency fence as `server`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
 | `head-to-head` | One bout on one shared machine (ADR 0036). `Rollback` drives a `SharedRunner` through `ggrs`, answering its save, restore and advance requests and holding each frame's facts until every slot's input for it is final; `Relay` carries a `Networked` machine's packets. Both over a `Link` between the slots: `Udp` between two players' machines (candidates tried until one answers), `Channels` in a test. No emulator, no protocol, no server. |
@@ -173,7 +173,10 @@ provisional verdict or an artifact hash disagrees with its own.
 (ADR 0029). A player whose run is over, or who is out of the match, watches
 another's picture and hears their sound on the overlay, relayed by the
 server over the same socket (ADR 0032); ◀ ▶ or the pad switches players.
-The sender encodes only while watched. A link too slow for the stream
+The sender encodes only while watched. While playing, a sidebar shows
+up to three of the others (ADR 0038, Proposed): not yet hand-tested in a
+match; the page's layout and its decoding of the thumbnail encoder's own
+pictures were checked in a browser. A link too slow for the stream
 drops pictures rather than the match, and a watcher whose picture cannot
 keep up sees the run's clock, attempt and events instead (ADR 0034, from
 the first match over the internet). `wss://host` in Settings › Profile
@@ -184,8 +187,8 @@ Hand-tested on all three games before Settings; Settings itself is not yet
 hand-tested in a match. `app-client`'s `cargo test` covers only its pure
 modules (`settings`, `video`, `link`'s parsing). The server's tests play the
 client's loop on `session-fake` instead, and `server-net`'s do it over real
-sockets with two players — `slow_link` with one of them held to a phone's
-rates through a throttling relay.
+sockets with two players — `slow_link` with one of them held to a narrow
+link through a throttling relay.
 
 **Phase D — head-to-head (ADR 0036, Proposed) — is under way, in five
 steps, each runnable.** Done: the vocabulary and the judge. `session-api`

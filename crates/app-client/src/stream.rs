@@ -16,6 +16,10 @@
 //! with the coder's state at the head of every chunk so a lost chunk is a
 //! gap and the next one still decodes. Together they cost about 0.6 Mbit/s;
 //! a link that carries less drops what it cannot send (ADR 0034).
+//!
+//! A second encoder makes the thumbnail the other players' sidebars show
+//! (ADR 0038): picture only, at its own bitrate, on its own thread, so
+//! neither feed waits on the other's encoder.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -28,18 +32,43 @@ use openh264::formats::{ArgbSliceU32, YUVBuffer};
 use openh264::{OpenH264API, Timestamp};
 
 use crate::game::Report;
-use crate::settings::DEFAULT_STREAM_KBPS;
+use crate::settings::{DEFAULT_STREAM_KBPS, DEFAULT_THUMB_KBPS};
 
-/// What the picture costs the sender's uplink, in kbit/s: Settings ›
-/// Profile's, half a megabit unless the player changes it. That carries a
-/// retro picture at its own rate; a home uplink has room for it, and a
-/// phone's drops what it cannot carry rather than falling behind.
-static KBPS: AtomicU32 = AtomicU32::new(DEFAULT_STREAM_KBPS);
+/// Which of this machine's two pictures: the one a watcher sees full-size,
+/// or the thumbnail in the other players' sidebars (ADR 0038).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Feed {
+    Full = 0,
+    Thumb = 1,
+}
+
+impl Feed {
+    pub fn thumb(self) -> bool {
+        self == Feed::Thumb
+    }
+
+    /// The feed whose pictures travel as this [`protocol::Lane::Picture`]
+    /// stream, for a link that dropped some.
+    pub fn of_stream(stream: u64) -> Feed {
+        if stream == protocol::own_stream(true) {
+            Feed::Thumb
+        } else {
+            Feed::Full
+        }
+    }
+}
+
+/// What each picture costs the sender's uplink, in kbit/s: Settings ›
+/// Profile's, half a megabit for the full picture and a quarter for the
+/// thumbnail unless the player changes them. That carries a retro picture
+/// at its own rate; a home uplink has room for it, and a narrower one drops
+/// what it cannot carry rather than falling behind.
+static KBPS: [AtomicU32; 2] = [AtomicU32::new(DEFAULT_STREAM_KBPS), AtomicU32::new(DEFAULT_THUMB_KBPS)];
 
 /// For the settings: the bitrate from the next picture on. A change starts
 /// the encoder afresh, on a key frame.
-pub fn set_kbps(kbps: u32) {
-    KBPS.store(kbps, Ordering::Release);
+pub fn set_kbps(feed: Feed, kbps: u32) {
+    KBPS[feed as usize].store(kbps, Ordering::Release);
 }
 
 /// A key frame every two seconds at 60 Hz: the longest a watcher who lost
@@ -52,11 +81,12 @@ const KEY_EVERY: u32 = 120;
 const SOUND_RATE: u32 = 16_000;
 
 /// Set when the link dropped pictures: the next one encoded is a key frame.
-static KEY_WANTED: AtomicBool = AtomicBool::new(false);
+static KEY_WANTED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// For the link: pictures were dropped, so start a new group (ADR 0034).
-pub fn want_key() {
-    KEY_WANTED.store(true, Ordering::Release);
+/// For the link: pictures of this stream were dropped, so start a new group
+/// (ADR 0034).
+pub fn want_key(stream: u64) {
+    KEY_WANTED[Feed::of_stream(stream) as usize].store(true, Ordering::Release);
 }
 
 /// One core frame, as the core drew it: `0x00RRGGBB`, unscaled.
@@ -84,8 +114,16 @@ enum Input {
     Sound(Sound),
 }
 
+/// Both feeds' encoders. The sound rides the full one's.
 #[derive(Clone)]
 pub struct Streamer {
+    full: Encoding,
+    thumb: Encoding,
+}
+
+/// One encoder thread, and what it has in hand.
+#[derive(Clone)]
+struct Encoding {
     tx: Sender<Input>,
     /// Pictures handed over and not yet encoded: never more than one.
     pending: Arc<AtomicUsize>,
@@ -93,20 +131,45 @@ pub struct Streamer {
 
 impl Streamer {
     pub fn spawn(reports: Sender<Report>) -> Streamer {
+        Streamer { full: Encoding::spawn(reports.clone(), Feed::Full), thumb: Encoding::spawn(reports, Feed::Thumb) }
+    }
+
+    /// Offers a picture to one feed, made only if its encoder is free for
+    /// it. `false` when it is still on the last one, and the picture is
+    /// skipped.
+    pub fn offer(&self, feed: Feed, make: impl FnOnce() -> Picture) -> bool {
+        let e = if feed.thumb() { &self.thumb } else { &self.full };
+        if e.pending.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        if e.tx.send(Input::Picture(make())).is_err() {
+            e.pending.store(0, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    pub fn sound(&self, s: Sound) {
+        let _ = self.full.tx.send(Input::Sound(s));
+    }
+}
+
+impl Encoding {
+    fn spawn(reports: Sender<Report>, feed: Feed) -> Encoding {
         let (tx, rx) = mpsc::channel::<Input>();
         let pending = Arc::new(AtomicUsize::new(0));
         let in_hand = Arc::clone(&pending);
         thread::Builder::new()
-            .name("encoder".into())
+            .name(if feed.thumb() { "thumbnail encoder" } else { "encoder" }.into())
             .spawn(move || {
-                let mut video = Video::default();
+                let mut video = Video { feed, ..Video::default() };
                 let mut thin = Thin::default();
                 let mut sound = Adpcm::default();
                 let mut complained = false;
                 for input in rx {
                     match input {
                         Input::Picture(mut p) => {
-                            p.key |= KEY_WANTED.swap(false, Ordering::AcqRel);
+                            p.key |= KEY_WANTED[feed as usize].swap(false, Ordering::AcqRel);
                             let encoded = video.encode(&p);
                             in_hand.store(0, Ordering::Release);
                             match encoded {
@@ -119,13 +182,14 @@ impl Streamer {
                                         height: p.height as u32,
                                         aspect: p.aspect,
                                         data,
+                                        thumb: feed.thumb(),
                                     });
                                 }
                                 Ok(None) => {}
                                 Err(e) => {
                                     if !complained {
                                         complained = true;
-                                        eprintln!("[stream] cannot encode: {e}");
+                                        eprintln!("[stream] cannot encode the {feed:?} picture: {e}");
                                     }
                                 }
                             }
@@ -145,35 +209,24 @@ impl Streamer {
                 }
             })
             .expect("spawn the encoder thread");
-        Streamer { tx, pending }
-    }
-
-    /// Offers a picture, made only if the encoder is free for it. `false`
-    /// when it is still on the last one, and the picture is skipped.
-    pub fn offer(&self, make: impl FnOnce() -> Picture) -> bool {
-        if self.pending.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return false;
-        }
-        if self.tx.send(Input::Picture(make())).is_err() {
-            self.pending.store(0, Ordering::Release);
-            return false;
-        }
-        true
-    }
-
-    pub fn sound(&self, s: Sound) {
-        let _ = self.tx.send(Input::Sound(s));
+        Encoding { tx, pending }
     }
 }
 
 // ----------------------------------------------------------------- picture
 
-#[derive(Default)]
 struct Video {
+    feed: Feed,
     encoder: Option<Encoder>,
     started: Option<Instant>,
     /// The bitrate `encoder` was made for, in kbit/s.
     kbps: u32,
+}
+
+impl Default for Video {
+    fn default() -> Video {
+        Video { feed: Feed::Full, encoder: None, started: None, kbps: 0 }
+    }
 }
 
 impl Video {
@@ -191,7 +244,7 @@ impl Video {
             cropped = p.pixels.chunks(p.width).take(h).flat_map(|row| row[..w].iter().copied()).collect();
             &cropped
         };
-        let kbps = KBPS.load(Ordering::Acquire);
+        let kbps = KBPS[self.feed as usize].load(Ordering::Acquire);
         if kbps != self.kbps {
             self.encoder = None;
         }

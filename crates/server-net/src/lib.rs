@@ -333,7 +333,7 @@ fn connection(stream: TcpStream, router: &Arc<Router>, peer: &str) -> Result<(),
         &mut ws,
         router.rules,
         &reply_rx,
-        Ends { incoming: &mut incoming, key_wanted: &mut || {}, label: &label },
+        Ends { incoming: &mut incoming, key_wanted: &mut |_| {}, label: &label },
     );
     if let Seat::In { lobby, id } = seat {
         let _ = lobby.send(LobbyMsg::Closed(id));

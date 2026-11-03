@@ -23,8 +23,8 @@ is open for the listen port, open it for UDP too.
 
 The players' own machines talk on their **bout port**, UDP 7879 unless
 Settings › Profile says otherwise. Two players behind ordinary home routers
-usually find each other without help. A player on a phone, behind a VPN or
-a carrier's NAT usually cannot be reached, so the other side must be: forward
+usually find each other without help. A player behind a VPN or a carrier's
+NAT usually cannot be reached, so the other side must be: forward
 UDP 7879 on that player's router to their machine, and allow the client
 through its firewall. A player who hosts the server and plays on the same
 machine forwards both, 7878 and 7879. Two players who both cannot be reached

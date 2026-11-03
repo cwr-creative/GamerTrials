@@ -67,7 +67,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0023](0023-judge-a-run-per-attempt-and-let-the-session-bound-it.md) | Judge a run per attempt, end an attempt at a death, and let the session bound it | Proposed |
 | [0024](0024-write-the-server-in-rust.md) | Write the server in Rust, superseding 0011 | Accepted |
 | [0025](0025-widen-the-challenge-vocabulary-additively.md) | Widen the challenge vocabulary additively, and let a challenge name facts that cost a life | Accepted |
-| [0026](0026-score-a-match-on-placements-bound-every-run-and-deal-an-open-ended-series.md) | Score a match on placements, bound every run, and deal an open-ended series | Accepted |
+| [0026](0026-score-a-match-on-placements-bound-every-run-and-deal-an-open-ended-series.md) | Score a match on placements, bound every run, and deal an open-ended series | Accepted; its spectating paragraph superseded by 0038 |
 | [0027](0027-build-the-client-as-a-native-game-window-under-a-transparent-overlay.md) | Build the client as a native game window under a transparent overlay | Accepted |
 | [0028](0028-the-client-owns-input-binding-and-presentation.md) | The client owns input binding and presentation, and neither reaches the machine | Accepted |
 | [0029](0029-void-a-round-a-player-cannot-prepare.md) | Void a round a player cannot prepare | Accepted |
@@ -78,6 +78,8 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0034](0034-send-a-stream-only-while-the-link-keeps-up.md) | Send a spectator's stream only while the link keeps up, and show the run when it cannot | Accepted |
 | [0035](0035-build-the-client-for-linux-from-the-same-tree.md) | Build the client for Linux from the same tree, on X11 | Proposed |
 | [0036](0036-run-head-to-head-on-the-players-machines-over-rollback.md) | Run head-to-head on the players' own machines, over rollback, superseding 0004 | Proposed |
+| 0037 | Spectate a run by replaying its inputs | Proposed, on the `input-replication` branch only |
+| [0038](0038-show-the-other-players-in-a-sidebar-while-playing.md) | Show the other players in a sidebar while playing, superseding 0026 on spectating | Proposed |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is

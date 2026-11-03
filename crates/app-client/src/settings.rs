@@ -38,6 +38,11 @@ pub const MAX_CHORD: usize = 4;
 /// nothing at these resolutions that a home uplink would notice.
 pub const DEFAULT_STREAM_KBPS: u32 = 500;
 pub const STREAM_KBPS: (u32, u32) = (100, 2000);
+/// The sidebar thumbnail's (ADR 0038), likewise. Lower than the full
+/// picture's, since it is seen small, and allowed lower still: a thumbnail
+/// that smears is still a glance at who is where.
+pub const DEFAULT_THUMB_KBPS: u32 = 250;
+pub const THUMB_KBPS: (u32, u32) = (50, 2000);
 
 pub const SETTINGS_VERSION: u32 = 1;
 
@@ -476,13 +481,17 @@ pub struct Settings {
     /// this player's uplink and their watchers' downlinks feel it; a link
     /// that cannot carry it drops pictures rather than falling behind.
     pub stream_kbps: u32,
+    /// The thumbnail this player sends the other players' sidebars, in
+    /// kbit/s (ADR 0038): sent for the whole run once anyone shows it, at
+    /// the full frame rate.
+    pub thumb_kbps: u32,
     /// In a bout (ADR 0036): frames this player's own input is delayed so the
     /// other machine's has time to arrive and fewer frames are guessed. Felt
     /// on one's own buttons; fewer rollbacks for the other side.
     pub bout_input_delay: u8,
     /// The UDP port a bout's inputs arrive on (ADR 0036): fixed, so a player
     /// at home can forward it on their router and be reached by a player
-    /// whose own network cannot be (a phone, a VPN). 0 takes any free port.
+    /// whose own network cannot be (a VPN, a carrier's NAT). 0 takes any free port.
     /// Taken already — a second client on this machine — means any port.
     pub bout_port: u16,
     pub input: InputSettings,
@@ -500,6 +509,7 @@ impl Default for Settings {
             name: "Player".into(),
             server: String::new(),
             stream_kbps: DEFAULT_STREAM_KBPS,
+            thumb_kbps: DEFAULT_THUMB_KBPS,
             bout_input_delay: 2,
             bout_port: DEFAULT_BOUT_PORT,
             input: InputSettings::default(),
@@ -748,6 +758,7 @@ impl Settings {
         }
         self.server = self.server.trim().chars().take(255).collect();
         self.stream_kbps = self.stream_kbps.clamp(STREAM_KBPS.0, STREAM_KBPS.1);
+        self.thumb_kbps = self.thumb_kbps.clamp(THUMB_KBPS.0, THUMB_KBPS.1);
         self.bout_input_delay = self.bout_input_delay.min(10);
         let clamp =|v: f32, lo: f32, hi: f32, default: f32| if v.is_finite() { v.clamp(lo, hi) } else { default };
         self.input.deadzone = clamp(self.input.deadzone, 0.1, 0.95, 0.5);
@@ -1073,6 +1084,7 @@ mod tests {
         s.input.pad.insert(RetroButton::B, vec![Input::Key(1), Input::Pad(PadButton::South)]);
         s.video.global.window_scale = 40;
         s.stream_kbps = 9;
+        s.thumb_kbps = 9000;
         s.games.insert("gone".into(), Layer::default());
         s.games.entry("doom".into()).or_default().pad_keys.insert(RetroButton::B, "f2".into());
         s.sanitize();
@@ -1082,6 +1094,7 @@ mod tests {
         assert_eq!(s.input.pad[&RetroButton::B], [Input::Pad(PadButton::South)], "a key is not a pad input");
         assert_eq!(s.video.global.window_scale, 6);
         assert_eq!(s.stream_kbps, STREAM_KBPS.0);
+        assert_eq!(s.thumb_kbps, THUMB_KBPS.1);
         assert!(s.games.is_empty(), "an empty layer and an unknown key are both dropped");
     }
 

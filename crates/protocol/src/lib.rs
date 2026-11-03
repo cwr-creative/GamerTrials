@@ -25,8 +25,12 @@ use session_api::{ChallengeKind, ExitReason, SessionEvent};
 /// `Progress` (ADR 0034). 5 added head-to-head (ADR 0036): `Kind::HeadToHead`
 /// and `Ending::Beaten`, `Back`, `Endpoint`, `PeerLost`, `Sides`, `Peers`,
 /// `Welcome.rendezvous`, `Dealt.backing_seconds`, `RoundEntry.backed` and
-/// `LobbySettings.allow_head_to_head`.
-pub const VERSION: u32 = 5;
+/// `LobbySettings.allow_head_to_head`. 6 added the sidebar's thumbnails
+/// (ADR 0038): `Thumbs`, `Video.thumb` both ways and `Watched.thumbs`.
+pub const VERSION: u32 = 6;
+
+/// The most thumbnails a client may ask for at once (ADR 0038).
+pub const MAX_THUMBS: usize = 3;
 
 /// A versioned message. `v` is read before anything else.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -107,8 +111,30 @@ impl<'de> Deserialize<'de> for Payload {
 pub enum Lane {
     Control,
     /// A picture; `key` when it decodes without the ones before it.
-    Picture { key: bool },
+    /// `stream` tells apart the pictures one socket carries, which each
+    /// wait for a key of their own once one is dropped (ADR 0038).
+    Picture { key: bool, stream: u64 },
     Sound,
+}
+
+/// The [`Lane::Picture`] stream of a sender's own pictures: its full one,
+/// or its thumbnail.
+pub fn own_stream(thumb: bool) -> u64 {
+    thumb as u64
+}
+
+/// The [`Lane::Picture`] stream of `player`'s pictures as relayed: FNV-1a
+/// over the name, the thumbnail apart from the full picture.
+pub fn relayed_stream(player: &str, thumb: bool) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in player.bytes().chain([thumb as u8]) {
+        h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A message as a socket carries it.
@@ -128,7 +154,7 @@ pub trait Message: Serialize + DeserializeOwned {
 impl Message for ToServer {
     fn lane(&self) -> Lane {
         match self {
-            ToServer::Video { key, .. } => Lane::Picture { key: *key },
+            ToServer::Video { key, thumb, .. } => Lane::Picture { key: *key, stream: own_stream(*thumb) },
             ToServer::Audio { .. } => Lane::Sound,
             _ => Lane::Control,
         }
@@ -144,7 +170,7 @@ impl Message for ToServer {
 impl Message for ToClient {
     fn lane(&self) -> Lane {
         match self {
-            ToClient::Video { key, .. } => Lane::Picture { key: *key },
+            ToClient::Video { key, player, thumb, .. } => Lane::Picture { key: *key, stream: relayed_stream(player, *thumb) },
             ToClient::Audio { .. } => Lane::Sound,
             _ => Lane::Control,
         }
@@ -614,16 +640,33 @@ pub enum ToServer {
     /// Host only, from the score screen.
     BackToLobby,
     /// Watch `player`'s picture for this round, or stop with `None`. Only a
-    /// player whose own run is over, or who is not in the round, may watch
-    /// (ADR 0026); the server refuses the rest. Whoever is watched hears
-    /// `Watched` (ADR 0032).
+    /// player whose own run is over, or who is not in the round, may watch:
+    /// one still playing has their own game in the main view, and the
+    /// sidebar for the rest (ADR 0038). Whoever is watched hears `Watched`
+    /// (ADR 0032).
     Watch { round: u64, player: Option<String> },
+    /// The players whose thumbnails this client shows in its sidebar this
+    /// round, at most [`MAX_THUMBS`], replacing the last set (ADR 0038). Any
+    /// player in the match may ask, for anyone still playing the round.
+    Thumbs { round: u64, players: Vec<String> },
     /// One encoded picture: an H.264 access unit in Annex B form in `data`,
     /// with its parameter sets in-band when `key`. `frame` is the
     /// emulated frame it shows (ADR 0005); `aspect` is the picture's shape as
     /// the core reports it. Sent only while watched, and relayed to each
-    /// watcher as `ToClient::Video`.
-    Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Payload },
+    /// watcher as `ToClient::Video`. `thumb` marks the second stream, at the
+    /// thumbnail bitrate, sent while anyone has this player in their sidebar
+    /// and relayed to them (ADR 0038).
+    Video {
+        round: u64,
+        frame: u64,
+        key: bool,
+        width: u32,
+        height: u32,
+        aspect: f32,
+        data: Payload,
+        #[serde(default, skip_serializing_if = "is_false")]
+        thumb: bool,
+    },
     /// The sound under one or more pictures: IMA ADPCM in `data`, at
     /// the core's own `rate`, `channels` interleaved. Each chunk carries its
     /// own predictor, so a lost chunk is a gap and not a glitch. `frame` is
@@ -690,9 +733,16 @@ pub enum ToClient {
     Error { message: String },
     /// How many are watching this client's run now. Encode and send while
     /// it is above zero, and start on a key frame whenever it rises (ADR
-    /// 0032).
-    Watched { round: u64, watchers: u32 },
-    /// A watched player's picture, relayed as it was sent.
+    /// 0032). `thumbs` is how many show it in their sidebar, which is the
+    /// same rule for the thumbnail stream (ADR 0038).
+    Watched {
+        round: u64,
+        watchers: u32,
+        #[serde(default)]
+        thumbs: u32,
+    },
+    /// A watched player's picture, relayed as it was sent; `thumb` for the
+    /// thumbnail stream.
     Video {
         round: u64,
         player: String,
@@ -702,6 +752,8 @@ pub enum ToClient {
         height: u32,
         aspect: f32,
         data: Payload,
+        #[serde(default, skip_serializing_if = "is_false")]
+        thumb: bool,
     },
     /// A watched player's sound, relayed as it was sent.
     Audio { round: u64, player: String, frame: u64, rate: u32, channels: u8, data: Payload },
@@ -811,41 +863,64 @@ mod tests {
     #[test]
     fn packets_round_trip_and_carry_the_version() {
         let text = encode(&ToServer::Start);
-        assert!(text.contains("\"v\":5"), "{text}");
+        assert!(text.contains("\"v\":6"), "{text}");
         assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
     }
 
     #[test]
     fn another_version_is_refused_before_the_body_is_read() {
         let text = r#"{"v":99,"body":{"type":"start"}}"#;
-        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 5 }));
+        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 6 }));
     }
 
     #[test]
     fn a_stream_survives_the_wire() {
         let data = Payload(vec![0, 0, 0, 1, 0x67, 0xff]);
         let up = ToServer::Video {
-            round: 2, frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data: data.clone(),
+            round: 2, frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data: data.clone(), thumb: false,
         };
         assert_eq!(decode::<ToServer>(&encode(&up)).unwrap(), up);
+        assert!(!encode(&up).contains("thumb"), "a full picture says nothing of thumbnails");
         let down = ToClient::Video {
-            round: 2, player: "B".into(), frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data,
+            round: 2, player: "B".into(), frame: 300, key: true, width: 256, height: 240, aspect: 1.1428572, data, thumb: true,
         };
         assert_eq!(decode::<ToClient>(&encode(&down)).unwrap(), down);
         let sound = ToServer::Audio { round: 2, frame: 300, rate: 32040, channels: 2, data: vec![0].into() };
         assert_eq!(decode::<ToServer>(&encode(&sound)).unwrap(), sound);
         let watch = ToServer::Watch { round: 2, player: None };
         assert_eq!(decode::<ToServer>(&encode(&watch)).unwrap(), watch);
-        let watched = ToClient::Watched { round: 2, watchers: 1 };
+        let watched = ToClient::Watched { round: 2, watchers: 1, thumbs: 2 };
         assert_eq!(decode::<ToClient>(&encode(&watched)).unwrap(), watched);
+        let thumbs = ToServer::Thumbs { round: 2, players: vec!["B".into(), "C".into()] };
+        assert_eq!(decode::<ToServer>(&encode(&thumbs)).unwrap(), thumbs);
+    }
+
+    #[test]
+    fn each_picture_stream_is_its_own() {
+        let pic = |player: &str, thumb| ToClient::Video {
+            round: 1, player: player.into(), frame: 1, key: false, width: 2, height: 2, aspect: 1.0,
+            data: vec![0].into(), thumb,
+        };
+        let stream = |m: ToClient| match m.lane() {
+            Lane::Picture { stream, .. } => stream,
+            other => panic!("{other:?}"),
+        };
+        let all = [stream(pic("A", false)), stream(pic("A", true)), stream(pic("B", false)), stream(pic("B", true))];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_eq!(stream(pic("A", true)), relayed_stream("A", true));
     }
 
     #[test]
     fn a_payload_rides_a_binary_frame_and_nothing_else_does() {
         let up = ToServer::Video {
             round: 2, frame: 300, key: false, width: 256, height: 240, aspect: 1.0, data: vec![9; 1000].into(),
+            thumb: false,
         };
-        assert_eq!(up.lane(), Lane::Picture { key: false });
+        assert_eq!(up.lane(), Lane::Picture { key: false, stream: own_stream(false) });
         let Wire::Binary(bytes) = to_wire(up.clone()) else { panic!("a picture goes binary") };
         assert!(bytes.len() < 1000 + 200, "the bytes ride once, unencoded: {}", bytes.len());
         assert_eq!(decode_binary::<ToServer>(&bytes).unwrap(), up);

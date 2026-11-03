@@ -96,6 +96,27 @@
   #sp-events { color: #ccc; font-size: .9em; }
   #spectate.slow #sp-run { font-size: 1.6em; }
 
+  /* The sidebar (ADR 0038): the right of the window, where the game window
+     leaves black, holds up to three other players' pictures, stacked and
+     named. Its width is reckoned as video.rs reckons it (--side); the clock,
+     the corner readout and the spectate view keep to the left of it. */
+  :root { --side: 0px; }
+  #thumbs { position: absolute; right: 0; top: 0; bottom: 0; width: var(--side);
+            display: none; flex-direction: column; pointer-events: none; }
+  body.sidebar #thumbs { display: flex; }
+  .thumb { position: relative; flex: 1 1 0; min-height: 0; display: flex; align-items: center;
+           justify-content: center; overflow: hidden; border-left: 2px solid #222;
+           border-bottom: 2px solid #222; }
+  .thumb:last-child { border-bottom: 0; }
+  .thumb canvas { image-rendering: pixelated; background: #000; }
+  .thumb .label { position: absolute; left: 0; right: 0; bottom: 0; padding: .15em .5em;
+                  font-weight: 700; background: rgba(0, 0, 0, .6); text-shadow: 0 0 4px #000;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thumb.empty canvas, .thumb.empty .label { display: none; }
+  body.sidebar #clock { right: calc(var(--side) + 14px); }
+  body.sidebar #hud { right: calc(var(--side) + 8px); }
+  body.sidebar #spectate { right: var(--side); }
+
   #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
   #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
            background: rgba(160, 0, 0, .9); font-weight: 700; text-align: center; }
@@ -128,6 +149,11 @@
     <div id="sp-run"><span id="sp-clock"></span><span id="sp-attempt"></span><span id="sp-events"></span></div>
     <div id="sp-bar"><button id="sp-prev">&#9664;</button><span id="sp-name"></span><button id="sp-next">&#9654;</button></div>
     <div id="sp-note"></div>
+  </div>
+  <div id="thumbs">
+    <div class="thumb empty"><canvas width="256" height="240"></canvas><div class="label"></div></div>
+    <div class="thumb empty"><canvas width="256" height="240"></canvas><div class="label"></div></div>
+    <div class="thumb empty"><canvas width="256" height="240"></canvas><div class="label"></div></div>
   </div>
   <div id="waiting" class="hidden"></div>
   <div id="backing" class="sheet hidden"><div class="card">
@@ -394,7 +420,7 @@
   function fitFeed(w, h, aspect) {
     const c = $('feed');
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
-    const availW = window.innerWidth, availH = window.innerHeight - 70;
+    const availW = window.innerWidth - sideWidth(), availH = window.innerHeight - 70;
     const ar = aspect > 0 ? aspect : w / h;
     let ch = Math.min(availH, availW / ar), cw = ch * ar;
     c.style.width = Math.floor(cw) + 'px'; c.style.height = Math.floor(ch) + 'px';
@@ -576,6 +602,112 @@
     spec.nextTime += buf.duration;
   }
 
+  // ---- the sidebar (ADR 0038) ---------------------------------------------
+  // Up to three other players still playing, each picture from a decoder of
+  // its own and painted as soon as it is decoded: there is no sound to keep
+  // it in step with. The flow says who is in which box; a box whose player
+  // changes starts again from that player's next key frame.
+  const thumbs = [...document.querySelectorAll('.thumb')].map(el => ({
+    el, canvas: el.querySelector('canvas'), label: el.querySelector('.label'),
+    player: null, decoder: null, size: null, aspect: 0, needKey: true, frame: null,
+    configuring: false, failures: 0, broken: false,
+  }));
+  let thumbRaf = null;
+
+  // As video.rs's sidebar_width: four ninths of the height, at most two
+  // fifths of the width.
+  const sideWidth = () => document.body.classList.contains('sidebar')
+    ? Math.min(Math.floor(window.innerHeight * 4 / 9), Math.floor(window.innerWidth * 2 / 5)) : 0;
+  function layoutSide() {
+    document.documentElement.style.setProperty('--side', sideWidth() + 'px');
+    for (const b of thumbs) fitThumb(b);
+  }
+
+  function closeThumb(b) {
+    if (b.decoder) { try { b.decoder.close(); } catch (e) {} b.decoder = null; }
+    if (b.frame) { b.frame.close(); b.frame = null; }
+    b.size = null; b.needKey = true; b.failures = 0; b.broken = false;
+    b.canvas.getContext('2d').clearRect(0, 0, b.canvas.width, b.canvas.height);
+  }
+
+  function onThumbs(p) {
+    document.body.classList.toggle('sidebar', !!p.sidebar);
+    layoutSide();
+    const players = p.players || [];
+    thumbs.forEach((b, i) => {
+      const player = players[i] || null;
+      if (b.player !== player) { closeThumb(b); b.player = player; }
+      b.label.textContent = player || '';
+      b.el.classList.toggle('empty', !player);
+    });
+    if (p.sidebar && !thumbRaf) thumbRaf = requestAnimationFrame(paintThumbs);
+    if (!p.sidebar && thumbRaf) { cancelAnimationFrame(thumbRaf); thumbRaf = null; }
+  }
+
+  function fitThumb(b) {
+    // A box with no picture yet holds a 4:3 one.
+    const ar = b.aspect > 0 ? b.aspect : 4 / 3;
+    const w = b.el.clientWidth, h = b.el.clientHeight;
+    const ch = Math.min(h, w / ar), cw = ch * ar;
+    b.canvas.style.width = Math.floor(cw) + 'px'; b.canvas.style.height = Math.floor(ch) + 'px';
+  }
+
+  async function onThumb(p) {
+    if (!('VideoDecoder' in window)) return;
+    const b = thumbs.find(b => b.player === p.player);
+    if (!b || b.broken || b.configuring) return;
+    const size = p.width + 'x' + p.height;
+    if (!b.decoder || b.size !== size) {
+      if (b.decoder) { try { b.decoder.close(); } catch (e) {} b.decoder = null; }
+      const config = { codec: 'avc1.42E01E', optimizeForLatency: true };
+      b.configuring = true;
+      try {
+        const ok = await VideoDecoder.isConfigSupported(config);
+        if (!ok.supported) { thumbGiveUp(b); return; }
+      } catch (e) { thumbGiveUp(b); return; }
+      finally { b.configuring = false; }
+      if (b.player !== p.player) return;
+      const d = new VideoDecoder({
+        output: frame => { b.failures = 0; if (b.frame) b.frame.close(); b.frame = frame; },
+        error: e => thumbFailed(b, d, e.message),
+      });
+      d.configure(config);
+      b.decoder = d; b.size = size; b.needKey = true;
+      if (b.canvas.width !== p.width || b.canvas.height !== p.height) { b.canvas.width = p.width; b.canvas.height = p.height; }
+      b.aspect = p.aspect;
+      fitThumb(b);
+    }
+    if (b.needKey && !p.key) return;
+    b.needKey = false;
+    try {
+      b.decoder.decode(new EncodedVideoChunk({
+        type: p.key ? 'key' : 'delta', timestamp: p.frame * 16667, data: b64(p.data),
+      }));
+    } catch (e) { thumbFailed(b, b.decoder, e.message); }
+  }
+
+  // As the full picture's decoder: dropped on failure, given up after a few.
+  function thumbFailed(b, d, why) {
+    if (!d || d !== b.decoder) return;
+    try { d.close(); } catch (e) {}
+    b.decoder = null; b.size = null; b.needKey = true;
+    hud('thumbnail decode error: ' + why);
+    if (++b.failures >= DECODE_TRIES) thumbGiveUp(b);
+  }
+  function thumbGiveUp(b) {
+    b.broken = true;
+    b.label.textContent = (b.player || '') + ' (no video)';
+  }
+
+  function paintThumbs() {
+    thumbRaf = requestAnimationFrame(paintThumbs);
+    for (const b of thumbs) {
+      if (!b.frame) continue;
+      b.canvas.getContext('2d').drawImage(b.frame, 0, 0, b.canvas.width, b.canvas.height);
+      b.frame.close(); b.frame = null;
+    }
+  }
+
   function pollSpectatePad() {
     const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
     const cur = { left: false, right: false };
@@ -590,7 +722,10 @@
   }
   $('sp-prev').onclick = () => switchPlayer(-1);
   $('sp-next').onclick = () => switchPlayer(1);
-  window.addEventListener('resize', () => { if (spec.size) { const c = $('feed'); fitFeed(c.width, c.height, c.width / c.height); } });
+  window.addEventListener('resize', () => {
+    layoutSide();
+    if (spec.size) { const c = $('feed'); fitFeed(c.width, c.height, c.width / c.height); }
+  });
 
   function handle(p) {
     switch (p.kind) {
@@ -598,6 +733,8 @@
       case 'video': onVideo(p); break;
       case 'audio': onAudio(p); break;
       case 'progress': onProgress(p); break;
+      case 'thumbs': onThumbs(p); break;
+      case 'thumb': onThumb(p); break;
       case 'loading': playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
       case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;

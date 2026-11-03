@@ -13,19 +13,21 @@
 //! * **The socket takes it.** The socket is non-blocking with a small send
 //!   buffer, and a stream message is written only once everything before it
 //!   has left; until then it waits where it can still be dropped.
-//! * **The link is not queueing.** A phone network can hold seconds of data
+//! * **The link is not queueing.** A congested link can hold seconds of data
 //!   in buffers no socket sees. While a stream flows the loop pings every
 //!   [`Rules::probe_every`], each ping carrying the time it left; a round
 //!   trip longer than the shortest one seen is time spent in a queue, and
 //!   while that exceeds [`Rules::max_queue`] -- or a ping has gone unanswered
 //!   that long -- the stream waits ([`Gauge`]).
 //!
-//! When a picture is dropped, every later one is too until the next key
-//! frame, since none of them decodes without it.
+//! When a picture is dropped, every later one of its stream is too until
+//! that stream's next key frame, since none of them decodes without it. A
+//! socket may carry several streams — a full picture and thumbnails (ADR
+//! 0038) — and each breaks on its own.
 
 #![forbid(unsafe_code)]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
@@ -35,7 +37,7 @@ use protocol::{Beat, Heartbeat, Lane, Liveness, Message, ProtocolError, Wire};
 use tungstenite::{Message as Frame, WebSocket};
 
 /// The kernel's send buffer. Whatever it holds is beyond dropping, so it is
-/// kept small: about a second at a phone's 0.2 Mbit/s, and room for a few
+/// kept small: about a second at 0.2 Mbit/s, and room for a few
 /// Mbit/s at a home link's round trip.
 pub const SEND_BUFFER: usize = 16 * 1024;
 
@@ -153,9 +155,9 @@ pub struct Lanes<M> {
     stale_after: Duration,
     control: VecDeque<M>,
     stream: VecDeque<(Instant, M)>,
-    /// A picture was dropped; later ones wait for a key frame.
-    broken: bool,
-    key_wanted: bool,
+    /// Streams a picture was dropped from; their later ones wait for a key.
+    broken: BTreeSet<u64>,
+    key_wanted: BTreeSet<u64>,
     pub stats: Stats,
 }
 
@@ -165,8 +167,8 @@ impl<M: Message> Lanes<M> {
             stale_after,
             control: VecDeque::new(),
             stream: VecDeque::new(),
-            broken: false,
-            key_wanted: false,
+            broken: BTreeSet::new(),
+            key_wanted: BTreeSet::new(),
             stats: Stats::default(),
         }
     }
@@ -190,12 +192,12 @@ impl<M: Message> Lanes<M> {
         self.prune(now);
         while let Some((_, m)) = self.stream.pop_front() {
             match m.lane() {
-                Lane::Picture { key } => {
-                    if self.broken && !key {
+                Lane::Picture { key, stream } => {
+                    if !key && self.broken.contains(&stream) {
                         self.stats.pictures_dropped += 1;
                         continue;
                     }
-                    self.broken = false;
+                    self.broken.remove(&stream);
                     self.stats.pictures += 1;
                 }
                 Lane::Sound => self.stats.sounds += 1,
@@ -221,24 +223,24 @@ impl<M: Message> Lanes<M> {
                 break;
             }
             match m.lane() {
-                Lane::Picture { .. } => self.drop_picture(),
+                Lane::Picture { stream, .. } => self.drop_picture(stream),
                 _ => self.stats.sounds_dropped += 1,
             }
             self.stream.pop_front();
         }
     }
 
-    fn drop_picture(&mut self) {
+    fn drop_picture(&mut self, stream: u64) {
         self.stats.pictures_dropped += 1;
-        if !self.broken {
-            self.broken = true;
-            self.key_wanted = true;
+        if self.broken.insert(stream) {
+            self.key_wanted.insert(stream);
         }
     }
 
-    /// True once after pictures were dropped: the sender should start a
-    /// key frame, or the watcher waits for the next one it makes anyway.
-    pub fn take_key_wanted(&mut self) -> bool {
+    /// The streams pictures were dropped from since last asked, once each:
+    /// their senders should start a key frame, or the watcher waits for the
+    /// next one they make anyway.
+    pub fn take_key_wanted(&mut self) -> BTreeSet<u64> {
         std::mem::take(&mut self.key_wanted)
     }
 }
@@ -280,8 +282,8 @@ impl std::fmt::Display for End {
 pub struct Ends<'a, In> {
     /// Each message read. Return [`Next::Stop`] to end the loop.
     pub incoming: &'a mut dyn FnMut(In) -> Next,
-    /// Pictures were dropped on this socket.
-    pub key_wanted: &'a mut dyn FnMut(),
+    /// Pictures of this stream were dropped on this socket.
+    pub key_wanted: &'a mut dyn FnMut(u64),
     /// Names the socket in the stream's log line.
     pub label: &'a str,
 }
@@ -385,8 +387,8 @@ pub fn run<S: Read + Write, In: Message, Out: Message>(
         } else {
             lanes.prune_older(now, rules.probe_every);
         }
-        if lanes.take_key_wanted() {
-            (ends.key_wanted)();
+        for stream in lanes.take_key_wanted() {
+            (ends.key_wanted)(stream);
         }
 
         let stream_flowing = streaming.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
@@ -490,7 +492,11 @@ mod tests {
     use protocol::{ToClient, ToServer};
 
     fn picture(frame: u64, key: bool) -> ToServer {
-        ToServer::Video { round: 1, frame, key, width: 2, height: 2, aspect: 1.0, data: vec![0].into() }
+        ToServer::Video { round: 1, frame, key, width: 2, height: 2, aspect: 1.0, data: vec![0].into(), thumb: false }
+    }
+
+    fn thumb(frame: u64, key: bool) -> ToServer {
+        ToServer::Video { round: 1, frame, key, width: 2, height: 2, aspect: 1.0, data: vec![0].into(), thumb: true }
     }
 
     fn sound(frame: u64) -> ToServer {
@@ -533,11 +539,30 @@ mod tests {
         // cannot decode, so the next thing out is the sound, then the key.
         let out: Vec<u64> = std::iter::from_fn(|| lanes.stream(ms(200))).map(|m| frame_of(&m)).collect();
         assert_eq!(out, [3, 4, 5]);
-        assert!(lanes.take_key_wanted(), "a dropped picture asks for a key");
-        assert!(!lanes.take_key_wanted(), "once");
+        assert_eq!(lanes.take_key_wanted(), [protocol::own_stream(false)].into(), "a dropped picture asks for a key");
+        assert!(lanes.take_key_wanted().is_empty(), "once");
         assert_eq!(lanes.stats.pictures_dropped, 3);
         assert_eq!(lanes.stats.sounds_dropped, 1);
         assert_eq!((lanes.stats.pictures, lanes.stats.sounds), (2, 1));
+    }
+
+    #[test]
+    fn each_picture_stream_waits_for_its_own_key() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut lanes = Lanes::new(Duration::from_millis(100));
+        // The full picture's key goes stale; the thumbnail's arrives fresh.
+        lanes.push(picture(1, true), ms(0));
+        lanes.push(thumb(1, true), ms(150));
+        lanes.push(picture(2, false), ms(160));
+        lanes.push(thumb(2, false), ms(160));
+        lanes.push(picture(3, true), ms(170));
+        lanes.push(thumb(3, false), ms(170));
+        let out: Vec<(bool, u64)> = std::iter::from_fn(|| lanes.stream(ms(200)))
+            .map(|m| (matches!(m, ToServer::Video { thumb: true, .. }), frame_of(&m)))
+            .collect();
+        assert_eq!(out, [(true, 1), (true, 2), (false, 3), (true, 3)], "the thumbnail is not held for the full key");
+        assert_eq!(lanes.take_key_wanted(), [protocol::own_stream(false)].into(), "only the full stream wants a key");
     }
 
     #[test]
@@ -568,12 +593,12 @@ mod tests {
             lanes.push(
                 ToClient::Video {
                     round: 1, player: "A".into(), frame: f, key: f == 0, width: 2, height: 2, aspect: 1.0,
-                    data: vec![0].into(),
+                    data: vec![0].into(), thumb: false,
                 },
                 t0,
             );
         }
         assert_eq!(std::iter::from_fn(|| lanes.stream(t0)).count(), 5);
-        assert!(!lanes.take_key_wanted());
+        assert!(lanes.take_key_wanted().is_empty());
     }
 }
