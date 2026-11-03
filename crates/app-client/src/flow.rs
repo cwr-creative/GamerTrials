@@ -24,7 +24,7 @@ use protocol::{ChallengeRef, FileReport, Kind, LobbySettings, LobbyState, ToClie
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::game::{self, BoutLoad, Command, Load, Report};
+use crate::game::{self, BoutLoad, Command, Load, Report, Watching};
 use crate::library::Library;
 use crate::overlay::Overlay;
 use crate::link::{self, Link};
@@ -93,6 +93,9 @@ pub struct Auto {
     /// `--script <seed>`: press random buttons instead of reading the pad,
     /// for a bout played by two clients with nobody at either keyboard.
     pub script: Option<u64>,
+    /// `--give-up-after <s>`: give every run up that many seconds of play in,
+    /// so a scripted client becomes a spectator (ADR 0037).
+    pub give_up_after: Option<f64>,
 }
 
 /// The round being played, as the overlay needs to describe it.
@@ -136,6 +139,9 @@ pub struct Flow {
     spectate: Option<Spectate>,
     /// Which challenge each dealt round was, for the cards.
     dealt: BTreeMap<u64, ChallengeRef>,
+    /// Each dealt round's seed and limit, so a watcher can prepare the same
+    /// round it replays (ADR 0037).
+    terms: BTreeMap<u64, (u64, u64)>,
     /// Who plays each dealt round, in slot order (ADR 0036).
     slots: BTreeMap<u64, Vec<String>>,
     /// Where a bout's probes go, as the server said at hello.
@@ -198,6 +204,7 @@ impl Flow {
                     current: None,
                     spectate: None,
                     dealt: BTreeMap::new(),
+                    terms: BTreeMap::new(),
                     slots: BTreeMap::new(),
                     rendezvous: None,
                     backing_round: None,
@@ -389,6 +396,7 @@ impl Flow {
                     challenge.game, challenge.challenge
                 );
                 self.dealt.insert(round, challenge.clone());
+                self.terms.insert(round, (seed, limit_frames));
                 self.slots.insert(round, players.clone());
                 self.backing_round = None;
                 let me = self.player.clone().unwrap_or_default();
@@ -415,24 +423,6 @@ impl Flow {
                     return;
                 }
                 self.current = Some(Current { round, playing: players.clone() });
-                let Some(lib) = self.library.catalog.game(&challenge.game) else {
-                    self.unprepared(round, format!("this client does not hold the game `{}`", challenge.game));
-                    return;
-                };
-                let Some(c) = lib.challenge(&challenge.challenge) else {
-                    self.unprepared(round, format!("this client does not hold the challenge `{}`", challenge.challenge));
-                    return;
-                };
-                let game = &challenge.game;
-                let core = &self.library.cores[game];
-                let lr = &self.library.runner[game].libretro;
-                let (input, mut video, display) = {
-                    let s = self.settings.lock().unwrap();
-                    (s.resolve_input(core, game, lr.controller, &lr.pad_keys), s.resolve_video(core), s.video.display)
-                };
-                if let Some(scale) = self.scale {
-                    video.window_scale = scale;
-                }
                 let bout = bout.then(|| {
                     let slot = players.iter().position(|p| *p == me).unwrap_or(0) as u8;
                     let (input_delay, port) = {
@@ -441,19 +431,16 @@ impl Flow {
                     };
                     BoutLoad { slot, slots: players.len() as u8, rendezvous: self.rendezvous_addr(), input_delay, port }
                 });
-                let load = Load {
-                    round,
-                    manifest: self.library.paths[game].clone(),
-                    stage: c.stage.0.clone(),
-                    challenge: c.id.0.clone(),
-                    seed,
-                    limit: limit_frames,
-                    input,
-                    video,
-                    display,
-                    bout,
-                    script: self.auto.script,
+                let mut load = match self.load_for(round) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.unprepared(round, e);
+                        return;
+                    }
                 };
+                load.bout = bout;
+                load.script = self.auto.script;
+                load.give_up_after = self.auto.give_up_after;
                 self.emit(json!({ "kind": "loading", "round": round }));
                 match &self.game {
                     Some(g) => {
@@ -567,6 +554,14 @@ impl Flow {
                         "kind": "audio", "player": player, "frame": frame,
                         "rate": rate, "channels": channels, "data": protocol::to_base64(&data.0),
                     }));
+                }
+            }
+            ToClient::Inputs { round, player, attempt, from, count, frames, checks, artifact } => {
+                if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
+                    if let Some(g) = &self.game {
+                        let checks = checks.into_iter().map(|c| (c.frame, c.picture)).collect();
+                        let _ = g.send(Command::Inputs { player, attempt, from, count, frames: frames.0, checks, artifact });
+                    }
                 }
             }
             ToClient::Progress { round, player, frame, attempt, clock, events } => {
@@ -744,6 +739,17 @@ impl Flow {
             Report::Audio { round, frame, rate, channels, data } => {
                 self.send(ToServer::Audio { round, frame, rate, channels, data: data.into() });
             }
+            Report::Replay { round, player, state } => {
+                if self.spectate.as_ref().is_some_and(|s| s.round == round && s.watching.as_deref() == Some(&*player)) {
+                    println!("[watch] replaying {player}: {state:?}");
+                    let (kind, text) = state.describe();
+                    self.emit(json!({ "kind": "replay", "player": player, "state": kind, "text": text }));
+                }
+            }
+            Report::Inputs { round, attempt, from, count, frames, checks } => {
+                let checks = checks.into_iter().map(|(frame, picture)| protocol::Check { frame, picture }).collect();
+                self.send(ToServer::Inputs { round, attempt, from, count, frames: frames.into(), checks });
+            }
             Report::Endpoint { round, token, local } => {
                 if self.is_current(round) {
                     self.send(ToServer::Endpoint { round, token, local });
@@ -845,14 +851,34 @@ impl Flow {
         }
         s.watching = player.clone();
         let round = s.round;
+        // Asked for before the server is told, so the backlog it answers
+        // with finds the replica ready for it.
+        let replay = self.dealt_kind(round) != Some(Kind::HeadToHead);
+        if replay {
+            let watching = match &player {
+                Some(p) => match self.load_for(round) {
+                    Ok(load) => Some(Box::new(Watching { load, player: p.clone() })),
+                    Err(e) => {
+                        self.emit(json!({ "kind": "replay", "player": p, "state": "lost", "text": format!("cannot replay this run here: {e}") }));
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(g) = &self.game {
+                let _ = g.send(Command::Watch(watching));
+            }
+        }
         self.send(ToServer::Watch { round, player });
         self.emit_spectate();
     }
 
     fn emit_spectate(&self) {
         if let Some(s) = &self.spectate {
+            let replay = self.dealt_kind(s.round) != Some(Kind::HeadToHead);
             self.emit(json!({
                 "kind": "spectate", "round": s.round, "player": s.watching, "players": s.players,
+                "replay": replay,
             }));
         }
     }
@@ -866,7 +892,48 @@ impl Flow {
         }
         if let Some(g) = &self.game {
             let _ = g.send(Command::Stream(0));
+            let _ = g.send(Command::Watch(None));
         }
+    }
+
+    /// What preparing `round` takes on this machine: its content and this
+    /// player's settings for its game. A player loads it to play; a watcher
+    /// loads the same to replay someone else's run (ADR 0037).
+    fn load_for(&self, round: u64) -> Result<Load, String> {
+        let challenge = self.dealt.get(&round).ok_or_else(|| format!("round {round} was never dealt"))?;
+        let &(seed, limit) = self.terms.get(&round).ok_or_else(|| format!("round {round} was never dealt"))?;
+        let lib = self
+            .library
+            .catalog
+            .game(&challenge.game)
+            .ok_or_else(|| format!("this client does not hold the game `{}`", challenge.game))?;
+        let c = lib
+            .challenge(&challenge.challenge)
+            .ok_or_else(|| format!("this client does not hold the challenge `{}`", challenge.challenge))?;
+        let game = &challenge.game;
+        let core = &self.library.cores[game];
+        let lr = &self.library.runner[game].libretro;
+        let (input, mut video, display) = {
+            let s = self.settings.lock().unwrap();
+            (s.resolve_input(core, game, lr.controller, &lr.pad_keys), s.resolve_video(core), s.video.display)
+        };
+        if let Some(scale) = self.scale {
+            video.window_scale = scale;
+        }
+        Ok(Load {
+            round,
+            manifest: self.library.paths[game].clone(),
+            stage: c.stage.0.clone(),
+            challenge: c.id.0.clone(),
+            seed,
+            limit,
+            input,
+            video,
+            display,
+            bout: None,
+            script: None,
+            give_up_after: None,
+        })
     }
 
     /// This client cannot run the round; the server voids it (ADR 0029).

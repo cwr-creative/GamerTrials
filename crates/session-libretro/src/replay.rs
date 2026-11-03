@@ -1,5 +1,10 @@
-//! Input replay, as a spike: does a second machine fed the same inputs play the
-//! same game?
+//! Input replay: what a spectator is sent (ADR 0037), and the spike that
+//! measured whether a second machine fed the same inputs plays the same game.
+//!
+//! For spectating, a frame's [`Input`] travels as [`encode_frames`] writes it —
+//! a few bytes, opaque to everything outside this crate — with a
+//! [`picture_digest`] every so often for the watcher to check its own against.
+//! The rest of this module is the spike's harness: logs, digests and reports.
 //!
 //! ADR 0003 rejected spectating by replicated input because two machines'
 //! emulators can diverge silently, and ADR 0034 left the question open once
@@ -47,6 +52,126 @@ pub struct Input {
     pub keys: Vec<(bool, u32)>,
     /// Motion since the frame before, then held buttons.
     pub mouse: (i32, i32, u32),
+}
+
+// What a frame's input holds, as the first byte of its encoding says.
+const HAS_PAD: u8 = 1 << 0;
+const HAS_KEYS: u8 = 1 << 1;
+const HAS_MOUSE: u8 = 1 << 2;
+/// Set on a key code when the edge is a press.
+const KEY_DOWN: u16 = 1 << 15;
+
+impl Input {
+    /// Appends this frame: a byte saying what follows, then only what is
+    /// there — the pad mask (`u16`), the key edges (a count, then each code
+    /// with its top bit set for a press), the mouse (`i16` motion, `u16`
+    /// buttons). All little-endian. An idle console frame is one byte.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        let (dx, dy, buttons) = self.mouse;
+        let mut flags = 0;
+        if self.joypad != 0 {
+            flags |= HAS_PAD;
+        }
+        if !self.keys.is_empty() {
+            flags |= HAS_KEYS;
+        }
+        if dx != 0 || dy != 0 || buttons != 0 {
+            flags |= HAS_MOUSE;
+        }
+        out.push(flags);
+        if flags & HAS_PAD != 0 {
+            out.extend_from_slice(&(self.joypad as u16).to_le_bytes());
+        }
+        if flags & HAS_KEYS != 0 {
+            // Never more than a frame's worth of a keyboard; more would be a
+            // stuck event loop, and the rest are the next frame's anyway.
+            let keys = &self.keys[..self.keys.len().min(255)];
+            out.push(keys.len() as u8);
+            for &(down, code) in keys {
+                let code = (code as u16 & !KEY_DOWN) | if down { KEY_DOWN } else { 0 };
+                out.extend_from_slice(&code.to_le_bytes());
+            }
+        }
+        if flags & HAS_MOUSE != 0 {
+            let clamp = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            out.extend_from_slice(&clamp(dx).to_le_bytes());
+            out.extend_from_slice(&clamp(dy).to_le_bytes());
+            out.extend_from_slice(&(buttons as u16).to_le_bytes());
+        }
+    }
+
+    /// Reads one frame from `bytes` at `*at`, and moves `*at` past it.
+    pub fn decode(bytes: &[u8], at: &mut usize) -> Result<Input, String> {
+        let mut take = |n: usize| -> Result<&[u8], String> {
+            let b = bytes.get(*at..*at + n).ok_or("input ends mid-frame")?;
+            *at += n;
+            Ok(b)
+        };
+        let u16_at = |b: &[u8]| u16::from_le_bytes([b[0], b[1]]);
+        let flags = take(1)?[0];
+        if flags & !(HAS_PAD | HAS_KEYS | HAS_MOUSE) != 0 {
+            return Err(format!("a frame flagged {flags:#04x}, which this build cannot read"));
+        }
+        let mut input = Input::default();
+        if flags & HAS_PAD != 0 {
+            input.joypad = u32::from(u16_at(take(2)?));
+        }
+        if flags & HAS_KEYS != 0 {
+            let n = take(1)?[0];
+            for _ in 0..n {
+                let code = u16_at(take(2)?);
+                input.keys.push((code & KEY_DOWN != 0, u32::from(code & !KEY_DOWN)));
+            }
+        }
+        if flags & HAS_MOUSE != 0 {
+            let dx = u16_at(take(2)?) as i16;
+            let dy = u16_at(take(2)?) as i16;
+            let buttons = u16_at(take(2)?);
+            input.mouse = (i32::from(dx), i32::from(dy), u32::from(buttons));
+        }
+        Ok(input)
+    }
+}
+
+/// Frames one after another, as a spectator is sent them.
+pub fn encode_frames(frames: &[Input]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(frames.len() * 2);
+    for f in frames {
+        f.encode(&mut out);
+    }
+    out
+}
+
+/// Every frame in `bytes`, which must hold exactly `count`.
+pub fn decode_frames(bytes: &[u8], count: usize) -> Result<Vec<Input>, String> {
+    let mut at = 0;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        out.push(Input::decode(bytes, &mut at)?);
+    }
+    if at != bytes.len() {
+        return Err(format!("{} bytes left over after {count} frames", bytes.len() - at));
+    }
+    Ok(out)
+}
+
+/// The picture the core last presented, as a number: its size and every pixel.
+/// What a watcher compares with the player's to know it is still watching the
+/// same game (ADR 0037). It is the picture rather than memory because the
+/// picture is what a watcher sees, and because a threaded core's memory moves
+/// after `retro_run` returns while the picture it handed over does not.
+pub fn picture_digest(runner: &LibretroRunner) -> u64 {
+    let mut video = Fx::new(0);
+    // `u64::MAX` is never a sequence number, so the current picture is handed
+    // over whether or not it is new.
+    runner.present(u64::MAX, &mut |f| {
+        video.word(f.width as u64);
+        video.word(f.height as u64);
+        for p in f.pixels {
+            video.word(u64::from(*p));
+        }
+    });
+    video.0
 }
 
 /// The machine after one frame.
@@ -348,16 +473,7 @@ pub fn digest(runner: &mut LibretroRunner, emitted: &[SessionEvent]) -> Digest {
             regions.push(hash_bytes(window));
         }
     }
-    let mut video = Fx::new(0);
-    // `u64::MAX` is never a sequence number, so the current picture is handed
-    // over whether or not it is new.
-    runner.present(u64::MAX, &mut |f| {
-        video.word(f.width as u64);
-        video.word(f.height as u64);
-        for p in f.pixels {
-            video.word(u64::from(*p));
-        }
-    });
+    let video = picture_digest(runner);
     let mut audio = Fx::new(0);
     runner.take_audio(&mut |samples, rate| {
         audio.word(u64::from(rate));
@@ -369,7 +485,7 @@ pub fn digest(runner: &mut LibretroRunner, emitted: &[SessionEvent]) -> Digest {
     for e in emitted {
         events.word(hash_bytes(e.to_string().as_bytes()));
     }
-    Digest { regions, video: video.0, audio: audio.0, events: events.0 }
+    Digest { regions, video, audio: audio.0, events: events.0 }
 }
 
 /// FxHash's step over 64-bit words. Not a cryptographic digest and not meant
@@ -643,6 +759,33 @@ mod tests {
         assert_eq!(log.steps, steps);
         assert_eq!(log.get("game"), Some("doom"));
         assert_eq!(log.regions(), vec!["0+9e7a0", "200000+f60000"]);
+    }
+
+    #[test]
+    fn frames_read_back_as_encoded() {
+        let frames = vec![
+            Input::default(),
+            Input { joypad: 0x8001, keys: vec![], mouse: (0, 0, 0) },
+            Input { joypad: 0, keys: vec![(true, 273), (false, 306)], mouse: (-6, 2, 4) },
+            Input { joypad: 0, keys: vec![], mouse: (40000, -40000, 1 << 9) },
+        ];
+        let bytes = encode_frames(&frames);
+        // An idle frame is one byte; a pad-only frame three.
+        assert_eq!(bytes[0], 0);
+        assert_eq!(&bytes[1..4], &[HAS_PAD, 0x01, 0x80]);
+        let back = decode_frames(&bytes, frames.len()).unwrap();
+        assert_eq!(back[..3], frames[..3]);
+        // Motion past what an i16 holds is clamped, not wrapped.
+        assert_eq!(back[3].mouse, (i16::MAX as i32, i16::MIN as i32, 1 << 9));
+    }
+
+    #[test]
+    fn frames_that_do_not_add_up_are_refused() {
+        let bytes = encode_frames(&[Input { joypad: 1, ..Input::default() }]);
+        assert!(decode_frames(&bytes, 2).is_err(), "fewer frames than said");
+        assert!(decode_frames(&bytes[..2], 1).is_err(), "a frame cut short");
+        assert!(decode_frames(&[0, 0], 1).is_err(), "bytes left over");
+        assert!(decode_frames(&[0x80], 1).is_err(), "a flag from a newer build");
     }
 
     #[test]

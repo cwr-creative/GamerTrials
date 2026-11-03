@@ -64,6 +64,20 @@ struct SeatRun {
     /// come; the server's ruling stands alone.
     lost: Option<u64>,
     endpoint: Endpoint,
+    /// This run's input since its attempt began, for a watcher who arrives
+    /// late (ADR 0037).
+    inputs: Inputs,
+}
+
+/// One seat's current attempt, as its client sent it: opaque frames, counted,
+/// and the picture checks among them. An attempt starts from the stage's
+/// entry state, so nothing before it is ever needed again.
+#[derive(Default)]
+struct Inputs {
+    attempt: u32,
+    count: u64,
+    frames: Vec<u8>,
+    checks: Vec<protocol::Check>,
 }
 
 struct RoundState {
@@ -237,6 +251,10 @@ impl Server {
                     aspect,
                     data: data.clone(),
                 })
+            }
+            ToServer::Inputs { round, attempt, from, count, frames, checks } => {
+                let player = self.seats[seat].id.clone();
+                self.inputs(player, round, attempt, from, count, frames, checks)
             }
             ToServer::Audio { round, frame, rate, channels, data } => {
                 let player = self.seats[seat].id.clone();
@@ -470,6 +488,7 @@ impl Server {
                             claimed: None,
                             lost: None,
                             endpoint: Endpoint::default(),
+                            inputs: Inputs::default(),
                         },
                     );
                 }
@@ -894,12 +913,29 @@ impl Server {
             rs.watching.insert(player, t);
         }
         let mut changed: Vec<PlayerId> = Vec::new();
-        for t in before.into_iter().chain(target) {
+        for t in before.into_iter().chain(target.clone()) {
             if !changed.contains(&t) {
                 changed.push(t);
             }
         }
         let mut out = Vec::new();
+        // The run so far, so the watcher can replay up to now (ADR 0037).
+        if let Some(seat) = target.as_ref().and_then(|t| rs.seats.get(t).map(|s| (t, s))) {
+            let (t, s) = seat;
+            out.push((
+                conn,
+                ToClient::Inputs {
+                    round,
+                    player: t.0.clone(),
+                    attempt: s.inputs.attempt,
+                    from: 1,
+                    count: s.inputs.count as u32,
+                    frames: s.inputs.frames.clone().into(),
+                    checks: s.inputs.checks.clone(),
+                    artifact: s.artifact.clone(),
+                },
+            ));
+        }
         for t in changed {
             let watchers = rs.watching.values().filter(|w| **w == t).count() as u32;
             if let Some(seat) = self.seats.iter().find(|s| s.id == t) {
@@ -907,6 +943,53 @@ impl Server {
             }
         }
         out
+    }
+
+    /// A batch of `player`'s input: kept for whoever watches later, and sent
+    /// on to whoever watches now (ADR 0037). A new attempt starts the record
+    /// over. A batch that does not follow on from the last is a client bug or
+    /// a round already over, and goes no further: a watcher fed it would play
+    /// a different game.
+    #[allow(clippy::too_many_arguments)]
+    fn inputs(
+        &mut self,
+        player: PlayerId,
+        round: u64,
+        attempt: u32,
+        from: u64,
+        count: u32,
+        frames: protocol::Payload,
+        checks: Vec<protocol::Check>,
+    ) -> Outbox {
+        let Some(rs) = self.live.as_mut().and_then(|l| l.round.as_mut()) else { return Vec::new() };
+        if rs.deal.index != round {
+            return Vec::new();
+        }
+        let Some(seat) = rs.seats.get_mut(&player) else { return Vec::new() };
+        let log = &mut seat.inputs;
+        if attempt > log.attempt {
+            *log = Inputs { attempt, ..Inputs::default() };
+        }
+        if attempt != log.attempt || from != log.count + 1 {
+            eprintln!(
+                "[inputs] {player}: frames {from}.. of attempt {attempt} do not follow frame {} of attempt {}",
+                log.count, log.attempt
+            );
+            return Vec::new();
+        }
+        log.count += u64::from(count);
+        log.frames.extend_from_slice(&frames.0);
+        log.checks.extend_from_slice(&checks);
+        self.relay(&player, round, |p| ToClient::Inputs {
+            round,
+            player: p,
+            attempt,
+            from,
+            count,
+            frames: frames.clone(),
+            checks: checks.clone(),
+            artifact: None,
+        })
     }
 
     /// One of `player`'s stream messages, to everyone watching them this

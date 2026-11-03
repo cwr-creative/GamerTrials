@@ -25,8 +25,9 @@ use session_api::{ChallengeKind, ExitReason, SessionEvent};
 /// `Progress` (ADR 0034). 5 added head-to-head (ADR 0036): `Kind::HeadToHead`
 /// and `Ending::Beaten`, `Back`, `Endpoint`, `PeerLost`, `Sides`, `Peers`,
 /// `Welcome.rendezvous`, `Dealt.backing_seconds`, `RoundEntry.backed` and
-/// `LobbySettings.allow_head_to_head`.
-pub const VERSION: u32 = 5;
+/// `LobbySettings.allow_head_to_head`. 6 added `Inputs` both ways: a run is
+/// spectated by replaying it (ADR 0037, on `input-replication`).
+pub const VERSION: u32 = 6;
 
 /// A versioned message. `v` is read before anything else.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -69,7 +70,7 @@ pub fn decode<M: DeserializeOwned>(text: &str) -> Result<M, ProtocolError> {
     Ok(packet.body)
 }
 
-/// A picture's or a sound's bytes. Inside a JSON packet they are base64; on
+/// A picture's, a sound's or a run's inputs' bytes. Inside a JSON packet they are base64; on
 /// a socket they follow the packet in a binary frame (see [`to_wire`]), and
 /// the packet's copy is empty.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -136,6 +137,7 @@ impl Message for ToServer {
     fn payload_mut(&mut self) -> Option<&mut Payload> {
         match self {
             ToServer::Video { data, .. } | ToServer::Audio { data, .. } => Some(data),
+            ToServer::Inputs { frames, .. } => Some(frames),
             _ => None,
         }
     }
@@ -152,6 +154,7 @@ impl Message for ToClient {
     fn payload_mut(&mut self) -> Option<&mut Payload> {
         match self {
             ToClient::Video { data, .. } | ToClient::Audio { data, .. } => Some(data),
+            ToClient::Inputs { frames, .. } => Some(frames),
             _ => None,
         }
     }
@@ -629,6 +632,21 @@ pub enum ToServer {
     /// own predictor, so a lost chunk is a gap and not a glitch. `frame` is
     /// the emulated frame the chunk begins on.
     Audio { round: u64, frame: u64, rate: u32, channels: u8, data: Payload },
+    /// A run's input, `count` frames of it from `from` (1 being the first
+    /// frame of `attempt`), as the adapter encodes it: opaque here and on the
+    /// server (invariant 3). Sent for every run, watched or not, on the
+    /// control lane, because a frame lost is a different game. `checks` are
+    /// (frame, picture digest) pairs a replay compares its own against (ADR
+    /// 0037).
+    Inputs { round: u64, attempt: u32, from: u64, count: u32, frames: Payload, checks: Vec<Check> },
+}
+
+/// What a run's picture was on one frame, as a number, for a replay to
+/// compare its own with (ADR 0037).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Check {
+    pub frame: u64,
+    pub picture: u64,
 }
 
 /// Server to client.
@@ -711,6 +729,21 @@ pub enum ToClient {
     /// 0034). `clock` is the frames on a time trial's clock, every attempt
     /// counted; `events` are the ones reported on `frame`.
     Progress { round: u64, player: String, frame: u64, attempt: u32, clock: u64, events: Vec<Event> },
+    /// A watched player's input, relayed as it was sent; or, the first a new
+    /// watcher hears, everything since the attempt began, from frame 1. Only
+    /// that first one carries `artifact`, the content the player prepared, so
+    /// the watcher can tell whether it holds the same (ADR 0037).
+    Inputs {
+        round: u64,
+        player: String,
+        attempt: u32,
+        from: u64,
+        count: u32,
+        frames: Payload,
+        checks: Vec<Check>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
+    },
 }
 
 /// `data` on the wire: standard base64, padded.
@@ -811,14 +844,14 @@ mod tests {
     #[test]
     fn packets_round_trip_and_carry_the_version() {
         let text = encode(&ToServer::Start);
-        assert!(text.contains("\"v\":5"), "{text}");
+        assert!(text.contains("\"v\":6"), "{text}");
         assert_eq!(decode::<ToServer>(&text).unwrap(), ToServer::Start);
     }
 
     #[test]
     fn another_version_is_refused_before_the_body_is_read() {
         let text = r#"{"v":99,"body":{"type":"start"}}"#;
-        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: 5 }));
+        assert_eq!(decode::<ToServer>(text), Err(ProtocolError::Version { got: 99, want: VERSION }));
     }
 
     #[test]
@@ -864,6 +897,22 @@ mod tests {
         let progress = ToClient::Progress { round: 1, player: "B".into(), frame: 9, attempt: 2, clock: 700, events: vec![] };
         assert_eq!(progress.lane(), Lane::Control);
         assert_eq!(decode::<ToClient>(&encode(&progress)).unwrap(), progress);
+    }
+
+    #[test]
+    fn inputs_ride_the_control_lane_in_a_binary_frame() {
+        let checks = vec![Check { frame: 30, picture: u64::MAX }];
+        let up = ToServer::Inputs { round: 3, attempt: 2, from: 9, count: 8, frames: vec![0; 8].into(), checks: checks.clone() };
+        assert_eq!(up.lane(), Lane::Control, "a frame lost is a different game");
+        let Wire::Binary(bytes) = to_wire(up.clone()) else { panic!("inputs go binary") };
+        assert_eq!(decode_binary::<ToServer>(&bytes).unwrap(), up);
+        let down = ToClient::Inputs {
+            round: 3, player: "A".into(), attempt: 2, from: 1, count: 16, frames: vec![1; 16].into(), checks,
+            artifact: Some("ab12".into()),
+        };
+        assert_eq!(down.lane(), Lane::Control);
+        let Wire::Binary(bytes) = to_wire(down.clone()) else { panic!("inputs go binary") };
+        assert_eq!(decode_binary::<ToClient>(&bytes).unwrap(), down);
     }
 
     #[test]

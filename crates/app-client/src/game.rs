@@ -10,6 +10,7 @@
 //!
 //! It is told what to load and when to begin; it says what the game reported.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -26,7 +27,7 @@ use session_libretro::input::PadState;
 use session_libretro::libretro;
 use session_libretro::manifest::{Controller, Manifest, Netplay, PadLayout};
 use session_libretro::runner::LibretroRunner;
-use session_libretro::{input, prep};
+use session_libretro::{input, prep, replay};
 
 use crate::keys;
 use crate::stream::{Picture, Sound, Streamer};
@@ -53,6 +54,16 @@ pub struct Load {
     /// Press random buttons from this seed instead of reading the pad, for a
     /// hand test with nobody at the keyboard.
     pub script: Option<u64>,
+    /// Give the run up this many seconds of play in, for a hand test of
+    /// spectating with nobody at the keyboard.
+    pub give_up_after: Option<f64>,
+}
+
+/// Someone else's run, to replay on this machine's core (ADR 0037): the
+/// round as this player would prepare it, and whose input to replay on it.
+pub struct Watching {
+    pub load: Load,
+    pub player: String,
 }
 
 pub struct BoutLoad {
@@ -91,6 +102,20 @@ pub enum Command {
     /// A bout: the player in that slot gave up on that frame, as the server
     /// judged it; whoever stays wins.
     PeerForfeited { slot: u8, frame: u64 },
+    /// Replay another player's run here, or stop with `None` (ADR 0037). The
+    /// round already loaded is used when it is the same one — a player whose
+    /// own run is over — and loaded otherwise.
+    Watch(Option<Box<Watching>>),
+    /// Some of the watched run's input, as the server relayed it.
+    Inputs {
+        player: String,
+        attempt: u32,
+        from: u64,
+        count: u32,
+        frames: Vec<u8>,
+        checks: Vec<(u64, u64)>,
+        artifact: Option<String>,
+    },
     Quit,
 }
 
@@ -122,13 +147,46 @@ pub enum Report {
     Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Vec<u8> },
     /// The sound under the pictures, likewise.
     Audio { round: u64, frame: u64, rate: u32, channels: u8, data: Vec<u8> },
+    /// A run's input, `count` frames of `attempt` from `from`, as the
+    /// adapter encodes it, with (frame, picture digest) checks among them:
+    /// what a spectator replays the run from (ADR 0037). Sent for every run,
+    /// watched or not.
+    Inputs { round: u64, attempt: u32, from: u64, count: u32, frames: Vec<u8>, checks: Vec<(u64, u64)> },
     /// A bout: this machine's UDP side is up and probing the server with
     /// `token`; `local` is the address it would be at on its own network.
     Endpoint { round: u64, token: u64, local: String },
     /// A bout: the link to the other slot died on this side, on the last
     /// frame confirmed. No claim follows; the server rules.
     PeerLost { round: u64, frame: u64 },
+    /// How replaying a watched run is going, whenever that changes.
+    Replay { round: u64, player: String, state: ReplayState },
     Closed,
+}
+
+/// Where a replay of someone else's run stands (ADR 0037).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplayState {
+    /// Nothing to play yet: the run has not begun, or no input has come.
+    Waiting,
+    /// Running the attempt so far, unpaced and silent, to reach it.
+    CatchingUp { done: u64, of: u64 },
+    Live,
+    /// This machine is not playing the same game, or cannot: why.
+    Lost(String),
+}
+
+impl ReplayState {
+    /// A word for the page to switch on, and a line to show.
+    pub fn describe(&self) -> (&'static str, String) {
+        match self {
+            ReplayState::Waiting => ("waiting", "waiting for the run".into()),
+            ReplayState::CatchingUp { done, of } => {
+                ("catching_up", format!("catching up: {}%", done * 100 / (*of).max(1)))
+            }
+            ReplayState::Live => ("live", String::new()),
+            ReplayState::Lost(why) => ("lost", why.clone()),
+        }
+    }
 }
 
 /// The runner alone, or inside the bout's rollback session once the other
@@ -230,6 +288,255 @@ struct Loaded {
     want_key: bool,
     /// Random buttons, when the round was loaded with a script.
     script: Option<(u64, u32)>,
+    /// The frames of this run's input not yet sent (ADR 0037).
+    outgoing: Outgoing,
+    /// What this round's content hashes to.
+    artifact: String,
+    /// The frame on the run's clock to give up on, from `give_up_after`.
+    give_up_at: Option<u64>,
+    /// Someone else's run, replayed on this core instead of playing one.
+    replica: Option<Replica>,
+}
+
+/// Frames a replay keeps in hand before it plays live: two batches, so one
+/// late on the wire does not stall it.
+const LEAD: u64 = 2 * BATCH as u64;
+/// Further behind than this and a replay catches up, unpaced and silent:
+/// three leads, so the jitter of batches on the wire never trips it, while a
+/// watcher who arrives a second behind is brought up to the lead rather than
+/// left to play the whole round that far back.
+const CATCH_UP: u64 = 3 * LEAD;
+/// How long one pass of catching up may hold the window before it is
+/// pumped and painted again.
+const CATCH_UP_SLICE: Duration = Duration::from_millis(30);
+
+/// One attempt of a watched run, as far as its input has come.
+struct Attempt {
+    n: u32,
+    inputs: Vec<replay::Input>,
+    checks: BTreeMap<u64, u64>,
+}
+
+/// Another player's run, replayed here from its input (ADR 0037).
+struct Replica {
+    player: String,
+    /// Oldest first; the front is the one being played. A later one waits
+    /// until the front has played out, so a death does not cut it short.
+    attempts: VecDeque<Attempt>,
+    /// Frames of the front attempt played here.
+    played: u64,
+    /// The attempt the core was last entered for.
+    entered: Option<u32>,
+    /// Playing live, rather than waiting for a lead.
+    playing: bool,
+    /// Catching up, which goes on until the replay is within a lead of the
+    /// newest input — not merely back under where it started — so it does
+    /// not settle into playing live a second and more behind.
+    catching: bool,
+    /// Picture checks passed, for the log.
+    checked: u64,
+    /// Why this is not the player's game any more, until the next attempt.
+    lost: Option<String>,
+    /// The player prepared other content than this machine did. No attempt
+    /// mends that.
+    other_content: Option<String>,
+    /// What was last reported, so a report goes only on a change.
+    said: Option<ReplayState>,
+}
+
+impl Replica {
+    fn new(player: String) -> Replica {
+        Replica {
+            player,
+            attempts: VecDeque::new(),
+            played: 0,
+            entered: None,
+            playing: false,
+            catching: false,
+            checked: 0,
+            lost: None,
+            other_content: None,
+            said: None,
+        }
+    }
+
+    /// Frames held and not yet played, across every attempt.
+    fn ahead(&self) -> u64 {
+        let held: u64 = self.attempts.iter().map(|a| a.inputs.len() as u64).sum();
+        held.saturating_sub(self.played)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn receive(
+        &mut self,
+        attempt: u32,
+        from: u64,
+        count: u32,
+        bytes: &[u8],
+        checks: Vec<(u64, u64)>,
+        artifact: Option<&str>,
+        ours: &str,
+    ) {
+        if let Some(theirs) = artifact.filter(|a| *a != ours) {
+            let short = |s: &str| s.chars().take(8).collect::<String>();
+            self.other_content = Some(format!(
+                "this machine prepared other content ({}…) than the player did ({}…)",
+                short(ours),
+                short(theirs)
+            ));
+        }
+        if attempt == 0 || count == 0 {
+            return;
+        }
+        if self.attempts.front().is_some_and(|a| attempt < a.n) {
+            return;
+        }
+        let frames = match replay::decode_frames(bytes, count as usize) {
+            Ok(f) => f,
+            Err(e) => {
+                self.lost = Some(format!("the run's input could not be read: {e}"));
+                return;
+            }
+        };
+        if self.attempts.back().map_or(true, |a| attempt > a.n) {
+            self.attempts.push_back(Attempt { n: attempt, inputs: Vec::new(), checks: BTreeMap::new() });
+        }
+        let Some(a) = self.attempts.iter_mut().find(|a| a.n == attempt) else { return };
+        let have = a.inputs.len() as u64;
+        if from > have + 1 {
+            self.lost = Some(format!("frames {} to {} of the run never arrived", have + 1, from - 1));
+            return;
+        }
+        // A backlog sent again overlaps what is held; only what is new counts.
+        let skip = (have + 1 - from) as usize;
+        a.inputs.extend(frames.into_iter().skip(skip));
+        a.checks.extend(checks);
+    }
+
+    fn state(&self) -> ReplayState {
+        if let Some(why) = self.other_content.as_ref().or(self.lost.as_ref()) {
+            return ReplayState::Lost(why.clone());
+        }
+        let Some(front) = self.attempts.front() else { return ReplayState::Waiting };
+        if self.catching || self.ahead() > CATCH_UP {
+            let of = front.inputs.len() as u64;
+            return ReplayState::CatchingUp { done: self.played.min(of), of };
+        }
+        ReplayState::Live
+    }
+
+    /// Tells the client how it is going, when that has changed. Catching up
+    /// is said in tenths, not every frame.
+    fn say(&mut self, round: u64, reports: &Sender<Report>) {
+        let now = self.state();
+        let bucket = |s: &ReplayState| match s {
+            ReplayState::CatchingUp { done, of } => ReplayState::CatchingUp { done: done * 10 / (*of).max(1), of: 10 },
+            other => other.clone(),
+        };
+        if self.said.as_ref().map(bucket) != Some(bucket(&now)) {
+            self.said = Some(now.clone());
+            let _ = reports.send(Report::Replay { round, player: self.player.clone(), state: now });
+        }
+    }
+
+    /// The next frame's input, entering the core for a new attempt when the
+    /// front one has played out. `None` when nothing is held to play.
+    fn next(&mut self, runner: &mut LibretroRunner, spec: &StageSpec) -> Result<Option<replay::Input>, String> {
+        loop {
+            let Some(front) = self.attempts.front() else { return Ok(None) };
+            if self.played < front.inputs.len() as u64 {
+                break;
+            }
+            if self.attempts.len() == 1 {
+                return Ok(None);
+            }
+            self.attempts.pop_front();
+            self.played = 0;
+        }
+        let front = self.attempts.front().expect("checked above");
+        if self.entered != Some(front.n) {
+            // Every attempt starts from the stage's entry state, on the
+            // player's machine and here alike.
+            runner.enter(spec).map_err(|e| e.to_string())?;
+            self.entered = Some(front.n);
+            self.played = 0;
+            self.lost = None;
+        }
+        Ok(Some(front.inputs[self.played as usize].clone()))
+    }
+
+    /// Plays `input` and checks the picture where the player sent a check.
+    fn play(&mut self, input: &replay::Input, runner: &mut LibretroRunner) -> Result<(), String> {
+        replay::apply_input(input);
+        runner.advance().map_err(|e| e.to_string())?;
+        self.played += 1;
+        let frame = runner.frame();
+        let want = self.attempts.front().and_then(|a| a.checks.get(&frame)).copied();
+        if let Some(want) = want {
+            if replay::picture_digest(runner) == want {
+                self.checked += 1;
+                if self.checked % 20 == 0 {
+                    println!("[watch] {}: {} picture checks passed, the last on frame {frame}", self.player, self.checked);
+                }
+            } else if self.lost.is_none() {
+                self.lost = Some(format!("the picture here differed from the player's on frame {frame}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A run's input on its way to the server, a few frames at a time: few
+/// enough that a watcher plays only a little behind, enough that the lobby
+/// thread is not handed a message a frame for every player.
+#[derive(Default)]
+struct Outgoing {
+    attempt: u32,
+    /// The frame number, within the attempt, of `frames[0]`.
+    from: u64,
+    frames: Vec<replay::Input>,
+    checks: Vec<(u64, u64)>,
+}
+
+/// Frames per batch: about a tenth of a second.
+const BATCH: usize = 8;
+/// A picture digest every this many frames: a desync is seen within half a
+/// second. Never on the first frames of an attempt, whose picture a core
+/// restored from a state may still be showing from before it.
+const CHECK_EVERY: u64 = 30;
+
+impl Outgoing {
+    /// A new attempt, from its first frame.
+    fn start(&mut self, attempt: u32) {
+        *self = Outgoing { attempt, from: 1, ..Outgoing::default() };
+        // Edges the entry made — it releases whatever was held — are the
+        // entry's, and a replay's own entry makes them again.
+        libretro::take_key_edges();
+    }
+
+    fn push(&mut self, input: replay::Input, frame: u64, runner: &LibretroRunner) {
+        self.frames.push(input);
+        if frame % CHECK_EVERY == 0 {
+            self.checks.push((frame, replay::picture_digest(runner)));
+        }
+    }
+
+    fn flush(&mut self, round: u64, reports: &Sender<Report>) {
+        if self.frames.is_empty() {
+            return;
+        }
+        let count = self.frames.len() as u32;
+        let _ = reports.send(Report::Inputs {
+            round,
+            attempt: self.attempt,
+            from: self.from,
+            count,
+            frames: replay::encode_frames(&self.frames),
+            checks: std::mem::take(&mut self.checks),
+        });
+        self.from += u64::from(count);
+        self.frames.clear();
+    }
 }
 
 /// The same scripted pad the harness's sync test presses: a random set of
@@ -250,8 +557,14 @@ fn scripted_pad(state: &mut (u64, u32), frame: u64) -> u32 {
 }
 
 impl Loaded {
-    /// Sending to a spectator right now.
+    /// Sending a picture to a spectator right now. Only a bout's: a run is
+    /// replayed from its input instead (ADR 0037).
     fn streaming(&self) -> bool {
+        self.watched() && self.bout.is_some()
+    }
+
+    /// Somebody is watching this run while it is live.
+    fn watched(&self) -> bool {
         self.watchers > 0 && self.live && !self.done
     }
 }
@@ -303,6 +616,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     loaded = None;
                     match load(*l, &mut window) {
                         Ok(mut x) => {
+                            x.0.artifact = x.1.clone();
                             place_window(hwnd, &x.0, &mut borderless, &mut sized_for);
                             // A bout is prepared only once its machines have
                             // found each other (`bout_prepare`).
@@ -332,6 +646,12 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                                     eprintln!("[bout] cannot join the game's network: {e}");
                                 }
                             }
+                            if l.bout.is_none() {
+                                // What a spectator replays (ADR 0037): every
+                                // key edge the core is handed, from here.
+                                libretro::record_key_edges(true);
+                                l.outgoing.start(l.run.attempts());
+                            }
                             l.live = true;
                             l.next_deadline = Instant::now();
                             held = false;
@@ -358,6 +678,55 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                                     let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
                                 }
                             }
+                        }
+                    }
+                }
+                Ok(Command::Watch(Some(w))) => {
+                    let Watching { load: what, player } = *w;
+                    let round = what.round;
+                    // A player whose run is over replays on the core they
+                    // played on; anyone else prepares the round as a player
+                    // would.
+                    let same = loaded.as_ref().is_some_and(|l| l.round == round && l.bout.is_none());
+                    if !same {
+                        loaded = None;
+                        match load(what, &mut window) {
+                            Ok((mut x, artifact)) => {
+                                x.artifact = artifact;
+                                place_window(hwnd, &x, &mut borderless, &mut sized_for);
+                                loaded = Some(x);
+                            }
+                            Err(e) => {
+                                let state = ReplayState::Lost(format!("this machine cannot prepare the round: {e}"));
+                                let _ = reports.send(Report::Replay { round, player: player.clone(), state });
+                            }
+                        }
+                    }
+                    if let Some(l) = loaded.as_mut() {
+                        l.watchers = 0;
+                        l.machine.runner().tap_audio(false);
+                        libretro::record_key_edges(false);
+                        let mut r = Replica::new(player);
+                        r.say(round, &reports);
+                        l.replica = Some(r);
+                        held = false;
+                    }
+                }
+                Ok(Command::Watch(None)) => {
+                    if let Some(l) = loaded.as_mut() {
+                        // Loaded only to replay someone else: nothing of this
+                        // player's own is left in it.
+                        if l.replica.take().is_some() && !l.live {
+                            loaded = None;
+                        }
+                    }
+                }
+                Ok(Command::Inputs { player, attempt, from, count, frames, checks, artifact }) => {
+                    if let Some(l) = loaded.as_mut() {
+                        let (round, ours) = (l.round, l.artifact.clone());
+                        if let Some(r) = l.replica.as_mut().filter(|r| r.player == player) {
+                            r.receive(attempt, from, count, &frames, checks, artifact.as_deref(), &ours);
+                            r.say(round, &reports);
                         }
                     }
                 }
@@ -436,6 +805,9 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
             None => {
                 window.update();
                 std::thread::sleep(Duration::from_millis(16));
+            }
+            Some(l) if l.replica.is_some() => {
+                step_replica(l, &mut window, &mut canvas, &reports, &streamer)?;
             }
             Some(l) if held || !l.live || l.done => {
                 // Present whatever is there, pump the window, wait a frame.
@@ -574,6 +946,10 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             watchers: 0,
             want_key: false,
             script: l.script.map(|seed| (seed, 0)),
+            outgoing: Outgoing::default(),
+            artifact: String::new(),
+            give_up_at: l.give_up_after.map(|secs| (secs * fps).round() as u64),
+            replica: None,
         },
         artifact,
     ))
@@ -589,6 +965,79 @@ fn step(
     reports: &Sender<Report>,
     streamer: &Streamer,
 ) -> Result<(), String> {
+    pace(l);
+    window.update();
+
+    let next_frame = l.machine.runner().frame() + 1;
+    let bits = match l.script.as_mut() {
+        Some(state) => scripted_pad(state, next_frame),
+        None if in_front => keys::joypad(&l.input, pad),
+        None => 0,
+    };
+    match l.input.keyboard.as_ref() {
+        None => libretro::JOYPAD.store(bits, Ordering::Relaxed),
+        Some(kb) => {
+            // A script presses a keyboard game's keys through its pad
+            // bindings, in front or not; the mouse stays the player's.
+            if in_front || l.script.is_some() {
+                keys::keyboard_game(kb, bits, pad, l.input.deadzone);
+                if let Some(m) = l.mouse.as_mut().filter(|_| in_front) {
+                    m.pump(window);
+                }
+            } else {
+                keys::keyboard_release_all();
+            }
+        }
+    }
+
+    // Exactly what the core is about to read, for a spectator to replay.
+    let input = replay::capture_input();
+    let events = l.machine.runner_mut().advance().map_err(|e| e.to_string())?.to_vec();
+    let frame = l.machine.runner().frame();
+    l.outgoing.push(input, frame, l.machine.runner());
+    let next = l.run.observe(frame, &events);
+    if l.outgoing.frames.len() >= BATCH || next != Next::Continue {
+        l.outgoing.flush(l.round, reports);
+    }
+    // While watched, a frame twice a second besides: the server relays where
+    // the run stands, and a watcher shows the clock and the run's events
+    // from it (ADR 0034).
+    let heartbeat = l.watched() && frame % 30 == 0;
+    if !events.is_empty() || next != Next::Continue || heartbeat {
+        let _ = reports.send(Report::Frame { round: l.round, frame, events });
+    }
+    l.done = matches!(next, Next::Finished(_));
+    // Before `Finished`, so the last reading reaches the overlay ahead of
+    // the round card.
+    clock(l, reports);
+    if !l.done && l.give_up_at.is_some_and(|at| l.run.frames() >= at) {
+        // As the give-up button does: a scripted hand test's way out.
+        l.outgoing.flush(l.round, reports);
+        forfeit(l, reports);
+        return present(l, window, canvas, streamer);
+    }
+    match next {
+        Next::Continue => {}
+        Next::Reenter => {
+            l.machine.runner_mut().enter(&l.spec).map_err(|e| e.to_string())?;
+            l.run.enter();
+            l.outgoing.start(l.run.attempts());
+            let _ = reports.send(Report::Reentered {
+                round: l.round,
+                attempt: l.run.attempts(),
+                banked: l.run.frames(),
+            });
+        }
+        Next::Finished(result) => {
+            let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: None });
+        }
+    }
+    present(l, window, canvas, streamer)
+}
+
+/// Wait for the next frame's turn: on the sound card's queue when there is
+/// one, since that is what playback drains at, else on the clock.
+fn pace(l: &mut Loaded) {
     match l.audio_target {
         Some(target) => {
             let give_up_at = Instant::now() + l.frame_time * 4;
@@ -606,63 +1055,69 @@ fn step(
             l.next_deadline += l.frame_time;
         }
     }
+}
+
+/// One turn of replaying a watched run (ADR 0037): far behind, as many
+/// frames as fit in a slice, unpaced and silent; otherwise one frame at the
+/// game's rate, a lead behind the newest input, holding when it runs dry.
+fn step_replica(
+    l: &mut Loaded,
+    window: &mut Window,
+    canvas: &mut Canvas,
+    reports: &Sender<Report>,
+    streamer: &Streamer,
+) -> Result<(), String> {
+    let mut r = l.replica.take().expect("only called with a replica");
+    let result = replica_turn(l, &mut r, window);
+    r.say(l.round, reports);
+    l.replica = Some(r);
+    match result? {
+        true => present(l, window, canvas, streamer),
+        false => {
+            window.update();
+            std::thread::sleep(l.frame_time);
+            Ok(())
+        }
+    }
+}
+
+/// Whether a frame was played, and so whether there is a picture to show.
+fn replica_turn(l: &mut Loaded, r: &mut Replica, window: &mut Window) -> Result<bool, String> {
+    let ahead = r.ahead();
+    if r.catching || ahead > CATCH_UP {
+        r.catching = true;
+        r.playing = false;
+        let was = libretro::AUDIO_ENABLED.swap(0, Ordering::Relaxed);
+        let until = Instant::now() + CATCH_UP_SLICE;
+        let mut played = false;
+        let outcome = (|| {
+            while r.ahead() > LEAD && Instant::now() < until {
+                let Some(input) = r.next(l.machine.runner_mut(), &l.spec)? else { break };
+                r.play(&input, l.machine.runner_mut())?;
+                played = true;
+            }
+            Ok::<_, String>(())
+        })();
+        libretro::AUDIO_ENABLED.store(was, Ordering::Relaxed);
+        l.next_deadline = Instant::now();
+        outcome?;
+        if r.ahead() <= LEAD {
+            r.catching = false;
+        }
+        return Ok(played);
+    }
+    if !r.playing && ahead < LEAD {
+        return Ok(false);
+    }
+    pace(l);
     window.update();
-
-    let bits = if in_front { keys::joypad(&l.input, pad) } else { 0 };
-    match l.input.keyboard.as_ref() {
-        None => libretro::JOYPAD.store(bits, Ordering::Relaxed),
-        Some(kb) => {
-            if in_front {
-                keys::keyboard_game(kb, bits, pad, l.input.deadzone);
-                if let Some(m) = l.mouse.as_mut() {
-                    m.pump(window);
-                }
-            } else {
-                keys::keyboard_release_all();
-            }
-        }
-    }
-
-    let events = l.machine.runner_mut().advance().map_err(|e| e.to_string())?.to_vec();
-    let frame = l.machine.runner().frame();
-    // The sound this frame made, for a spectator. Taken whenever the tap is
-    // on so it never piles up; sent only while the run is theirs to watch.
-    if l.watchers > 0 {
-        let (round, send) = (l.round, l.streaming());
-        l.machine.runner().take_audio(&mut |samples, rate| {
-            if send {
-                streamer.sound(Sound { round, frame, rate, samples: samples.to_vec() });
-            }
-        });
-    }
-    let next = l.run.observe(frame, &events);
-    // While watched, a frame twice a second besides: the server relays where
-    // the run stands, and a watcher whose link cannot carry the picture
-    // still sees the clock move (ADR 0034).
-    let heartbeat = l.streaming() && frame % 30 == 0;
-    if !events.is_empty() || next != Next::Continue || heartbeat {
-        let _ = reports.send(Report::Frame { round: l.round, frame, events });
-    }
-    l.done = matches!(next, Next::Finished(_));
-    // Before `Finished`, so the last reading reaches the overlay ahead of
-    // the round card.
-    clock(l, reports);
-    match next {
-        Next::Continue => {}
-        Next::Reenter => {
-            l.machine.runner_mut().enter(&l.spec).map_err(|e| e.to_string())?;
-            l.run.enter();
-            let _ = reports.send(Report::Reentered {
-                round: l.round,
-                attempt: l.run.attempts(),
-                banked: l.run.frames(),
-            });
-        }
-        Next::Finished(result) => {
-            let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: None });
-        }
-    }
-    present(l, window, canvas, streamer)
+    let Some(input) = r.next(l.machine.runner_mut(), &l.spec)? else {
+        r.playing = false;
+        return Ok(false);
+    };
+    r.playing = true;
+    r.play(&input, l.machine.runner_mut())?;
+    Ok(true)
 }
 
 /// Shown to the player only; the run is scored in frames, never in these.
@@ -1171,4 +1626,76 @@ fn clear(window: &mut Window, width: usize, height: usize) -> Result<(), String>
     window
         .update_with_buffer(&vec![0u32; width * height], width, height)
         .map_err(|e| format!("cannot clear window: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pad(bits: u32) -> replay::Input {
+        replay::Input { joypad: bits, ..replay::Input::default() }
+    }
+
+    fn bytes(bits: &[u32]) -> Vec<u8> {
+        replay::encode_frames(&bits.iter().map(|b| pad(*b)).collect::<Vec<_>>())
+    }
+
+    fn held(r: &Replica) -> Vec<(u32, Vec<u32>)> {
+        r.attempts.iter().map(|a| (a.n, a.inputs.iter().map(|i| i.joypad).collect())).collect()
+    }
+
+    /// A backlog sent again — a watcher who switches away and back — overlaps
+    /// what is held, and only its new frames count.
+    #[test]
+    fn a_backlog_sent_again_adds_only_what_is_new() {
+        let mut r = Replica::new("A".into());
+        r.receive(1, 1, 3, &bytes(&[1, 2, 3]), vec![], Some("abc"), "abc");
+        r.receive(1, 1, 5, &bytes(&[1, 2, 3, 4, 5]), vec![(5, 9)], None, "abc");
+        r.receive(1, 6, 1, &bytes(&[6]), vec![], None, "abc");
+        assert_eq!(held(&r), [(1, vec![1, 2, 3, 4, 5, 6])]);
+        assert_eq!(r.attempts[0].checks.get(&5), Some(&9));
+        assert_eq!(r.state(), ReplayState::Live);
+    }
+
+    /// A death on the player's side starts the next attempt while this
+    /// machine is still behind them in the last: it waits its turn, so the
+    /// end of the attempt being watched is not cut off.
+    #[test]
+    fn the_next_attempt_waits_for_this_one_to_play_out() {
+        let mut r = Replica::new("A".into());
+        r.receive(1, 1, 2, &bytes(&[1, 2]), vec![], None, "abc");
+        r.receive(2, 1, 1, &bytes(&[7]), vec![], None, "abc");
+        assert_eq!(held(&r), [(1, vec![1, 2]), (2, vec![7])]);
+        assert_eq!(r.ahead(), 3);
+        // An attempt already behind this one is nobody's any more.
+        r.attempts.pop_front();
+        r.receive(1, 3, 1, &bytes(&[3]), vec![], None, "abc");
+        assert_eq!(held(&r), [(2, vec![7])]);
+    }
+
+    /// Frames that never arrived, or another machine's content, and this is
+    /// not the player's game: said, not played on.
+    #[test]
+    fn a_gap_or_other_content_is_lost() {
+        let mut r = Replica::new("A".into());
+        r.receive(1, 1, 1, &bytes(&[1]), vec![], None, "abc");
+        r.receive(1, 5, 1, &bytes(&[5]), vec![], None, "abc");
+        assert!(matches!(r.state(), ReplayState::Lost(why) if why.contains("frames 2 to 4")));
+        assert_eq!(held(&r), [(1, vec![1])], "nothing after a gap is kept");
+
+        let mut r = Replica::new("A".into());
+        r.receive(0, 1, 0, &[], vec![], Some("def"), "abc");
+        assert!(matches!(r.state(), ReplayState::Lost(why) if why.contains("other content")));
+    }
+
+    /// Far enough behind and the replay catches up rather than playing at
+    /// the game's rate; nothing yet and it waits.
+    #[test]
+    fn far_behind_is_catching_up_and_nothing_is_waiting() {
+        let mut r = Replica::new("A".into());
+        assert_eq!(r.state(), ReplayState::Waiting);
+        let many: Vec<u32> = (0..CATCH_UP as u32 + 10).collect();
+        r.receive(1, 1, many.len() as u32, &bytes(&many), vec![], None, "abc");
+        assert_eq!(r.state(), ReplayState::CatchingUp { done: 0, of: many.len() as u64 });
+    }
 }

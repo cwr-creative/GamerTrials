@@ -711,6 +711,78 @@ fn only_a_player_whose_run_is_over_may_watch() {
     assert!(watched(&t, 1).is_empty());
 }
 
+/// The guest's input batches, as `(attempt, from, count, frames, artifact)`,
+/// for the host to see what reached them.
+fn inputs_to(t: &Table, who: usize) -> Vec<(u32, u64, u32, Vec<u8>, Option<String>)> {
+    t.clients[who]
+        .inbox
+        .iter()
+        .filter_map(|m| match m {
+            ToClient::Inputs { attempt, from, count, frames, artifact, .. } => {
+                Some((*attempt, *from, *count, frames.0.clone(), artifact.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn batch(round: u64, attempt: u32, from: u64, bytes: &[u8]) -> ToServer {
+    ToServer::Inputs {
+        round,
+        attempt,
+        from,
+        count: bytes.len() as u32,
+        frames: bytes.to_vec().into(),
+        checks: vec![protocol::Check { frame: from, picture: 7 }],
+    }
+}
+
+/// A run is spectated by replaying it (ADR 0037): its input goes to the
+/// server whether watched or not, and a watcher who arrives late is sent the
+/// attempt so far — with the artifact, to check it holds the same content —
+/// then each batch as it comes.
+#[test]
+fn a_late_watcher_is_sent_the_attempt_so_far_then_every_batch() {
+    let (mut t, round, _, _) = host_done();
+    t.send(1, batch(round, 1, 1, &[1, 2, 3]));
+    t.send(1, batch(round, 1, 4, &[4, 5]));
+    assert!(inputs_to(&t, 0).is_empty(), "nobody watching yet, nothing relayed");
+    t.send(0, ToServer::Watch { round, player: Some("guest".into()) });
+    assert_eq!(inputs_to(&t, 0), [(1, 1, 5, vec![1, 2, 3, 4, 5], Some("abc".into()))]);
+    let checks: Vec<u64> = t.clients[0]
+        .inbox
+        .iter()
+        .find_map(|m| match m {
+            ToClient::Inputs { checks, .. } => Some(checks.iter().map(|c| c.frame).collect()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(checks, [1, 4], "the picture checks come with the backlog");
+    t.take(0);
+    t.send(1, batch(round, 1, 6, &[6]));
+    assert_eq!(inputs_to(&t, 0), [(1, 6, 1, vec![6], None)]);
+    assert!(inputs_to(&t, 1).is_empty(), "input never comes back to its sender");
+}
+
+/// A death starts the record over: the next attempt begins at the entry
+/// state, so nothing before it is ever needed. A batch that does not follow
+/// on from the last is dropped rather than passed to a watcher, who would
+/// play a different game from it.
+#[test]
+fn a_new_attempt_starts_the_record_over_and_a_gap_goes_no_further() {
+    let (mut t, round, _, _) = host_done();
+    t.send(1, batch(round, 1, 1, &[1, 2, 3]));
+    t.send(1, batch(round, 2, 1, &[9]));
+    t.send(1, batch(round, 2, 5, &[8]));
+    t.send(1, batch(round, 1, 4, &[4]));
+    t.send(0, ToServer::Watch { round, player: Some("guest".into()) });
+    assert_eq!(inputs_to(&t, 0), [(2, 1, 1, vec![9], Some("abc".into()))]);
+    t.take(0);
+    t.send(1, batch(round, 2, 2, &[10, 11]));
+    t.send(1, batch(round + 1, 2, 4, &[12]));
+    assert_eq!(inputs_to(&t, 0), [(2, 2, 2, vec![10, 11], None)], "a batch for another round is nobody's");
+}
+
 #[test]
 fn an_eliminated_player_watches_from_the_deal() {
     let mut t = Table::new(7);

@@ -1,5 +1,8 @@
 # Input replication: the spike
 
+> Since 2026-11-02 this branch spectates a run by replaying it, as ADR 0037
+> decides; what follows is the spike that measured whether it could.
+
 Branch `input-replication`, cut from `server-relay` on 2026-10-31.
 
 ADR 0003 rejected spectating by replicated input because two machines'

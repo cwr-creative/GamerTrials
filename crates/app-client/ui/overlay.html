@@ -96,6 +96,19 @@
   #sp-events { color: #ccc; font-size: .9em; }
   #spectate.slow #sp-run { font-size: 1.6em; }
 
+  /* Replaying a run (ADR 0037): the game window behind is the watched run,
+     played on this machine's own core, so the sheet is clear and only the
+     bars sit at its foot. When the replay loses step it is opaque again and
+     the run takes over, as it does for a picture that cannot keep up. */
+  #spectate.replay { background: transparent; justify-content: flex-end; padding-bottom: 1em; }
+  #spectate.replay #sp-view { display: none; }
+  #spectate.replay #sp-run, #spectate.replay #sp-bar, #spectate.replay #sp-note:not(:empty) {
+    background: rgba(0, 0, 0, .55); padding: .2em .8em; border-radius: 6px; }
+  #spectate.replay.lost { background: #000; justify-content: center; }
+  #spectate.replay.lost #sp-view { display: block; }
+  #spectate.replay.lost #feed { visibility: hidden; }
+  #spectate.replay.lost #sp-run { font-size: 1.6em; }
+
   #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
   #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
            background: rgba(160, 0, 0, .9); font-weight: 700; text-align: center; }
@@ -350,12 +363,14 @@
   const spec = { players: [], player: null, decoder: null, size: null, needKey: true,
                  frames: [], raf: null, audio: null, nextTime: 0, timer: null, padWas: null,
                  painted: [], since: 0, slow: false, run: null, said: [],
-                 configuring: false, failures: 0, broken: null };
+                 configuring: false, failures: 0, broken: null, replay: false };
   const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
   function closeFeed() {
     spec.painted = []; spec.since = now(); spec.run = null; spec.said = [];
     setSlow(false); showRun();
+    $('spectate').classList.remove('lost');
+    if (!spec.slow) $('sp-slow').classList.add('hidden');
     if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} spec.decoder = null; }
     spec.size = null; spec.needKey = true;
     for (const f of spec.frames) f.frame.close();
@@ -373,11 +388,14 @@
   function showSpectate(p) {
     if (spec.player !== p.player) closeFeed();
     spec.player = p.player; spec.players = p.players || [];
+    spec.replay = !!p.replay;
+    $('spectate').classList.toggle('replay', spec.replay);
     $('sp-name').textContent = p.player ? 'Watching ' + p.player : 'Nobody left to watch';
     const several = spec.players.length > 1;
     $('sp-prev').classList.toggle('hidden', !several);
     $('sp-next').classList.toggle('hidden', !several);
-    $('sp-note').textContent = !('VideoDecoder' in window) ? 'This webview cannot decode video.' : spec.broken || '';
+    $('sp-note').textContent = spec.replay ? ''
+      : !('VideoDecoder' in window) ? 'This webview cannot decode video.' : spec.broken || '';
     show('spectate'); hide('waiting');
     if (!spec.timer) spec.timer = setInterval(() => { pollSpectatePad(); checkFeed(); showRun(); }, 50);
     if (!spec.raf) spec.raf = requestAnimationFrame(paintDue);
@@ -473,7 +491,8 @@
   // held a better rate, so a link at the edge does not flicker between them.
   const SLOW_FPS = 8, GOOD_FPS = 15, WINDOW_MS = 3000;
   function checkFeed() {
-    if (!spec.player) return;
+    // A replay has no picture on the wire to fall behind (ADR 0037).
+    if (!spec.player || spec.replay) return;
     const t = now();
     while (spec.painted.length && spec.painted[0] < t - WINDOW_MS) spec.painted.shift();
     if (t - spec.since < WINDOW_MS) return;
@@ -492,6 +511,18 @@
   function slowText() {
     $('sp-slow').innerHTML = (spec.broken ? 'No live video on this machine.'
                                           : 'Connection too slow for live video.') + '<br>Following the run instead.';
+  }
+
+  // How replaying the watched run on this machine is going (ADR 0037):
+  // waiting for it to begin, catching up to it, live, or lost.
+  function onReplay(p) {
+    if (!spec.player || p.player !== spec.player) return;
+    const lost = p.state === 'lost';
+    $('spectate').classList.toggle('lost', lost);
+    $('sp-slow').classList.toggle('hidden', !lost);
+    if (lost) $('sp-slow').innerHTML = 'Not replaying the same game here.<br>Following the run instead.';
+    $('sp-note').textContent = p.text || '';
+    hud(p.state + (p.text ? ': ' + p.text : ''));
   }
 
   // A Progress report: the clock as the server judged it on `frame`. It
@@ -598,6 +629,7 @@
       case 'video': onVideo(p); break;
       case 'audio': onAudio(p); break;
       case 'progress': onProgress(p); break;
+      case 'replay': onReplay(p); break;
       case 'loading': playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
       case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;

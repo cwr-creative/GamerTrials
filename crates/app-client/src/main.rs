@@ -11,7 +11,9 @@
 //! `--start` until that many are in: a match from the command line, for
 //! playtesting and for the spike. `--script <seed>` presses random
 //! buttons instead of reading the pad, so two clients can play a bout with
-//! nobody at either keyboard (ADR 0036). `--spike` adds
+//! nobody at either keyboard (ADR 0036). `--give-up-after <s>` gives a run
+//! up that many seconds of play in, as the give-up button does, so a scripted
+//! client becomes a spectator (ADR 0037). `--spike` adds
 //! the window self-test from the first build to the first round: it moves and
 //! resizes the game window, injects a keypress with the overlay focused, and
 //! logs whether the overlay followed and the game heard the key.
@@ -66,6 +68,8 @@ struct Args {
     players: Option<usize>,
     /// Press random buttons from this seed instead of reading the pad.
     script: Option<u64>,
+    /// Give every run up this many seconds of play in.
+    give_up_after: Option<f64>,
     /// With `--host`: the server to host on, over the profile's.
     server: Option<String>,
     /// Join this invite instead of showing the menu.
@@ -88,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
         h2h: false,
         players: None,
         script: None,
+        give_up_after: None,
         server: None,
         join: None,
         name: None,
@@ -117,6 +122,11 @@ fn parse_args() -> Result<Args, String> {
             "--script" => {
                 let v = it.next().ok_or("--script wants a seed")?;
                 args.script = Some(v.parse().map_err(|_| format!("--script wants a seed, got {v}"))?);
+            }
+            "--give-up-after" => {
+                let v = it.next().ok_or("--give-up-after wants seconds")?;
+                args.give_up_after =
+                    Some(v.parse().map_err(|_| format!("--give-up-after wants seconds, got {v}"))?);
             }
             "--mode" => {
                 args.mode = Some(match it.next().as_deref() {
@@ -386,6 +396,7 @@ fn main() {
         head_to_head: args.h2h,
         players: args.players,
         script: args.script,
+        give_up_after: args.give_up_after,
     };
 
     tauri::Builder::default()
