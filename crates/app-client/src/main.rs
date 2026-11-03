@@ -251,6 +251,12 @@ fn back(state: State<'_, Shared>, player: String) {
     state.send(UiCmd::Back { player });
 }
 
+/// From the overlay, once it is listening: what it missed while it loaded.
+#[tauri::command]
+fn overlay_ready(state: State<'_, Shared>) {
+    state.send(UiCmd::OverlayReady);
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, Shared>) -> serde_json::Value {
     serde_json::json!({
@@ -407,6 +413,7 @@ fn main() {
             give_up,
             watch,
             back,
+            overlay_ready,
             get_settings,
             put_settings,
             settings_meta,

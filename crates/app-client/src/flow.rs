@@ -68,6 +68,10 @@ pub enum UiCmd {
     Watch { player: String },
     /// Back a seated player in the bout, from the backing sheet (ADR 0036).
     Back { player: String },
+    /// The overlay page is listening. It is made when the game window
+    /// opens, after the first round is dealt, and an event sent before it
+    /// listens is lost, so whatever it needs to hold already is sent again.
+    OverlayReady,
 }
 
 /// How often the lobby checks this machine's files again.
@@ -330,6 +334,7 @@ impl Flow {
                 self.passthrough(true);
             }
             UiCmd::Watch { player } => self.watch(Some(player)),
+            UiCmd::OverlayReady => self.emit_thumbs(),
             UiCmd::Back { player } => {
                 if let Some(round) = self.backing_round {
                     self.send(ToServer::Back { round, player });
@@ -707,7 +712,6 @@ impl Flow {
                         let tracker = ov.clone();
                         thread::spawn(move || tracker.track());
                         self.overlay = Some(ov);
-                        self.emit_thumbs();
                     }
                     Err(e) => eprintln!("[overlay] cannot create: {e}"),
                 }

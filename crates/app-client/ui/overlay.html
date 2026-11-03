@@ -845,8 +845,10 @@
   // call is refused, and the refusal is the only sign, so it goes on the HUD.
   if (window.__TAURI__ && window.__TAURI__.event) {
     hud('subscribing');
+    // Made after the first round was dealt: ask for what was sent before
+    // this listened, such as that round's sidebar (ADR 0038).
     window.__TAURI__.event.listen('overlay', e => handle(e.payload))
-      .then(() => hud('listening'), err => hud('listen refused: ' + err));
+      .then(() => { hud('listening'); invoke('overlay_ready'); }, err => hud('listen refused: ' + err));
   } else {
     hud('no tauri bridge');
   }
