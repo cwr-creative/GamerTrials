@@ -6,9 +6,12 @@
 //! when none is (ADR 0009); Join game takes an invite (ADR 0030); Start plays
 //! a match. `--host <name>` skips the menu (`--server <addr>` picks where),
 //! `--join <invite>` joins instead (as `--name <name>`), `--start` presses Start as soon as the lobby allows, and
-//! `--mode`, `--format kind:n`, `--games a,b` and `--limit <s>` set the
-//! match up first: a match from the
-//! command line, for playtesting and for the spike. `--spike` adds
+//! `--mode`, `--format kind:n`, `--games a,b`, `--limit <s>` and `--h2h`
+//! (allow head-to-head) set the match up first, and `--players <n>` holds
+//! `--start` until that many are in: a match from the command line, for
+//! playtesting and for the spike. `--script <seed>` presses random
+//! buttons instead of reading the pad, so two clients can play a bout with
+//! nobody at either keyboard (ADR 0036). `--spike` adds
 //! the window self-test from the first build to the first round: it moves and
 //! resizes the game window, injects a keypress with the overlay focused, and
 //! logs whether the overlay followed and the game heard the key.
@@ -57,6 +60,12 @@ struct Args {
     games: Option<Vec<String>>,
     /// With `--host`: the default limit per challenge, in seconds.
     limit: Option<f64>,
+    /// With `--host`: allow head-to-head challenges (ADR 0036).
+    h2h: bool,
+    /// With `--start`: wait until this many players are in the lobby.
+    players: Option<usize>,
+    /// Press random buttons from this seed instead of reading the pad.
+    script: Option<u64>,
     /// With `--host`: the server to host on, over the profile's.
     server: Option<String>,
     /// Join this invite instead of showing the menu.
@@ -76,6 +85,9 @@ fn parse_args() -> Result<Args, String> {
         format: None,
         games: None,
         limit: None,
+        h2h: false,
+        players: None,
+        script: None,
         server: None,
         join: None,
         name: None,
@@ -96,6 +108,15 @@ fn parse_args() -> Result<Args, String> {
             "--limit" => {
                 let v = it.next().ok_or("--limit wants seconds")?;
                 args.limit = Some(v.parse().map_err(|_| format!("--limit wants seconds, got {v}"))?);
+            }
+            "--h2h" => args.h2h = true,
+            "--players" => {
+                let v = it.next().ok_or("--players wants a count")?;
+                args.players = Some(v.parse().map_err(|_| format!("--players wants a count, got {v}"))?);
+            }
+            "--script" => {
+                let v = it.next().ok_or("--script wants a seed")?;
+                args.script = Some(v.parse().map_err(|_| format!("--script wants a seed, got {v}"))?);
             }
             "--mode" => {
                 args.mode = Some(match it.next().as_deref() {
@@ -224,6 +245,12 @@ fn watch(state: State<'_, Shared>, player: String) {
     state.send(UiCmd::Watch { player });
 }
 
+/// From the backing sheet: back this seated player in the bout (ADR 0036).
+#[tauri::command]
+fn back(state: State<'_, Shared>, player: String) {
+    state.send(UiCmd::Back { player });
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, Shared>) -> serde_json::Value {
     serde_json::json!({
@@ -239,6 +266,8 @@ fn get_settings(state: State<'_, Shared>) -> serde_json::Value {
 fn put_settings(state: State<'_, Shared>, settings: Settings) -> Result<Settings, String> {
     let mut s = settings;
     s.sanitize();
+    // From the next picture on, even mid-stream.
+    stream::set_kbps(s.stream_kbps);
     *state.settings.lock().unwrap() = s.clone();
     if let Some(path) = state.settings_path.lock().unwrap().as_ref() {
         s.save(path)?;
@@ -296,6 +325,23 @@ fn main() {
     if std::env::var_os("GDK_BACKEND").is_none() {
         std::env::set_var("GDK_BACKEND", "x11");
     }
+    // A watched player's picture is decoded by WebKitGTK through GStreamer
+    // (ADR 0032), which picks a hardware H.264 decoder over a software one
+    // whatever their ranks — and NVIDIA's and VA-API's fail on this stream,
+    // closing the decoder at its first frame. Ranked out, it falls to libav's
+    // avdec_h264 (`gstreamer1.0-libav`), which a 256x240 picture costs
+    // nothing. Inherited by WebKit's own processes; a player's ranks come
+    // after these, so they win.
+    #[cfg(target_os = "linux")]
+    {
+        const HARDWARE_H264: &str = "nvh264dec:NONE,nvh264sldec:NONE,vah264dec:NONE,vaapih264dec:NONE,\
+            v4l2h264dec:NONE,v4l2slh264dec:NONE,msdkh264dec:NONE,qsvh264dec:NONE,nvv4l2decoder:NONE";
+        let ranks = match std::env::var("GST_PLUGIN_FEATURE_RANK") {
+            Ok(theirs) if !theirs.is_empty() => format!("{HARDWARE_H264},{theirs}"),
+            _ => HARDWARE_H264.to_string(),
+        };
+        std::env::set_var("GST_PLUGIN_FEATURE_RANK", ranks);
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -337,6 +383,9 @@ fn main() {
         format: args.format,
         games: args.games,
         limit: args.limit,
+        head_to_head: args.h2h,
+        players: args.players,
+        script: args.script,
     };
 
     tauri::Builder::default()
@@ -356,6 +405,7 @@ fn main() {
             resume,
             give_up,
             watch,
+            back,
             get_settings,
             put_settings,
             settings_meta,
@@ -372,6 +422,7 @@ fn main() {
                         eprintln!("[settings] {w}");
                     }
                     println!("[settings] {}", path.display());
+                    stream::set_kbps(loaded.stream_kbps);
                     *settings.lock().unwrap() = loaded;
                     let state = app.state::<Shared>();
                     *state.settings_warning.lock().unwrap() = warning;

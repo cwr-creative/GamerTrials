@@ -606,6 +606,63 @@ fn a_limit_shorter_than_the_survival_is_refused() {
     assert!(ok.is_ok(), "{ok:?}");
 }
 
+// ------------------------------------------------------------ head-to-head
+
+/// A bout seats players on one machine; the manifest says how many, and
+/// each slot's facts are its own (ADR 0036).
+#[test]
+fn a_head_to_head_challenge_declares_its_slots() {
+    let text = format!(
+        "{MINIMAL}{CLEARABLE}\
+         [[rule]]\nfield = \"lives\"\nedge = \"increases\"\nemit = \"count\"\ncounter = \"rounds_won\"\n\
+         [[challenge]]\nid = \"fight\"\nstage = \"s\"\nkind = \"head_to_head\"\nslots = 2\n\
+         complete_when = {{ counts = {{ rounds_won = 2 }} }}\n"
+    );
+    let lib = Library::parse(&text).unwrap();
+    let c = lib.challenge("fight").unwrap();
+    assert!(c.is_head_to_head());
+    assert_eq!(c.slots, 2);
+    let spec = c.spec(&lib.game.id);
+    assert_eq!((spec.kind, spec.slots), (ChallengeKind::HeadToHead, 2));
+}
+
+#[test]
+fn a_head_to_head_challenge_without_slots_or_with_too_few_is_refused() {
+    let e = with_challenge("id = \"c\"\nkind = \"head_to_head\"\ncomplete_when = { cleared = true }\n")
+        .unwrap_err();
+    assert!(e.contains("slots = 2"), "{e}");
+    for bad in ["0", "1", "9"] {
+        let e = with_challenge(&format!(
+            "id = \"c\"\nkind = \"head_to_head\"\nslots = {bad}\ncomplete_when = {{ cleared = true }}\n"
+        ))
+        .unwrap_err();
+        assert!(e.contains("between 2 and 8"), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn slots_are_for_head_to_head_only() {
+    let e = with_challenge("id = \"c\"\nkind = \"survival\"\nslots = 2\ncomplete_when = { cleared = true }\n")
+        .unwrap_err();
+    assert!(e.contains("head_to_head only"), "{e}");
+}
+
+#[test]
+fn a_bout_cannot_be_won_by_surviving() {
+    let e = with_challenge(
+        "id = \"c\"\nkind = \"head_to_head\"\nslots = 2\ncomplete_when = { survive_seconds = 30 }\n",
+    )
+    .unwrap_err();
+    assert!(e.contains("survive_seconds is a survival criterion"), "{e}");
+}
+
+#[test]
+fn an_unknown_kind_names_all_three() {
+    let e = with_challenge("id = \"c\"\nkind = \"duel\"\ncomplete_when = { cleared = true }\n")
+        .unwrap_err();
+    assert!(e.contains("head_to_head"), "{e}");
+}
+
 // ------------------------------------------------------------- the game
 
 #[test]
@@ -788,14 +845,25 @@ fn every_shipped_challenge_has_the_goal_it_should() {
     // Doom
     assert_eq!(goal("e1m1-time-trial"), "Reach the end!");
     assert_eq!(goal("e1m1-survival"), "Reach the end!");
+    // SMB1
+    assert_eq!(goal("8-4-bowser-survival"), "Defeat Bowser!");
 }
 
-/// E1M1 carries its own bound; everything else takes the lobby's default.
+/// E1M1, the SF2 bout and the boss fights carry their own bounds; everything
+/// else takes the lobby's default.
 #[test]
-fn only_doom_e1m1_declares_a_limit() {
+fn only_the_doom_stages_the_sf2_bout_and_the_boss_fights_declare_a_limit() {
     let cat = shipped_catalog();
     for (lib, c) in cat.challenges() {
-        let expected = if lib.game.id.0 == "doom" { Some(8410) } else { None };
+        let expected = match (lib.game.id.0.as_str(), c.id.0.as_str()) {
+            ("doom", _) => Some(8410),
+            ("doom2", _) => Some(10513),
+            ("sf2", _) => Some(14424),
+            ("unsquad", "minks-survival") => Some(4507),
+            ("unsquad", _) => Some(7212),
+            ("smb1", _) => Some(3606),
+            _ => None,
+        };
         assert_eq!(c.limit_frames, expected, "{}", c.id.0);
     }
 }
@@ -841,17 +909,20 @@ fn the_shipped_games_group_as_the_lobby_will_show_them() {
     };
     assert_eq!(
         ids(cat.grouping(Grouping::Era)),
-        [("1990s".to_string(), vec!["dkc".to_string(), "doom".into(), "smb3".into()])]
+        [("1980s".to_string(), vec!["smb1".to_string()]),
+         ("1990s".into(), vec!["dkc".into(), "doom".into(), "doom2".into(), "sf2".into(), "smb3".into(), "unsquad".into()])]
     );
     assert_eq!(
         ids(cat.grouping(Grouping::Genre)),
-        [("fps".to_string(), vec!["doom".to_string()]),
-         ("platformer".into(), vec!["dkc".into(), "smb3".into()])]
+        [("fighting".to_string(), vec!["sf2".to_string()]),
+         ("fps".into(), vec!["doom".into(), "doom2".into()]),
+         ("platformer".into(), vec!["dkc".into(), "smb1".into(), "smb3".into()]),
+         ("shooter".into(), vec!["unsquad".into()])]
     );
     assert_eq!(
         ids(cat.grouping(Grouping::Console)),
-        [("dos".to_string(), vec!["doom".to_string()]),
-         ("nes".into(), vec!["smb3".into()]),
-         ("snes".into(), vec!["dkc".into()])]
+        [("dos".to_string(), vec!["doom".to_string(), "doom2".into()]),
+         ("nes".into(), vec!["smb1".into(), "smb3".into()]),
+         ("snes".into(), vec!["dkc".into(), "sf2".into(), "unsquad".into()])]
     );
 }

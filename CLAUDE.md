@@ -19,13 +19,22 @@ used precisely (ADR 0017):
 - **attempt** — one entry-to-terminal-event span. A **run** is a player's whole
   go at one challenge.
 
-The two kinds differ in what death costs, not in what completes them:
+The kinds differ in what death costs, not in what completes them:
 
 - **Time trial** — on death, re-enter at the stage's entry point with the clock
   still running. Scored on total frames across every attempt.
 - **Survival** — on death the run is over and the player spectates. Scored on
   whether the criteria were met at all. "Without dying" is therefore not a
   criterion; it is what the kind means.
+- **Head-to-head** (ADR 0036) — several players share one running stage, one
+  per **slot** (a controller port on the shared machine; the challenge says
+  how many). A death costs what the game says — a round, a respawn — and is
+  only a fact. The round, a **bout**, ends when one slot meets its criteria:
+  that run is completed, every other live slot's is *beaten* on that frame.
+  Whoever stays after a give-up wins; a dead link is lost by both. When a
+  bout is dealt to more players than it has slots, who sits is drawn from
+  the seed and everyone else is a **backer**: they pick a slot (or are given
+  one after 15 s) and are recorded with a copy of that player's entry.
 
 Whoever finishes first spectates the other until they finish too.
 
@@ -46,9 +55,16 @@ the same sequencing and scoring, and the last two compose — a generated
 challenge sitting on a hack is the expected shape, not an exotic one: a human
 designs the level, the generator rerolls enemies inside it.
 
-Head-to-head, where players share one running game, is last by choice: it needs
-synchronised netcode rather than one-way telemetry. Nothing in the slice may
-assume it exists.
+Head-to-head is built last, and in two mechanisms (ADR 0036): a console core
+whose state is exact is kept in step by **rollback** in the frontend — the
+machine saves itself every frame, guesses the remote slot's input, and
+restores and replays when the guess was wrong (`SharedRunner`, driven by the
+`head-to-head` crate on `ggrs`); a core that brings its own network
+(dosbox-pure's emulated IPX) is **relayed** packet by packet while the game's
+own netcode keeps the machines in step (`Networked`). The two players' inputs
+and packets go directly between their machines over UDP; the server only
+brokers the addresses. A manifest says which with `[runner.libretro].netplay`,
+and only such a manifest may carry a `head_to_head` challenge.
 
 ## Invariants
 
@@ -97,8 +113,9 @@ These are settled. Do not violate them without writing a superseding ADR.
 | `transport` | One WebSocket's loop for both ends (ADR 0034): non-blocking, the match before the stream, a stream the link cannot deliver fresh dropped, the link timed by stamped pings, liveness kept. `app-client`'s link and each `server-net` connection run it. Held to the server's fence. |
 | `app-client` | Tauri shell, overlay, wiring (ADR 0027). Menu, lobby and settings in an ordinary window; a native game window under a transparent overlay during a match. Prepares and runs stages and streams their events; judges only provisionally, to know whether to re-enter or spectate. Plays the server's half in-process for solo play (ADR 0009). Owns the player's bindings and video settings (ADR 0028). While another player watches, encodes its own picture (H.264) and sound (ADPCM) off the game thread; when done or out, shows theirs on the overlay (ADR 0032). Each Win32 call has an X11 twin beside it under `cfg(target_os = "linux")` (ADR 0035). |
 | `server` | Rust (ADR 0024). Lobby, telemetry aggregation, and the authority on a match: deals it, issues seeds, judges each run from its streamed events and ranks the players, by linking `challenge-core` (ADR 0009). A state machine over `protocol` messages; the transport is whoever delivers them. Relays a watched player's stream to their watchers, and refuses a watch from a player still playing (ADR 0032). Never runs a game; never depends on `session-libretro`, `content-gen` or `asset-store`. |
-| `server-net` | The server process (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (a thread per socket, each running `transport`'s loop, and per lobby), each lobby a `server::Server`. Held to the same dependency fence as `server`. |
+| `server-net` | The server process (ADR 0030): `gamertrials-server`, lobbies by invite code over WebSockets (a thread per socket, each running `transport`'s loop, and per lobby), each lobby a `server::Server`. Also the UDP side a head-to-head player probes so the server can tell the other slot where they are (ADR 0036); it carries nothing else. Held to the same dependency fence as `server`. |
 | `content-gen` | Content derivation, and the only crate that touches ROM bytes: applying a contributor's BPS patch (ADR 0020) and the seeded value-substitution engine (ADR 0015). No per-game code, no emulator dependency. |
+| `head-to-head` | One bout on one shared machine (ADR 0036). `Rollback` drives a `SharedRunner` through `ggrs`, answering its save, restore and advance requests and holding each frame's facts until every slot's input for it is final; `Relay` carries a `Networked` machine's packets. Both over a `Link` between the slots: `Udp` between two players' machines (candidates tried until one answers), `Channels` in a test. No emulator, no protocol, no server. |
 
 ## Conventions
 
@@ -139,7 +156,8 @@ rejected for non-obvious reasons.
 ## Current phase
 
 **Phase B — the client — is built; Phase C — spectating and a server beyond
-the LAN — is built and not yet hand-tested.** `cargo run -p
+the LAN — is built, and has played matches over the internet with live
+players.** `cargo run -p
 app-client` opens a menu. Host game opens a lobby on the `gamertrials-server`
 named in Settings › Profile, or a lobby of one on an in-process `server` when
 none is (ADR 0009). Join game takes an invite, `host[:port]/CODE` (ADR 0030).
@@ -157,8 +175,8 @@ another's picture and hears their sound on the overlay, relayed by the
 server over the same socket (ADR 0032); ◀ ▶ or the pad switches players.
 The sender encodes only while watched. A link too slow for the stream
 drops pictures rather than the match, and a watcher whose picture cannot
-keep up sees the run's clock, attempt and events instead (ADR 0034; on the
-`server-relay` branch, from the first match over the internet). `wss://host` in Settings › Profile
+keep up sees the run's clock, attempt and events instead (ADR 0034, from
+the first match over the internet). `wss://host` in Settings › Profile
 or an invite reaches a server behind a TLS proxy (ADR 0033,
 `docs/server.md`). Settings binds keyboard, mouse and gamepad to the RetroPad once, overridable per core and per game, and sets video the
 same way; nothing in it reaches a core option or the frame clock (ADR 0028).
@@ -168,6 +186,72 @@ modules (`settings`, `video`, `link`'s parsing). The server's tests play the
 client's loop on `session-fake` instead, and `server-net`'s do it over real
 sockets with two players — `slow_link` with one of them held to a phone's
 rates through a throttling relay.
+
+**Phase D — head-to-head (ADR 0036, Proposed) — is under way, in five
+steps, each runnable.** Done: the vocabulary and the judge. `session-api`
+has the third kind, `slots`, and the shared-machine traits (`SharedRunner`,
+`Networked`); `challenge-core` has `Bout` (a run per slot, settled in frame
+order across every slot's socket), seating drawn from the seed, and backing;
+`challenge-library` parses `kind = "head_to_head"` with `slots`;
+`session-fake` has `FakeMachine`, a two-slot deterministic game; protocol
+v5 carries `Back`, `Endpoint`, `PeerLost`, `Sides` and `Peers`; the server
+deals bouts, brokers the two players' addresses from their UDP probes,
+closes the backing window on a tick, judges the bout and records backers;
+`server-net` opens the UDP side (`--udp`, `--udp-public`) and ticks each
+lobby. Also done: the `head-to-head` crate — `Rollback` on `ggrs` over a
+`SharedRunner`, holding each frame's facts until confirmed, with a
+checksum over the machine's digest every few frames; `Relay` for a
+`Networked` machine; `Udp` between the two machines, trying every candidate
+address until one answers; `Channels` for tests. Tested with literal frames
+in both arrival orders, a sync test on `FakeMachine`, two sessions over a
+jittery channel agreeing frame for frame, a diverged machine caught, a cut
+link lost, and a whole bout played over real UDP through the real
+rendezvous in `server-net/tests/bout.rs`. And `session-libretro` is a
+`SharedRunner`: one pad per port, a snapshot that carries the frame, the
+watcher's edge state and the core's state (saved in the same-instance
+context so a core may take its fast path), no picture or sound on a replayed
+frame, and `netplay = "rollback"` in `[runner.libretro]` refused on a
+threaded or keyboard core and on one whose serialization declares itself
+incomplete; a `[[rule]]` says whose fact it is with `slot`. **The two
+console cores are proved:** `harness --synctest` rolls a stage back on
+every frame with no network and compares checksums, and Snes9x and Mesen
+both pass 1800 frames at three and at seven replays per advance, with two
+processes on one script writing the same digests on every frame
+(`docs/games/dkc.md`, `smb3.md`, with the cost per frame). And the client
+plays a bout: the lobby's "Allow head-to-head challenges" toggle; a seated
+player's game thread binds a UDP socket, probes the server, reports its
+`Endpoint`, takes the `Peers`, puts the runner into a `Rollback` session and
+says `Prepared` only once the machines have found each other (ten seconds,
+else `Unprepared`); on `Go` it pumps the session once a frame, paced on the
+clock, judges every slot's confirmed facts with a provisional `Bout`,
+reports its own slot's frames (and an empty one every fifteen), claims its
+verdict, reports `PeerLost` when the link dies, and forfeits on a desync; a
+pause cannot hold the shared machine but the menu still gives up; a player
+not seated sees the backing sheet, picks a side or is given one, and
+spectates as the eliminated do; Settings › Profile sets the input delay.
+And the second mechanism: `session-libretro` answers the netpacket
+interface (78) and is `Networked` — the core's `start`, `receive`, `poll`,
+`connected`, `disconnected` and `stop` called from `join`, `deliver`,
+`outgoing` and the peers — and the `head-to-head` crate's `Relay` carries
+the packets with a frame header, a hello handshake before the bout goes,
+and reliable packets resent until acknowledged and delivered in order; the
+client takes that path when the manifest says `netplay = "packets"`, and
+claims the server's verdict for the slot it cannot judge itself.
+**The first bout is played**: `manifests/sf2.toml` (Street Fighter II
+Turbo, `best-of-three`, its addresses found with the harness's scripted
+sync test and RAM log — `docs/games/sf2.md`) on two clients on one machine
+through `gamertrials-server`, with `--script` pressing the buttons: both
+found each other through the rendezvous, judged the same verdict on the
+same frame, and the server agreed; and with three, the third backing a
+side by the deadline and taking that side's entry. **And the second
+mechanism**: `manifests/doom2.toml`, a DOOM II deathmatch on a bundle the
+player builds (the shareware engine, id's `IPXSETUP.EXE`, the commercial
+WAD — `docs/games/doom.md`), joined to the core's network before the boot
+and relayed packet by packet; two clients on one machine booted, found
+each other, and ran the level in lockstep with both players present until
+the limit. **Not yet**: two machines over the internet with ggrs's numbers
+recorded against ADR 0036 (which stays Proposed until then), a frag scored
+by anything but random keys, and a bout with hands on the pads.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`
@@ -188,15 +272,20 @@ Open, roughly in order:
   Settings in a match, and `wss://` against a real proxy. The encoder and
   the ADPCM coder have unit tests; the relay is tested in-process and over
   the wire.
-- **Phase C owes:** the two-machine match (`docs/server.md`), on which
-  **ADR 0013 stays Proposed**. Head-to-head comes last.
+- **Phase C's two-machine match is played** (`docs/server.md`): live
+  players on separate machines over the internet, generated challenges
+  dealt and every artifact hash agreeing, so **ADR 0013 is Accepted**.
+  Head-to-head is Phase D, above.
 - **Linux (ADR 0035, Proposed) plays under WSLg, not yet on a desktop.**
   A round of each game runs with the overlay aligned over it; a real window
   manager, fullscreen, mouse capture, sound and a match against a Windows
   player are unseen. `cores/` holds each core for both platforms from one
   nightly — update both at once, since entry states are savestates. `bash
   tools/setup-ubuntu.sh` installs what a build needs; `bash
-  tools/package.sh` is `package.ps1`'s twin.
+  tools/package.sh` is `package.ps1`'s twin. Closing the client mid-round
+  may hang there: dosbox-pure's static destructors wait on its thread, as a
+  harness that exited with the core loaded showed under WSL, and the end of
+  Tauri's event loop exits the same way. Not checked.
 - **`asset-store` must hash a bundle's members, not the container.** A DOS
   zip's hash depends on how it was zipped (ADR 0018), and DOS hacks — a PWAD as
   a member overlay — wait on it (ADR 0020).

@@ -39,12 +39,18 @@ pub enum Mode {
 }
 
 impl Mode {
-    fn admits(self, kind: ChallengeKind) -> bool {
+    /// A head-to-head challenge is admitted by every mode (ADR 0036): a bout
+    /// is a round like any other once it is in the pool, and whether it is in
+    /// the pool is the lobby's toggle, applied before the pool reaches here.
+    pub fn admits(self, kind: ChallengeKind) -> bool {
         match self {
             Mode::TimeTrial => kind == ChallengeKind::TimeTrial,
             Mode::Survival => kind == ChallengeKind::Survival,
             Mode::Both => true,
         }
+        .then_some(())
+        .or_else(|| (kind == ChallengeKind::HeadToHead).then_some(()))
+        .is_some()
     }
 }
 
@@ -147,11 +153,13 @@ pub struct Dealer {
 /// Domains for [`derive`]: which purpose a derived seed serves.
 const DECK: u64 = 1;
 const CONTENT: u64 = 2;
+/// Which players sit in a bout's slots (ADR 0036).
+pub(crate) const SLOTS: u64 = 3;
 
 /// A seed for one purpose, from the match seed. Written out so that it can
 /// be reproduced anywhere: one SplitMix64 output over a state that folds in
 /// the domain and the index.
-fn derive(seed: u64, domain: u64, index: u64) -> u64 {
+pub(crate) fn derive(seed: u64, domain: u64, index: u64) -> u64 {
     let state = seed ^ domain.rotate_left(32) ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     SplitMix64(state).next()
 }
@@ -177,6 +185,20 @@ impl Dealer {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The match seed this dealer deals from.
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Every challenge the mode admits that has not been withdrawn.
+    pub fn remaining(&self) -> impl Iterator<Item = &ChallengeSpec> {
+        self.pool
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| self.mode.admits(c.kind) && !self.withdrawn.contains(i))
+            .map(|(_, c)| c)
     }
 
     /// How many challenges have been dealt so far.
@@ -211,21 +233,36 @@ impl Dealer {
     ///
     /// If the dealer is [exhausted](Dealer::exhausted).
     pub fn deal(&mut self) -> Dealt {
-        assert!(!self.exhausted(), "every challenge has been withdrawn");
+        self.deal_where(|_| true).expect("every challenge has been withdrawn")
+    }
+
+    /// [`deal`](Dealer::deal), passing over any challenge `playable` refuses
+    /// — a bout with more slots than there are players to sit in them (ADR
+    /// 0036). Passed over is not withdrawn: the deck comes round again.
+    /// `None` when nothing left in the pool is playable.
+    pub fn deal_where(&mut self, playable: impl Fn(&ChallengeSpec) -> bool) -> Option<Dealt> {
+        let any = self
+            .pool
+            .iter()
+            .enumerate()
+            .any(|(i, c)| self.mode.admits(c.kind) && !self.withdrawn.contains(&i) && playable(c));
+        if !any {
+            return None;
+        }
         let i = loop {
             if self.deck.is_empty() {
                 self.shuffle();
             }
             let i = self.deck.pop().expect("a deck is never empty");
-            // Withdrawn since this deck was shuffled.
-            if !self.withdrawn.contains(&i) {
+            // Withdrawn since this deck was shuffled, or not playable today.
+            if !self.withdrawn.contains(&i) && playable(&self.pool[i]) {
                 break i;
             }
         };
         self.last = Some(i);
         let index = self.dealt;
         self.dealt += 1;
-        Dealt { index, challenge: self.pool[i].clone(), seed: self.content_seed(index) }
+        Some(Dealt { index, challenge: self.pool[i].clone(), seed: self.content_seed(index) })
     }
 
     fn shuffle(&mut self) {
@@ -244,10 +281,10 @@ impl Dealer {
 
 /// SplitMix64 (Steele, Lea & Flood, 2014). Small, fully specified, and good
 /// enough to shuffle a library; not for anything adversarial.
-struct SplitMix64(u64);
+pub(crate) struct SplitMix64(pub(crate) u64);
 
 impl SplitMix64 {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -257,7 +294,7 @@ impl SplitMix64 {
 
     /// Uniform in `0..n`, by rejection rather than a bare modulo, which would
     /// favour the low values whenever `n` does not divide 2^64.
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         assert!(n > 0, "nothing to choose from");
         let threshold = n.wrapping_neg() % n;
         loop {
@@ -283,6 +320,7 @@ mod tests {
             kind,
             complete_when: Completion { cleared: true, ..Default::default() },
             ends_attempt_on: Default::default(),
+            slots: if kind == ChallengeKind::HeadToHead { 2 } else { 1 },
         }
     }
 
@@ -355,6 +393,35 @@ mod tests {
     fn asking_for_more_than_the_library_holds_is_refused() {
         let err = deal(&library(), Mode::TimeTrial, 13, 0).unwrap_err();
         assert_eq!(err, DealError::NotEnough { mode: Mode::TimeTrial, wanted: 13, available: 12 });
+    }
+
+    /// A bout is admitted by every mode; whether it is in the pool at all is
+    /// the lobby's toggle (ADR 0036).
+    #[test]
+    fn every_mode_admits_a_head_to_head_challenge() {
+        let mut l = library();
+        l.push(challenge("sf2", "fight", ChallengeKind::HeadToHead));
+        for mode in [Mode::TimeTrial, Mode::Survival, Mode::Both] {
+            assert!(mode.admits(ChallengeKind::HeadToHead), "{mode:?}");
+            let dealt = deal(&l, mode, l.len() - if mode == Mode::Both { 0 } else { 12 }, 1).unwrap();
+            assert!(dealt.iter().any(|c| c.kind == ChallengeKind::HeadToHead), "{mode:?}");
+        }
+    }
+
+    /// Passed over is not withdrawn: a challenge not playable today is dealt
+    /// when it is, and `None` says nothing playable is left.
+    #[test]
+    fn deal_where_passes_over_and_comes_back_round() {
+        let l = library();
+        let mut dealer = Dealer::new(l.clone(), Mode::Survival, 4).unwrap();
+        let skip = dealer.deal().challenge.id.clone();
+        let mut dealer = Dealer::new(l, Mode::Survival, 4).unwrap();
+        let first = dealer.deal_where(|c| c.id != skip).unwrap();
+        assert_ne!(first.challenge.id, skip);
+        assert_eq!(first.index, 0, "a pass-over costs no index");
+        let later: Vec<_> = (0..11).map(|_| dealer.deal().challenge.id.clone()).collect();
+        assert!(later.contains(&skip));
+        assert!(dealer.deal_where(|_| false).is_none());
     }
 
     /// Every challenge can come first, and roughly as often as any other.

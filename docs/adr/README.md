@@ -45,7 +45,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0001 | Embed libretro cores directly rather than driving RetroArch | Accepted |
 | 0002 | Use savestates for stage entry | Accepted |
 | [0003](0003-stream-video-for-spectating.md) | Stream video for spectating rather than replicating inputs | Superseded by 0032 |
-| 0004 | Delegate head-to-head netcode to external per-game solutions | Accepted |
+| 0004 | Delegate head-to-head netcode to external per-game solutions | Superseded by 0036 |
 | 0005 | Measure timing in emulated frames rather than wall-clock | Accepted |
 | 0006 | Adopt ports and adapters with a pure challenge core | Accepted |
 | 0007 | Reject the nested "frankenstein ROM" approach | Accepted |
@@ -54,7 +54,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | 0010 | Game manifests are TOML data in git, not code | Accepted |
 | 0011 | Client in Rust + Tauri; server in Go or TypeScript; SQLite storage | Superseded by 0024 |
 | 0012 | Extract the StageRunner interface in Phase 2, not Phase 1 | Accepted |
-| [0013](0013-generate-stage-content-client-side-from-a-seed.md) | Generate stage content on each client from a server-issued seed | Proposed |
+| [0013](0013-generate-stage-content-client-side-from-a-seed.md) | Generate stage content on each client from a server-issued seed | Accepted |
 | [0014](0014-detect-stage-completion-and-death-by-watching-emulator-ram.md) | Detect stage completion and death by watching emulator RAM | Accepted |
 | [0015](0015-scope-custom-challenges-to-declarative-value-patches.md) | Scope custom-challenge ROM generation to declarative value-substitution patches | Accepted |
 | [0016](0016-describe-game-telemetry-as-declarative-ram-rules.md) | Describe game telemetry as declarative RAM rules in the manifest | Accepted |
@@ -77,16 +77,18 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0033](0033-terminate-tls-in-front-of-the-server.md) | Terminate TLS in front of the server, and let the client dial wss:// | Accepted |
 | [0034](0034-send-a-stream-only-while-the-link-keeps-up.md) | Send a spectator's stream only while the link keeps up, and show the run when it cannot | Accepted |
 | [0035](0035-build-the-client-for-linux-from-the-same-tree.md) | Build the client for Linux from the same tree, on X11 | Proposed |
+| [0036](0036-run-head-to-head-on-the-players-machines-over-rollback.md) | Run head-to-head on the players' own machines, over rollback, superseding 0004 | Proposed |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is
 fine, a wrong one is not.
 
-**0013 is `Proposed` although it is built, and that is accurate.** The
-derivation key, local generation and the artifact hash exist, and a lobby
-issues one seed to every player and compares their hashes, in-process for one
-or over `gamertrials-server` for several (ADR 0030). Promoting it waits on a
-networked match played on two machines, not two clients on one.
+**0013 was accepted only once two machines agreed.** It was built well before:
+the derivation key, local generation and the artifact hash, with a lobby
+issuing one seed to every player and comparing their hashes (ADR 0030). It
+stayed `Proposed` until matches between live players on separate machines,
+over the internet, dealt generated challenges and every artifact hash agreed —
+two clients on one machine could not show that.
 
 ## Notes
 
@@ -109,6 +111,12 @@ exists to express, not two competing options.
 Scope it narrowly: it rejects ROM patching as the way to enter a *vanilla* stage.
 Generated challenges patch ROMs for an unrelated reason and are not covered — see
 0013.
+
+**0004** — *Superseded by 0036, and never written.* What it held: head-to-head
+would be left to whatever netcode each game already had outside the platform,
+and nothing in the slice would assume it existed. 0036 brings it inside:
+rollback in the frontend over a console core's own save and restore, and a
+DOS core's own emulated network relayed as packets.
 
 **0007** — Rejected: emulating SNES/NES inside an N64 ROM. Reasons were RDRAM
 latency, stacking the least reliable emulator at the bottom, and destroying the

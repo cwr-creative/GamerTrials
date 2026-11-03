@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use challenge_core::{Next, Run};
 use challenge_library::Catalog;
@@ -18,7 +19,7 @@ use protocol::{
 use session_api::{ChallengeKind, ChallengeSpec, StageRunner};
 use session_fake::{stage_for, Attempt, FakeRunner};
 
-use super::{ConnId, Outbox, Server};
+use super::{ConnId, Outbox, Server, BACKING_SECONDS, LOST_GRACE};
 
 fn catalog() -> Catalog {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
@@ -53,6 +54,7 @@ fn steady(c: &ChallengeSpec) -> Vec<Attempt> {
             Attempt::meeting(&c.complete_when, at_least(c, 900)),
         ],
         ChallengeKind::Survival => vec![Attempt::meeting(&c.complete_when, at_least(c, 1200))],
+        ChallengeKind::HeadToHead => unreachable!("a bout is not played on a runner of one"),
     }
 }
 
@@ -65,6 +67,7 @@ fn reckless(c: &ChallengeSpec) -> Vec<Attempt> {
             Attempt::new(),
         ],
         ChallengeKind::Survival => vec![Attempt::new().died(50)],
+        ChallengeKind::HeadToHead => unreachable!("a bout is not played on a runner of one"),
     }
 }
 
@@ -736,4 +739,332 @@ fn an_eliminated_player_watches_from_the_deal() {
     t.play(0, round, &spec, limit);
     t.play(2, round, &spec, limit);
     assert!(t.errors(1).is_empty());
+}
+
+// ------------------------------------------------------------ head-to-head
+
+/// A fighting game's challenge half, for bouts (ADR 0036). No manifest in
+/// `manifests/` deals one yet, and the server reads only this half anyway.
+const FIGHT: &str = r#"
+schema_version = 3
+[game]
+id = "fight"
+title = "Fight"
+console = "snes"
+framerate = 60.0
+[[rom]]
+id = "base"
+[[rule]]
+field = "p1_rounds"
+edge = "increases"
+emit = "count"
+counter = "rounds_won"
+slot = 0
+[[rule]]
+field = "p2_rounds"
+edge = "increases"
+emit = "count"
+counter = "rounds_won"
+slot = 1
+[[stage]]
+id = "vs"
+rom = "base"
+[[challenge]]
+id = "fight-best-of-three"
+stage = "vs"
+kind = "head_to_head"
+slots = 2
+complete_when = { counts = { rounds_won = 2 } }
+limit_seconds = 100
+"#;
+
+fn fighting_catalog() -> Catalog {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
+    let mut texts = vec![FIGHT.to_string()];
+    for entry in fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            texts.push(fs::read_to_string(&path).unwrap());
+        }
+    }
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    Catalog::parse_all(&refs).unwrap()
+}
+
+fn won(frame: u64) -> protocol::Event {
+    (&session_api::SessionEvent::Counted { frame, counter: "rounds_won".into(), count: 1 }).into()
+}
+
+fn outcome(ending: Ending, frames: u64) -> RunOutcome {
+    RunOutcome { challenge: "fight-best-of-three".into(), kind: protocol::Kind::HeadToHead, ending, frames, attempts: 1 }
+}
+
+fn fetch<T>(t: &Table, who: usize, f: impl Fn(&ToClient) -> Option<T>) -> Vec<T> {
+    t.clients[who].inbox.iter().filter_map(f).collect()
+}
+
+fn got_go(t: &Table, who: usize, round: u64) -> bool {
+    t.clients[who].inbox.iter().any(|m| matches!(m, ToClient::Go { round: r } if *r == round))
+}
+
+impl Table {
+    /// A table on a server that can broker a bout, with the fight enabled
+    /// and nothing else.
+    fn fighting(seed: u64, names: &[&str]) -> Table {
+        let server = Server::new(fighting_catalog(), "test", seed).with_rendezvous(":7878");
+        let mut t = Table { server, clients: Vec::new() };
+        for n in names {
+            t.join(n, ace);
+        }
+        t.settings(LobbySettings {
+            mode: Mode::Combo,
+            format: Format::Challenges(1),
+            allow_head_to_head: true,
+            ..Default::default()
+        });
+        t.send(0, ToServer::Enable { challenges: vec![r("fight", "fight-best-of-three")] });
+        t
+    }
+
+    fn who(&self, player: &str) -> usize {
+        self.clients.iter().position(|c| c.name == player).unwrap_or_else(|| panic!("{player}"))
+    }
+
+    /// The seated players of the last deal, in slot order, and everyone else.
+    fn slots(&self) -> (Vec<String>, Vec<String>) {
+        let players = self.clients[0]
+            .inbox
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                ToClient::Dealt { players, .. } => Some(players.clone()),
+                _ => None,
+            })
+            .expect("a deal");
+        let rest = self.clients.iter().map(|c| c.name.clone()).filter(|n| !players.contains(n)).collect();
+        (players, rest)
+    }
+
+    /// Every seated player says where it is and the server sees its probe,
+    /// then prepares. Returns the round.
+    fn rendezvous(&mut self) -> u64 {
+        let (round, _, _) = self.last_dealt(0).expect("a round was dealt");
+        let (slots, _) = self.slots();
+        for (i, p) in slots.iter().enumerate() {
+            let who = self.who(p);
+            let token = 1000 + i as u64;
+            if i % 2 == 0 {
+                // A probe that beats its `Endpoint` to the server.
+                let out = self.server.observed(token, format!("203.0.113.{i}:7000"));
+                self.deliver(out);
+            }
+            self.send(who, ToServer::Endpoint { round, token, local: format!("10.0.0.{i}:7000") });
+            if i % 2 == 1 {
+                let out = self.server.observed(token, format!("203.0.113.{i}:7000"));
+                self.deliver(out);
+            }
+        }
+        for p in &slots {
+            let who = self.who(p);
+            let peers = fetch(self, who, |m| match m {
+                ToClient::Peers { round: r, peers } if *r == round => Some(peers.clone()),
+                _ => None,
+            });
+            assert_eq!(peers.len(), 1, "{p} hears where the slots are once: {peers:?}");
+            assert_eq!(peers[0].len(), slots.len());
+            for (i, peer) in peers[0].iter().enumerate() {
+                assert_eq!((peer.slot, &peer.player), (i as u8, &slots[i]));
+                assert_eq!(peer.candidates, [format!("10.0.0.{i}:7000"), format!("203.0.113.{i}:7000")]);
+            }
+            self.send(who, ToServer::Prepared { round, artifact: "abc".into() });
+        }
+        round
+    }
+
+    /// Slot 0 wins rounds at 100 and 300, slot 1 at 200, each frame reported
+    /// by its own client in its own order; both claim, and the winner's
+    /// frames come last so the loser's claim is in first.
+    fn fight(&mut self, round: u64) {
+        let (slots, _) = self.slots();
+        let (a, b) = (self.who(&slots[0]), self.who(&slots[1]));
+        self.send(a, ToServer::Frame { round, frame: 100, events: vec![won(100)] });
+        self.send(b, ToServer::Frame { round, frame: 200, events: vec![won(200)] });
+        self.send(b, ToServer::Frame { round, frame: 300, events: vec![] });
+        self.send(b, ToServer::Finished { round, outcome: outcome(Ending::Beaten, 300) });
+        assert!(self.errors(a).is_empty(), "a claim ahead of the verdict is held, not an error");
+        self.send(a, ToServer::Frame { round, frame: 300, events: vec![won(300)] });
+        self.send(a, ToServer::Finished { round, outcome: outcome(Ending::Completed, 300) });
+    }
+}
+
+fn entries(t: &Table, who: usize) -> Vec<protocol::RoundEntry> {
+    fetch(t, who, |m| match m {
+        ToClient::RoundResult { entries, .. } => Some(entries.clone()),
+        _ => None,
+    })
+    .pop()
+    .expect("a round result")
+}
+
+#[test]
+fn a_bout_seats_two_and_the_backer_takes_the_losers_entry() {
+    let mut t = Table::fighting(5, &["ann", "bob", "cy"]);
+    assert!(t.lobby(0).can_start, "{:?}", t.lobby(0).blocking);
+    t.start();
+    let (slots, rest) = t.slots();
+    assert_eq!((slots.len(), rest.len()), (2, 1));
+    let backer = t.who(&rest[0]);
+    let round = t.rendezvous();
+    assert!(!got_go(&t, 0, round), "no Go while a backer has not picked");
+    t.send(backer, ToServer::Back { round, player: slots[1].clone() });
+    let sides = fetch(&t, 0, |m| match m {
+        ToClient::Sides { backing, .. } => Some(backing.clone()),
+        _ => None,
+    });
+    assert_eq!(sides.last().unwrap(), &vec![(rest[0].clone(), slots[1].clone())]);
+    assert!(got_go(&t, 0, round));
+    t.fight(round);
+    let e = entries(&t, backer);
+    assert_eq!(e.len(), 3);
+    let of = |p: &str| e.iter().find(|x| x.player == p).unwrap().clone();
+    assert_eq!((of(&slots[0]).place, of(&slots[0]).points, of(&slots[0]).completed), (1, 2, true));
+    assert_eq!(of(&slots[1]).outcome.ending, Ending::Beaten);
+    let b = of(&rest[0]);
+    assert_eq!(b.backed.as_deref(), Some(slots[1].as_str()));
+    assert_eq!((b.place, b.failure, b.completed), (2, true, false));
+    assert_eq!(b.outcome, of(&slots[1]).outcome);
+    for who in 0..3 {
+        assert!(t.errors(who).is_empty(), "{:?}", t.errors(who));
+    }
+    assert!(t.match_over(0).is_some());
+}
+
+#[test]
+fn a_backer_who_does_not_pick_is_assigned_when_the_window_closes() {
+    let mut t = Table::fighting(5, &["ann", "bob", "cy"]);
+    t.start();
+    let round = t.rendezvous();
+    let now = Instant::now();
+    let out = t.server.tick(now);
+    t.deliver(out);
+    assert!(!got_go(&t, 0, round));
+    let out = t.server.tick(now + Duration::from_secs(u64::from(BACKING_SECONDS)));
+    t.deliver(out);
+    let sides = fetch(&t, 0, |m| match m {
+        ToClient::Sides { backing, .. } => Some(backing.clone()),
+        _ => None,
+    });
+    let (slots, rest) = t.slots();
+    assert_eq!(sides.last().unwrap().len(), 1);
+    assert_eq!(sides.last().unwrap()[0].0, rest[0]);
+    assert!(slots.contains(&sides.last().unwrap()[0].1));
+    assert!(got_go(&t, 0, round));
+}
+
+#[test]
+fn a_two_player_bout_goes_without_backing() {
+    let mut t = Table::fighting(5, &["ann", "bob"]);
+    t.start();
+    let round = t.rendezvous();
+    assert!(got_go(&t, 0, round));
+    assert!(fetch(&t, 0, |m| matches!(m, ToClient::Sides { .. }).then_some(())).is_empty());
+    t.fight(round);
+    assert_eq!(entries(&t, 0).len(), 2);
+    assert!(t.errors(0).is_empty());
+}
+
+#[test]
+fn a_slot_that_cannot_reach_the_other_voids_the_round() {
+    let mut t = Table::fighting(5, &["ann", "bob", "cy"]);
+    t.start();
+    let (round, _, _) = t.last_dealt(0).unwrap();
+    let (slots, _) = t.slots();
+    let who = t.who(&slots[0]);
+    t.send(who, ToServer::Unprepared { round, reason: format!("could not reach {}", slots[1]) });
+    let voided = fetch(&t, 0, |m| match m {
+        ToClient::Voided { round: r, reason, .. } => Some((*r, reason.clone())),
+        _ => None,
+    });
+    assert_eq!(voided.len(), 1);
+    assert_eq!(voided[0].0, round);
+    assert!(t.match_over(0).is_some(), "the only challenge is withdrawn");
+}
+
+#[test]
+fn a_backer_may_watch_from_the_deal() {
+    let mut t = Table::fighting(5, &["ann", "bob", "cy"]);
+    t.start();
+    let (round, _, _) = t.last_dealt(0).unwrap();
+    let (slots, rest) = t.slots();
+    let backer = t.who(&rest[0]);
+    for who in 0..3 {
+        t.take(who);
+    }
+    t.send(backer, ToServer::Watch { round, player: Some(slots[0].clone()) });
+    assert!(refusals(&t, backer).is_empty(), "{:?}", refusals(&t, backer));
+    assert_eq!(watched(&t, t.who(&slots[0])), [1]);
+}
+
+#[test]
+fn a_lost_link_is_lost_by_both_after_the_grace() {
+    let mut t = Table::fighting(5, &["ann", "bob"]);
+    t.start();
+    let round = t.rendezvous();
+    let (slots, _) = t.slots();
+    let (a, b) = (t.who(&slots[0]), t.who(&slots[1]));
+    t.send(a, ToServer::Frame { round, frame: 100, events: vec![won(100)] });
+    t.send(a, ToServer::PeerLost { round, frame: 100 });
+    t.send(b, ToServer::PeerLost { round, frame: 110 });
+    assert!(entries_or_none(&t, 0).is_none(), "nothing is called before the grace");
+    let now = Instant::now();
+    let out = t.server.tick(now);
+    t.deliver(out);
+    let out = t.server.tick(now + LOST_GRACE);
+    t.deliver(out);
+    let e = entries(&t, 0);
+    assert!(e.iter().all(|x| x.outcome.ending == Ending::Forfeited && x.failure), "{e:?}");
+    assert_eq!(e.iter().map(|x| x.outcome.frames).collect::<Vec<_>>().len(), 2);
+    assert!(t.errors(0).is_empty());
+}
+
+#[test]
+fn a_give_up_after_the_other_lost_the_link_hands_the_win() {
+    let mut t = Table::fighting(5, &["ann", "bob"]);
+    t.start();
+    let round = t.rendezvous();
+    let (slots, _) = t.slots();
+    let (a, b) = (t.who(&slots[0]), t.who(&slots[1]));
+    t.send(a, ToServer::PeerLost { round, frame: 100 });
+    t.send(b, ToServer::Forfeit { round, frame: 130 });
+    t.send(b, ToServer::Finished { round, outcome: outcome(Ending::Forfeited, 130) });
+    let e = entries(&t, 0);
+    let of = |p: &str| e.iter().find(|x| x.player == p).unwrap().clone();
+    assert_eq!(of(&slots[0]).outcome, outcome(Ending::Completed, 130));
+    assert_eq!(of(&slots[1]).outcome, outcome(Ending::Forfeited, 130));
+    assert!(t.errors(0).is_empty());
+}
+
+fn entries_or_none(t: &Table, who: usize) -> Option<Vec<protocol::RoundEntry>> {
+    fetch(t, who, |m| match m {
+        ToClient::RoundResult { entries, .. } => Some(entries.clone()),
+        _ => None,
+    })
+    .pop()
+}
+
+#[test]
+fn a_bout_needs_the_toggle_a_rendezvous_and_enough_players() {
+    let mut t = Table::fighting(5, &["ann"]);
+    assert!(!t.lobby(0).can_start, "one player cannot fill two slots");
+    t.join("bob", ace);
+    assert!(t.lobby(0).can_start);
+    t.settings(LobbySettings { allow_head_to_head: false, mode: Mode::Combo, ..Default::default() });
+    assert!(!t.lobby(0).can_start, "the toggle is off");
+
+    let mut plain = Table { server: Server::new(fighting_catalog(), "test", 1), clients: Vec::new() };
+    plain.join("ann", ace);
+    plain.join("bob", ace);
+    plain.settings(LobbySettings { allow_head_to_head: true, mode: Mode::Combo, ..Default::default() });
+    plain.send(0, ToServer::Enable { challenges: vec![r("fight", "fight-best-of-three")] });
+    assert!(!plain.lobby(0).can_start, "no rendezvous, no bout");
 }

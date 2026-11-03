@@ -24,7 +24,14 @@
 //!   kinds are defined by what a death costs, so a death is the event that
 //!   matters — not a [`StageExited`](SessionEvent::StageExited) that may or
 //!   may not follow it. Doom announces a death and stays in the level; waiting
-//!   for an exit there would leave a time trial waiting forever.
+//!   for an exit there would leave a time trial waiting forever. The third
+//!   kind, head-to-head, is the exception by definition (ADR 0036): the
+//!   machine is shared and nobody re-enters, so a death there costs what the
+//!   game says it costs — a round, a respawn — and is a fact and nothing more.
+//!   Everything else that ends a survival attempt ends a head-to-head run the
+//!   same way, and one more thing does: another slot completing first, which
+//!   is [`AttemptEnd::Beaten`] and is a [`Bout`](crate::bout::Bout)'s to
+//!   apply, since a run knows nothing of the other slots.
 //! * **Criteria are met within one attempt.** Re-entering puts the stage back
 //!   as it was, enemies and items included, so a count carried across attempts
 //!   could be farmed by dying. A time trial's *frames* carry over; its
@@ -80,6 +87,9 @@ pub enum AttemptEnd {
     /// The player left the stage some other way. `Unknown` is SMB3 leaving a
     /// level and not saying how, and it is reported as exactly that.
     Exited(ExitReason),
+    /// Head-to-head only: another slot met its criteria first, which ends the
+    /// bout for everyone else on that frame (ADR 0036).
+    Beaten,
 }
 
 impl fmt::Display for AttemptEnd {
@@ -89,6 +99,7 @@ impl fmt::Display for AttemptEnd {
             AttemptEnd::EndedOn(fact) => write!(f, "{fact}, which ends the attempt"),
             AttemptEnd::Cleared => f.write_str("cleared the stage without meeting the criteria"),
             AttemptEnd::Exited(reason) => write!(f, "left the stage ({reason})"),
+            AttemptEnd::Beaten => f.write_str("beaten: another slot completed first"),
         }
     }
 }
@@ -305,6 +316,8 @@ impl Run {
                 *held = held.saturating_add(count);
             }
             let end = match event {
+                // Shared machine: a death costs what the game says (ADR 0036).
+                SessionEvent::Died { .. } if self.spec.kind == ChallengeKind::HeadToHead => None,
                 SessionEvent::Died { .. } => Some(AttemptEnd::Died),
                 SessionEvent::StageExited { reason, .. } => Some(AttemptEnd::Exited(*reason)),
                 SessionEvent::StageCleared { .. } => {
@@ -353,6 +366,21 @@ impl Run {
         }
     }
 
+    /// Another slot completed first, on `frame` of this attempt: the run is
+    /// over, [`Ending::Failed`] with [`AttemptEnd::Beaten`]. Head-to-head
+    /// only, and a [`Bout`](crate::bout::Bout)'s call, since it is the one
+    /// thing a run cannot see for itself. A run that already finished keeps
+    /// the result it had.
+    pub fn beaten(&mut self, frame: u64) -> RunResult {
+        if let State::Over(r) = &self.state {
+            return r.clone();
+        }
+        match self.finish(Ending::Failed(AttemptEnd::Beaten), frame) {
+            Next::Finished(r) => r,
+            _ => unreachable!("finish always finishes"),
+        }
+    }
+
     /// `Some` if the challenge says this fact ends the attempt.
     fn ends_attempt(&self, fact: &str) -> Option<AttemptEnd> {
         self.spec
@@ -363,7 +391,9 @@ impl Run {
 
     fn end_attempt(&mut self, end: AttemptEnd, frame: u64) -> Next {
         match self.spec.kind {
-            ChallengeKind::Survival => self.finish(Ending::Failed(end), frame),
+            ChallengeKind::Survival | ChallengeKind::HeadToHead => {
+                self.finish(Ending::Failed(end), frame)
+            }
             ChallengeKind::TimeTrial => {
                 self.banked += frame;
                 self.frame = 0;
@@ -412,6 +442,7 @@ mod tests {
             kind,
             complete_when,
             ends_attempt_on: Default::default(),
+            slots: if kind == ChallengeKind::HeadToHead { 2 } else { 1 },
         }
     }
 
@@ -800,5 +831,53 @@ mod tests {
         run.enter();
         assert_eq!(run.observe(1, &[died(1)]), Next::Reenter);
         run.observe(2, &[]);
+    }
+
+    /// Street Fighter: losing a round is a death the game accounts for, and a
+    /// deathmatch respawns. Neither ends a head-to-head run (ADR 0036).
+    #[test]
+    fn a_head_to_head_death_is_a_fact_and_not_an_ending() {
+        let rounds = Completion {
+            counts: BTreeMap::from([("rounds_won".to_string(), 2)]),
+            ..Default::default()
+        };
+        let won = |frame| SessionEvent::Counted { frame, counter: "rounds_won".into(), count: 1 };
+        let r = play(
+            Run::new(spec(ChallengeKind::HeadToHead, rounds)).unwrap(),
+            &[&[(100, vec![won(100)]), (200, vec![died(200)]), (300, vec![won(300)])]],
+        );
+        assert_eq!(r.ending, Ending::Completed);
+        assert_eq!((r.frames, r.attempts), (300, 1));
+    }
+
+    /// Everything else that ends a survival attempt ends a head-to-head run:
+    /// leaving the fight is leaving the fight.
+    #[test]
+    fn a_head_to_head_run_ends_when_the_stage_is_left() {
+        let mut run = Run::new(spec(ChallengeKind::HeadToHead, stomps(1))).unwrap();
+        run.enter();
+        let left = SessionEvent::StageExited { frame: 50, reason: ExitReason::Quit };
+        match run.observe(50, &[left]) {
+            Next::Finished(r) => {
+                assert_eq!(r.ending, Ending::Failed(AttemptEnd::Exited(ExitReason::Quit)))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn beaten_ends_a_live_run_on_the_frame_given_and_a_finished_one_keeps_its_result() {
+        let mut run = Run::new(spec(ChallengeKind::HeadToHead, stomps(1))).unwrap();
+        run.enter();
+        assert_eq!(run.observe(10, &[]), Next::Continue);
+        let r = run.beaten(12);
+        assert_eq!(r.ending, Ending::Failed(AttemptEnd::Beaten));
+        assert_eq!(r.frames, 12);
+        assert_eq!(run.beaten(99), r);
+
+        let mut done = Run::new(spec(ChallengeKind::HeadToHead, stomps(1))).unwrap();
+        done.enter();
+        assert!(matches!(done.observe(5, &[stomp(5)]), Next::Finished(_)));
+        assert_eq!(done.beaten(3).ending, Ending::Completed);
     }
 }

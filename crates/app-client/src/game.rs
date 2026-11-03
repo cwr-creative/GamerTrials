@@ -10,18 +10,21 @@
 //!
 //! It is told what to load and when to begin; it says what the game reported.
 
+use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use challenge_core::{Next, Run, RunResult};
+use challenge_core::{Bout, Next, Run, RunResult};
+use head_to_head::relay::RelayState;
+use head_to_head::{Relay, Rollback, Settings as RollbackSettings, State as RollbackState, Udp};
 use minifb::{Scale, ScaleMode, Window, WindowOptions};
-use session_api::{ChallengeKind, Presentable, SessionEvent, StageRunner, StageSpec};
+use session_api::{ChallengeKind, Networked, Presentable, SessionEvent, Slot, SlotInput, StageRunner, StageSpec};
 use session_libretro::audio::{self, Audio};
 use session_libretro::input::PadState;
 use session_libretro::libretro;
-use session_libretro::manifest::{Controller, Manifest, PadLayout};
+use session_libretro::manifest::{Controller, Manifest, Netplay, PadLayout};
 use session_libretro::runner::LibretroRunner;
 use session_libretro::{input, prep};
 
@@ -44,6 +47,25 @@ pub struct Load {
     /// The player's video settings for this game's core.
     pub video: VideoPrefs,
     pub display: Display,
+    /// A bout (ADR 0036): this player's slot on the shared machine, and how
+    /// to find the others.
+    pub bout: Option<BoutLoad>,
+    /// Press random buttons from this seed instead of reading the pad, for a
+    /// hand test with nobody at the keyboard.
+    pub script: Option<u64>,
+}
+
+pub struct BoutLoad {
+    pub slot: u8,
+    pub slots: u8,
+    /// The server's UDP side, which this machine probes so the server learns
+    /// where it is. `None` on a server that deals no bouts, which never deals
+    /// this one.
+    pub rendezvous: Option<SocketAddr>,
+    /// Frames this player's own input is delayed (Settings).
+    pub input_delay: u8,
+    /// The UDP port to take, so a router can forward it (Settings); 0 for any.
+    pub port: u16,
 }
 
 /// What the client tells the game thread.
@@ -63,6 +85,12 @@ pub enum Command {
     /// How many are watching this run (ADR 0032). Above zero, the picture
     /// and sound are encoded and reported; a rise starts on a key frame.
     Stream(u32),
+    /// A bout: where each other slot's machine might be (ADR 0036). The
+    /// session starts on this and `Loaded` follows once it has synchronised.
+    Peers(Vec<(u8, Vec<SocketAddr>)>),
+    /// A bout: the player in that slot gave up on that frame, as the server
+    /// judged it; whoever stays wins.
+    PeerForfeited { slot: u8, frame: u64 },
     Quit,
 }
 
@@ -94,13 +122,85 @@ pub enum Report {
     Video { round: u64, frame: u64, key: bool, width: u32, height: u32, aspect: f32, data: Vec<u8> },
     /// The sound under the pictures, likewise.
     Audio { round: u64, frame: u64, rate: u32, channels: u8, data: Vec<u8> },
+    /// A bout: this machine's UDP side is up and probing the server with
+    /// `token`; `local` is the address it would be at on its own network.
+    Endpoint { round: u64, token: u64, local: String },
+    /// A bout: the link to the other slot died on this side, on the last
+    /// frame confirmed. No claim follows; the server rules.
+    PeerLost { round: u64, frame: u64 },
     Closed,
+}
+
+/// The runner alone, or inside the bout's rollback session once the other
+/// machines are found (ADR 0036).
+enum Machine {
+    Solo(Box<LibretroRunner>),
+    Bout(Box<Rollback<LibretroRunner>>),
+    /// A machine with a network of its own, relayed (`netplay = "packets"`).
+    Relay(Box<Relay<LibretroRunner, Udp>>),
+    /// Between the two, for the length of a move.
+    Moving,
+}
+
+impl Machine {
+    fn runner(&self) -> &LibretroRunner {
+        match self {
+            Machine::Solo(r) => r,
+            Machine::Bout(s) => s.machine(),
+            Machine::Relay(r) => r.machine(),
+            Machine::Moving => unreachable!("the runner is being moved"),
+        }
+    }
+
+    fn runner_mut(&mut self) -> &mut LibretroRunner {
+        match self {
+            Machine::Solo(r) => r,
+            Machine::Bout(s) => s.machine_mut(),
+            Machine::Relay(r) => r.machine_mut(),
+            Machine::Moving => unreachable!("the runner is being moved"),
+        }
+    }
+}
+
+/// How long a bout's machines are given to find each other before the
+/// round is given up as unreachable (ADR 0029 voids it).
+const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a probe goes to the server's UDP side until the peers are known.
+const PROBE_EVERY: Duration = Duration::from_millis(200);
+/// A bout's client reports an empty frame this often, so the server's judge
+/// hears from every slot (ADR 0036).
+const HEARTBEAT: u64 = 15;
+
+/// This player's half of a bout (ADR 0036).
+struct BoutState {
+    slot: Slot,
+    slots: u8,
+    /// The machine brings its own network and is relayed, not rolled back.
+    packets: bool,
+    rendezvous: Option<SocketAddr>,
+    token: u64,
+    input_delay: u8,
+    /// The UDP side, until the session takes it.
+    udp: Option<Udp>,
+    /// The provisional judge over every slot's facts.
+    judge: Bout,
+    /// Held until the machines have found each other: `Prepared` means
+    /// ready to go, and a bout is not until then.
+    artifact: String,
+    last_probe: Option<Instant>,
+    endpoint_sent: bool,
+    /// When the session started looking for the others.
+    syncing_since: Option<Instant>,
+    loaded_sent: bool,
+    lost_sent: bool,
 }
 
 /// The game being run right now, and the run being judged on it.
 struct Loaded {
     round: u64,
-    runner: LibretroRunner,
+    machine: Machine,
+    /// Present for a bout.
+    bout: Option<BoutState>,
     spec: StageSpec,
     run: Run,
     /// `Begin` has been given.
@@ -128,6 +228,25 @@ struct Loaded {
     watchers: u32,
     /// The next picture sent starts a group: a watcher just arrived.
     want_key: bool,
+    /// Random buttons, when the round was loaded with a script.
+    script: Option<(u64, u32)>,
+}
+
+/// The same scripted pad the harness's sync test presses: a random set of
+/// buttons held for a while, never start or select.
+fn scripted_pad(state: &mut (u64, u32), frame: u64) -> u32 {
+    state.0 = state.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = state.0;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let r = (z ^ (z >> 31)) ^ frame;
+    if r % 12 == 0 {
+        let bits = (r >> 8) as u32;
+        let dpad = 1u32 << (libretro::JOY_UP + ((bits >> 4) & 3));
+        let face = bits & ((1 << libretro::JOY_B) | (1 << libretro::JOY_Y) | (1 << libretro::JOY_A) | (1 << libretro::JOY_X));
+        state.1 = dpad | face;
+    }
+    state.1
 }
 
 impl Loaded {
@@ -185,10 +304,14 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     match load(*l, &mut window) {
                         Ok(mut x) => {
                             place_window(hwnd, &x.0, &mut borderless, &mut sized_for);
-                            let _ = reports.send(Report::Loaded { round, artifact: x.1 });
+                            // A bout is prepared only once its machines have
+                            // found each other (`bout_prepare`).
+                            if x.0.bout.is_none() {
+                                let _ = reports.send(Report::Loaded { round, artifact: x.1 });
+                            }
                             x.0.watchers = watchers;
                             x.0.want_key = watchers > 0;
-                            x.0.runner.tap_audio(watchers > 0);
+                            x.0.machine.runner().tap_audio(watchers > 0);
                             loaded = Some(x.0);
                             held = false;
                         }
@@ -201,9 +324,40 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     if let Some(l) = loaded.as_mut() {
                         if !l.live && !l.done {
                             l.run.enter();
+                            if let Some(b) = l.bout.as_mut() {
+                                b.judge.enter();
+                            }
+                            if let Machine::Relay(r) = &mut l.machine {
+                                if let Err(e) = r.join() {
+                                    eprintln!("[bout] cannot join the game's network: {e}");
+                                }
+                            }
                             l.live = true;
                             l.next_deadline = Instant::now();
                             held = false;
+                        }
+                    }
+                }
+                Ok(Command::Peers(peers)) => {
+                    if let Some(l) = loaded.as_mut() {
+                        if let Err(e) = connect_bout(l, peers) {
+                            let round = l.round;
+                            let _ = reports.send(Report::LoadFailed { round, error: e });
+                            loaded = None;
+                        }
+                    }
+                }
+                Ok(Command::PeerForfeited { slot, frame }) => {
+                    if let Some(l) = loaded.as_mut() {
+                        if let Some(b) = l.bout.as_mut() {
+                            let verdicts = b.judge.forfeit(Slot(slot), frame);
+                            if let Some((_, result)) = verdicts.into_iter().find(|(s, _)| *s == b.slot) {
+                                if !l.done {
+                                    l.done = true;
+                                    let round = l.round;
+                                    let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
+                                }
+                            }
                         }
                     }
                 }
@@ -220,7 +374,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 }
                 Ok(Command::Unload) => {
                     if let Some(l) = loaded.as_ref() {
-                        l.runner.tap_audio(false);
+                        l.machine.runner().tap_audio(false);
                     }
                     loaded = None;
                 }
@@ -231,7 +385,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                             l.want_key = true;
                         }
                         l.watchers = n;
-                        l.runner.tap_audio(n > 0);
+                        l.machine.runner().tap_audio(n > 0);
                     }
                     watchers = n;
                 }
@@ -243,7 +397,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
             }
         }
 
-        if loaded.as_ref().is_some_and(|l| l.runner.shutdown_requested()) {
+        if loaded.as_ref().is_some_and(|l| l.machine.runner().shutdown_requested()) {
             // The guest exited the game — Doom's own quit. Nothing to run.
             if let Some(l) = loaded.as_mut() {
                 forfeit(l, &reports);
@@ -270,7 +424,9 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 if give_up {
                     forfeit(l, &reports);
                 } else if pause {
-                    held = true;
+                    // A shared machine cannot be held (ADR 0036): the menu
+                    // comes up over a game that goes on.
+                    held = l.bout.is_none();
                     let _ = reports.send(Report::Paused);
                 }
             }
@@ -284,12 +440,19 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
             Some(l) if held || !l.live || l.done => {
                 // Present whatever is there, pump the window, wait a frame.
                 if !l.live {
+                    bout_prepare(l, &reports);
                     // The entry frame, if the core drew one on entering.
                     present(l, &mut window, &mut canvas, &streamer)?;
                 } else {
                     window.update();
                 }
                 std::thread::sleep(l.frame_time);
+            }
+            Some(l) if l.bout.as_ref().is_some_and(|b| b.packets) => {
+                step_relay(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
+            }
+            Some(l) if l.bout.is_some() => {
+                step_bout(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
             }
             Some(l) => {
                 step(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
@@ -337,8 +500,46 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
         .as_ref()
         .map(|a| (audio::TARGET_QUEUED_FRAMES as f64 * a.device_rate / av.timing.fps) as usize);
     window.set_title(&format!("{title} \u{2014} GamerTrials"));
+    let packets = runner.manifest().libretro.netplay == Some(Netplay::Packets);
+    if let (true, Some(b)) = (packets, l.bout.as_ref()) {
+        // The game's own network driver must be up before the game boots and
+        // looks for it (ADR 0036): join now, with every other slot present.
+        runner.join(Slot(b.slot), b.slots).map_err(|e| e.to_string())?;
+        for i in 0..b.slots {
+            if i != b.slot {
+                runner.peer_joined(Slot(i));
+            }
+        }
+    }
     runner.enter(&spec).map_err(|e| e.to_string())?;
     let timed = matches!(judged.kind, ChallengeKind::TimeTrial);
+    let bout = match l.bout {
+        Some(b) => {
+            if judged.kind != ChallengeKind::HeadToHead {
+                return Err(format!("{} is not a head-to-head challenge", judged.id));
+            }
+            let udp = bind_bout(b.port)?;
+            let judge = Bout::new(judged.clone(), Some(l.limit)).map_err(|e| e.to_string())?;
+            let token = token_for(&udp);
+            Some(BoutState {
+                slot: Slot(b.slot),
+                slots: b.slots,
+                packets,
+                rendezvous: b.rendezvous,
+                token,
+                input_delay: b.input_delay,
+                udp: Some(udp),
+                judge,
+                artifact: artifact.clone(),
+                last_probe: None,
+                endpoint_sent: false,
+                syncing_since: None,
+                loaded_sent: false,
+                lost_sent: false,
+            })
+        }
+        None => None,
+    };
     let run = Run::new(judged).map_err(|e| e.to_string())?.with_limit(l.limit);
     // A keyboard game reads the pad too: its RetroPad buttons press keys.
     let pads = input::Pads::new(layout);
@@ -350,7 +551,8 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
     Ok((
         Loaded {
             round: l.round,
-            runner,
+            machine: Machine::Solo(Box::new(runner)),
+            bout,
             spec,
             run,
             live: false,
@@ -371,6 +573,7 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
             last_seq: 0,
             watchers: 0,
             want_key: false,
+            script: l.script.map(|seed| (seed, 0)),
         },
         artifact,
     ))
@@ -420,13 +623,13 @@ fn step(
         }
     }
 
-    let events = l.runner.advance().map_err(|e| e.to_string())?.to_vec();
-    let frame = l.runner.frame();
+    let events = l.machine.runner_mut().advance().map_err(|e| e.to_string())?.to_vec();
+    let frame = l.machine.runner().frame();
     // The sound this frame made, for a spectator. Taken whenever the tap is
     // on so it never piles up; sent only while the run is theirs to watch.
     if l.watchers > 0 {
         let (round, send) = (l.round, l.streaming());
-        l.runner.take_audio(&mut |samples, rate| {
+        l.machine.runner().take_audio(&mut |samples, rate| {
             if send {
                 streamer.sound(Sound { round, frame, rate, samples: samples.to_vec() });
             }
@@ -447,7 +650,7 @@ fn step(
     match next {
         Next::Continue => {}
         Next::Reenter => {
-            l.runner.enter(&l.spec).map_err(|e| e.to_string())?;
+            l.machine.runner_mut().enter(&l.spec).map_err(|e| e.to_string())?;
             l.run.enter();
             let _ = reports.send(Report::Reentered {
                 round: l.round,
@@ -479,11 +682,425 @@ fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
     if !l.live || l.done {
         return;
     }
-    let frame = l.runner.frame();
+    if let Some(b) = l.bout.as_mut() {
+        // On the last frame every slot's input was final for: the frames
+        // after it were guesses, and the server has none of them.
+        let frame = match &l.machine {
+            Machine::Bout(s) => s.confirmed_frame(),
+            other => other.runner().frame(),
+        };
+        let verdicts = b.judge.forfeit(b.slot, frame);
+        let result = verdicts
+            .into_iter()
+            .find(|(s, _)| *s == b.slot)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| b.judge.run(b.slot).result().cloned().unwrap_or_else(|| {
+                RunResult {
+                    challenge: l.run.spec().id.clone(),
+                    kind: ChallengeKind::HeadToHead,
+                    ending: challenge_core::Ending::Forfeited,
+                    frames: frame,
+                    attempts: 1,
+                }
+            }));
+        l.done = true;
+        let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: Some(frame) });
+        return;
+    }
+    let frame = l.machine.runner().frame();
     let result = l.run.forfeit();
     l.done = true;
     clock(l, reports);
     let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: Some(frame) });
+}
+
+/// A token for the probes: whatever this socket's port and the clock make
+/// of each other. It only has to be unlikely to collide within one lobby.
+fn token_for(udp: &Udp) -> u64 {
+    let port = udp.local_addr().map(|a| u64::from(a.port())).unwrap_or(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut z = nanos ^ (port << 48) ^ 0x9E37_79B9_7F4A_7C15;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The bout's UDP side, on the port Settings names so a router can forward
+/// it; any port when that one is taken, as by a second client on this
+/// machine, or when Settings says 0.
+fn bind_bout(port: u16) -> Result<Udp, String> {
+    let any = || Udp::bind("0.0.0.0:0".parse().unwrap()).map_err(|e| format!("cannot open a UDP socket: {e}"));
+    if port == 0 {
+        return any();
+    }
+    match Udp::bind(SocketAddr::from(([0, 0, 0, 0], port))) {
+        Ok(udp) => Ok(udp),
+        Err(e) => {
+            eprintln!("[bout] UDP port {port}: {e}; taking any port, which a router will not forward");
+            any()
+        }
+    }
+}
+
+/// The address this machine's UDP side is at on its own network: the
+/// interface that reaches the server, and the bound port. What a peer on the
+/// same LAN or the same machine uses, since the address the server saw may
+/// be a router's that will not turn a packet back inside.
+fn local_address(udp: &Udp, rendezvous: Option<SocketAddr>) -> String {
+    let port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
+    let ip = rendezvous
+        .and_then(|rv| {
+            let probe = UdpSocket::bind("0.0.0.0:0").ok()?;
+            probe.connect(rv).ok()?;
+            probe.local_addr().ok().map(|a| a.ip())
+        })
+        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+    format!("{ip}:{port}")
+}
+
+/// Before a bout goes: probe the server until the peers are known, then
+/// find them, and only then say the round is prepared (ADR 0036). A bout
+/// whose machines cannot find each other within the timeout cannot be
+/// prepared, and the round is voided for everyone (ADR 0029).
+fn bout_prepare(l: &mut Loaded, reports: &Sender<Report>) {
+    let Some(b) = l.bout.as_mut() else { return };
+    if l.done {
+        // Over on this side; the other machine may still want this one's
+        // last inputs to confirm the same frame, and only a poll resends.
+        match &mut l.machine {
+            Machine::Bout(s) => {
+                s.poll();
+            }
+            Machine::Relay(r) => {
+                r.poll();
+            }
+            _ => {}
+        }
+        return;
+    }
+    if b.loaded_sent {
+        // Prepared, waiting for `Go`: the engine's keep-alives leave only on
+        // a poll, and the backing window is longer than its timeout.
+        if let Machine::Relay(r) = &mut l.machine {
+            r.poll();
+        }
+        if let Machine::Bout(s) = &mut l.machine {
+            if let RollbackState::Lost(slot) = s.poll().clone() {
+                if !b.lost_sent {
+                    b.lost_sent = true;
+                    l.done = true;
+                    let frame = s.confirmed_frame();
+                    eprintln!("[bout] lost {slot} before the bout went");
+                    let _ = reports.send(Report::PeerLost { round: l.round, frame });
+                }
+            }
+        }
+        return;
+    }
+    if let (Some(udp), Some(rv)) = (b.udp.as_ref(), b.rendezvous) {
+        if b.last_probe.map_or(true, |t| t.elapsed() >= PROBE_EVERY) {
+            if let Err(e) = udp.probe(rv, b.token) {
+                eprintln!("[bout] probe to {rv}: {e}");
+            }
+            b.last_probe = Some(Instant::now());
+        }
+        if !b.endpoint_sent {
+            b.endpoint_sent = true;
+            let local = local_address(udp, Some(rv));
+            println!("[bout] slot {} of {}: probing {rv} as {local}", b.slot.0, b.slots);
+            let _ = reports.send(Report::Endpoint { round: l.round, token: b.token, local });
+        }
+    } else if b.udp.is_some() && !b.endpoint_sent {
+        let _ = reports.send(Report::LoadFailed {
+            round: l.round,
+            error: "this server has no UDP side to broker a bout through".into(),
+        });
+        b.endpoint_sent = true;
+        l.done = true;
+    }
+    if let Machine::Relay(r) = &mut l.machine {
+        match r.poll().clone() {
+            RelayState::Connected | RelayState::Live => {
+                b.loaded_sent = true;
+                println!("[bout] the other machine answered");
+                let _ = reports.send(Report::Loaded { round: l.round, artifact: b.artifact.clone() });
+            }
+            RelayState::Connecting => {
+                if b.syncing_since.is_some_and(|t| t.elapsed() >= SYNC_TIMEOUT) {
+                    l.done = true;
+                    let _ = reports.send(Report::LoadFailed {
+                        round: l.round,
+                        error: "could not reach the other player's machine".into(),
+                    });
+                }
+            }
+        }
+        return;
+    }
+    let Machine::Bout(s) = &mut l.machine else { return };
+    let state = s.poll().clone();
+    match state {
+        RollbackState::Live => {
+            b.loaded_sent = true;
+            let stats = s.stats();
+            println!("[bout] synchronised, round trip {} ms", stats.ping_ms);
+            let _ = reports.send(Report::Loaded { round: l.round, artifact: b.artifact.clone() });
+        }
+        RollbackState::Synchronizing => {
+            if b.syncing_since.is_some_and(|t| t.elapsed() >= SYNC_TIMEOUT) {
+                l.done = true;
+                let _ = reports.send(Report::LoadFailed {
+                    round: l.round,
+                    error: "could not reach the other player's machine".into(),
+                });
+            }
+        }
+        RollbackState::Lost(slot) => {
+            l.done = true;
+            let _ = reports.send(Report::LoadFailed { round: l.round, error: format!("lost {slot} while connecting") });
+        }
+        RollbackState::Desynced { frame } => {
+            l.done = true;
+            let _ = reports.send(Report::LoadFailed { round: l.round, error: format!("the machines disagreed at frame {frame}") });
+        }
+    }
+}
+
+/// The peers are known: the UDP side learns where they are and the runner
+/// goes into the rollback session, which starts looking for them.
+fn connect_bout(l: &mut Loaded, peers: Vec<(u8, Vec<SocketAddr>)>) -> Result<(), String> {
+    let Some(b) = l.bout.as_mut() else { return Ok(()) };
+    let Some(mut udp) = b.udp.take() else { return Ok(()) };
+    let mine: Option<SocketAddr> = local_address(&udp, b.rendezvous).parse().ok();
+    for (slot, candidates) in peers {
+        if slot != b.slot.0 {
+            // A peer on the server's own network is, from out here, at the
+            // server's public address. This machine's own address is not
+            // the peer, whatever two networks with one private range say.
+            let candidates: Vec<SocketAddr> = head_to_head::reach(candidates, b.rendezvous)
+                .into_iter()
+                .filter(|c| Some(*c) != mine)
+                .collect();
+            println!("[bout] slot {slot} at {candidates:?}");
+            udp.peer(Slot(slot), candidates);
+        }
+    }
+    let runner = match std::mem::replace(&mut l.machine, Machine::Moving) {
+        Machine::Solo(r) => *r,
+        other => {
+            l.machine = other;
+            return Ok(());
+        }
+    };
+    if b.packets {
+        l.machine = Machine::Relay(Box::new(Relay::connect_joined(runner, udp, b.slot, b.slots)));
+        b.syncing_since = Some(Instant::now());
+        return Ok(());
+    }
+    let settings = RollbackSettings {
+        input_delay: usize::from(b.input_delay),
+        fps: l.fps.round().max(1.0) as usize,
+        ..Default::default()
+    };
+    let session = Rollback::connect(runner, udp, b.slot, b.slots, settings).map_err(|e| e.to_string())?;
+    l.machine = Machine::Bout(Box::new(session));
+    b.syncing_since = Some(Instant::now());
+    Ok(())
+}
+
+/// One frame of a relayed bout: paced as a solo frame is, the keyboard and
+/// mouse (a DOS game) or the pad read as usual, the game's own packets
+/// carried, and this machine's own facts judged — the other slot's come to
+/// the server from the other machine, and its verdict for this one comes
+/// back as `PlayerFinished`.
+fn step_relay(
+    l: &mut Loaded,
+    window: &mut Window,
+    canvas: &mut Canvas,
+    in_front: bool,
+    pad: &PadState,
+    reports: &Sender<Report>,
+    streamer: &Streamer,
+) -> Result<(), String> {
+    match l.audio_target {
+        Some(target) => {
+            let give_up_at = Instant::now() + l.frame_time * 4;
+            while audio::queued_frames() > target && Instant::now() < give_up_at {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        None => {
+            let now = Instant::now();
+            if l.next_deadline > now {
+                std::thread::sleep(l.next_deadline - now);
+            } else {
+                l.next_deadline = now;
+            }
+            l.next_deadline += l.frame_time;
+        }
+    }
+    window.update();
+
+    let frame_now = l.machine.runner().frame() + 1;
+    let scripted = l.script.is_some();
+    let bits = match l.script.as_mut() {
+        Some(state) => scripted_pad(state, frame_now),
+        None if in_front => keys::joypad(&l.input, pad),
+        None => 0,
+    };
+    match l.input.keyboard.as_ref() {
+        None => libretro::JOYPAD.store(bits, Ordering::Relaxed),
+        Some(kb) => {
+            if in_front || scripted {
+                keys::keyboard_game(kb, bits, pad, l.input.deadzone);
+                if let Some(m) = l.mouse.as_mut() {
+                    m.pump(window);
+                }
+            } else {
+                keys::keyboard_release_all();
+            }
+        }
+    }
+
+    let round = l.round;
+    let streaming = l.streaming();
+    let watchers = l.watchers;
+    let (Some(b), Machine::Relay(r)) = (l.bout.as_mut(), &mut l.machine) else { return Ok(()) };
+    r.pump().map_err(|e| e.to_string())?;
+    let frame = r.machine().frame();
+    // A game in lockstep simulates every player on every machine, so its
+    // facts are tagged per slot and every slot is judged here, as on a
+    // rolled-back machine; only this slot's go to the server.
+    let events = r.machine().slot_events().to_vec();
+    if watchers > 0 {
+        r.machine().take_audio(&mut |samples, rate| {
+            if streaming {
+                streamer.sound(Sound { round, frame, rate, samples: samples.to_vec() });
+            }
+        });
+    }
+    if !l.done {
+        let mine: Vec<SessionEvent> = events
+            .iter()
+            .filter(|e| e.slot.is_none() || e.slot == Some(b.slot))
+            .map(|e| e.event.clone())
+            .collect();
+        let mut verdicts = Vec::new();
+        for slot in 0..b.slots {
+            let theirs: Vec<SessionEvent> = events
+                .iter()
+                .filter(|e| e.slot.is_none() || e.slot == Some(Slot(slot)))
+                .map(|e| e.event.clone())
+                .collect();
+            verdicts.extend(b.judge.observe(Slot(slot), frame, &theirs));
+        }
+        let settled = verdicts.into_iter().find(|(s, _)| *s == b.slot).map(|(_, r)| r);
+        if !mine.is_empty() || frame % HEARTBEAT == 0 || settled.is_some() {
+            let _ = reports.send(Report::Frame { round, frame, events: mine });
+        }
+        if let Some(result) = settled {
+            l.done = true;
+            let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
+        }
+    }
+    present(l, window, canvas, streamer)
+}
+
+/// One frame of a bout: pace on the clock (a frame the engine sits out
+/// drains no audio ring), read the local pad, pump the session, and judge
+/// every slot's confirmed facts; this slot's go to the server.
+fn step_bout(
+    l: &mut Loaded,
+    window: &mut Window,
+    canvas: &mut Canvas,
+    in_front: bool,
+    pad: &PadState,
+    reports: &Sender<Report>,
+    streamer: &Streamer,
+) -> Result<(), String> {
+    let now = Instant::now();
+    if l.next_deadline > now {
+        std::thread::sleep(l.next_deadline - now);
+    } else {
+        l.next_deadline = now;
+    }
+    l.next_deadline += l.frame_time;
+    window.update();
+
+    let frame_now = l.machine.runner().frame() + 1;
+    let bits = match l.script.as_mut() {
+        Some(state) => scripted_pad(state, frame_now),
+        None if in_front => keys::joypad(&l.input, pad),
+        None => 0,
+    };
+    let round = l.round;
+    let streaming = l.streaming();
+    let watchers = l.watchers;
+    let (Some(b), Machine::Bout(s)) = (l.bout.as_mut(), &mut l.machine) else { return Ok(()) };
+    let confirmed = s.pump(&[(b.slot, SlotInput(bits))]).map_err(|e| e.to_string())?;
+    let frame = s.frame();
+    if watchers > 0 {
+        s.machine().take_audio(&mut |samples, rate| {
+            if streaming {
+                streamer.sound(Sound { round, frame, rate, samples: samples.to_vec() });
+            }
+        });
+    }
+    let mut mine_done = None;
+    for c in confirmed {
+        let mine: Vec<SessionEvent> = c
+            .events
+            .iter()
+            .filter(|e| e.slot.is_none() || e.slot == Some(b.slot))
+            .map(|e| e.event.clone())
+            .collect();
+        let mut verdicts = Vec::new();
+        for slot in 0..b.slots {
+            let theirs: Vec<SessionEvent> = c
+                .events
+                .iter()
+                .filter(|e| e.slot.is_none() || e.slot == Some(Slot(slot)))
+                .map(|e| e.event.clone())
+                .collect();
+            verdicts.extend(b.judge.observe(Slot(slot), c.frame, &theirs));
+        }
+        let settled = verdicts.into_iter().find(|(s, _)| *s == b.slot).map(|(_, r)| r);
+        // The frame a verdict settles on is always reported, as a solo run's
+        // is: the server's judge holds another slot's completion until this
+        // slot has reported past it (ADR 0036).
+        if !mine.is_empty() || c.frame % HEARTBEAT == 0 || settled.is_some() {
+            let _ = reports.send(Report::Frame { round, frame: c.frame, events: mine });
+        }
+        if settled.is_some() {
+            mine_done = settled;
+            break;
+        }
+    }
+    match s.state().clone() {
+        RollbackState::Lost(slot) if !b.lost_sent => {
+            b.lost_sent = true;
+            l.done = true;
+            let frame = s.confirmed_frame();
+            eprintln!("[bout] lost {slot} at frame {frame}");
+            let _ = reports.send(Report::PeerLost { round, frame });
+        }
+        RollbackState::Desynced { frame } if !l.done => {
+            eprintln!("[bout] the machines disagreed at frame {frame}; giving up the run");
+            forfeit(l, reports);
+            return present(l, window, canvas, streamer);
+        }
+        _ => {}
+    }
+    if let Some(result) = mine_done {
+        if !l.done {
+            l.done = true;
+            let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
+        }
+    }
+    present(l, window, canvas, streamer)
 }
 
 fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &Streamer) -> Result<(), String> {
@@ -494,9 +1111,9 @@ fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &
     // For a spectator: the core's own picture, before the player's settings
     // shape it (ADR 0032). One copy here; the encoder runs on its own thread
     // and a picture it has no time for is simply not offered.
-    let (streaming, want_key, round, frame) = (l.streaming(), l.want_key, l.round, l.runner.frame());
+    let (streaming, want_key, round, frame) = (l.streaming(), l.want_key, l.round, l.machine.runner().frame());
     let mut keyed = false;
-    l.last_seq = l.runner.present(l.last_seq, &mut |f| {
+    l.last_seq = l.machine.runner().present(l.last_seq, &mut |f| {
         painted = true;
         if streaming {
             keyed |= streamer.offer(|| Picture {
@@ -538,7 +1155,7 @@ fn place_window(hwnd: isize, l: &Loaded, borderless: &mut bool, sized_for: &mut 
     if *borderless {
         return;
     }
-    let av = l.runner.av_info();
+    let av = l.machine.runner().av_info();
     let frame = (av.geometry.base_width as usize, av.geometry.base_height as usize);
     if frame.0 == 0 || frame.1 == 0 {
         return;

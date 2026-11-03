@@ -435,3 +435,16 @@ levels do not exercise:
   four letters" is `kong-spelled`, the game's own bit 4, rather than four
   `kong_letter:*` items, because the letter that completes the word never sets
   its own bit (above).
+
+## Rollback
+
+Snes9x rolls back exactly (ADR 0036). `harness --game dkc --synctest 1800
+--slots 2 --check 3` restores and replays three frames on every advance and
+compares checksums over system RAM and the watcher's state; with `--check 7`
+it replays seven. Both pass over 1800 frames of scripted input on two pads,
+and two processes on the same script write the same `--digest-log` on every
+frame. The cost, measured headless on one Windows machine with an 823 KB
+state: about 0.7 ms per frame advanced and saved, so an eight-frame rollback
+is about 5.5 ms of a 16.7 ms frame. Four fades "led nowhere" during the test
+because scripted input walks into the level exit screen; that is the marker
+expiring as designed, not a divergence.

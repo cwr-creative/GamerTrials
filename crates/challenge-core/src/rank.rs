@@ -8,6 +8,8 @@
 //! * **Survival** — completed or not. Every completed run ties, and so does
 //!   every run that was not; how long a failed run lasted is not what the kind
 //!   measures.
+//! * **Head-to-head** — the same: the slot that completed is ahead of the
+//!   slots it beat, and two that completed on one frame drew (ADR 0036).
 //!
 //! Points, and how a session totals places across challenges, are not here:
 //! nobody has decided them, and ranking within one challenge is all the
@@ -47,7 +49,7 @@ fn compare(a: &RunResult, b: &RunResult) -> Ordering {
         (false, false) => Ordering::Equal,
         (true, true) => match a.kind {
             ChallengeKind::TimeTrial => a.frames.cmp(&b.frames),
-            ChallengeKind::Survival => Ordering::Equal,
+            ChallengeKind::Survival | ChallengeKind::HeadToHead => Ordering::Equal,
         },
     }
 }
@@ -85,6 +87,21 @@ mod tests {
             result(sv, Ending::Failed(AttemptEnd::Died), 10),
         ];
         assert_eq!(places(&results), [3, 1, 1, 3]);
+    }
+
+    #[test]
+    fn a_bout_places_the_winner_first_and_a_draw_ties() {
+        let h = ChallengeKind::HeadToHead;
+        let beaten = Ending::Failed(AttemptEnd::Beaten);
+        assert_eq!(
+            places(&[result(h, beaten.clone(), 500), result(h, Ending::Completed, 500)]),
+            [2, 1]
+        );
+        assert_eq!(
+            places(&[result(h, Ending::Completed, 500), result(h, Ending::Completed, 500)]),
+            [1, 1]
+        );
+        assert_eq!(places(&[result(h, Ending::TimedOut, 9), result(h, Ending::TimedOut, 9)]), [1, 1]);
     }
 
     #[test]

@@ -32,7 +32,7 @@
 //! except the audio drain runs on the emulator thread.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::{c_char, c_uint, c_void, CString};
+use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -160,6 +160,7 @@ const ENV_SET_SYSTEM_AV_INFO: u32 = 32;
 const ENV_GET_USERNAME: u32 = 38;
 const ENV_GET_LANGUAGE: u32 = 39;
 const ENV_SET_SUPPORT_ACHIEVEMENTS: u32 = 42;
+const ENV_SET_SERIALIZATION_QUIRKS: u32 = 44;
 const ENV_GET_VFS_INTERFACE: u32 = 45 | EXPERIMENTAL;
 const ENV_GET_LED_INTERFACE: u32 = 46;
 const ENV_GET_AUDIO_VIDEO_ENABLE: u32 = 47;
@@ -184,6 +185,7 @@ const ENV_SET_CORE_OPTIONS_V2_INTL: u32 = 68;
 const ENV_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK: u32 = 69;
 const ENV_SET_VARIABLE: u32 = 70;
 const ENV_GET_THROTTLE_STATE: u32 = 71 | EXPERIMENTAL;
+const ENV_SET_NETPACKET_INTERFACE: u32 = 78;
 const ENV_GET_SAVESTATE_CONTEXT: u32 = 72 | EXPERIMENTAL;
 
 /// libretro.h caps a v2 option at this many values, and the array is inline in
@@ -398,8 +400,208 @@ pub static RESAMPLE_STEP: AtomicU64 = AtomicU64::new(0);
 /// Zero when there is no audio device; the batch callback then drops audio.
 pub static AUDIO_ENABLED: AtomicU32 = AtomicU32::new(0);
 
-/// Current joypad state as a bitmask indexed by the `JOY_*` ids.
+/// Current joypad state as a bitmask indexed by the `JOY_*` ids: port 0,
+/// the local player. The other ports of a shared machine are
+/// [`set_joypad`]'s (ADR 0036).
 pub static JOYPAD: AtomicU32 = AtomicU32::new(0);
+
+/// How many controller ports a core can be told about.
+pub const MAX_PORTS: u8 = 8;
+/// Ports 1 and up, for a shared machine; port 0 is [`JOYPAD`].
+static JOYPADS_MORE: [AtomicU32; 7] = [
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+];
+/// How many ports have a pad plugged in: what `GET_INPUT_MAX_USERS` answers
+/// and how far [`cb_input_state`] looks.
+static PORTS: AtomicU32 = AtomicU32::new(1);
+/// A frame being run again after a restore (ADR 0036): the player saw and
+/// heard it already, so the picture and the sound it makes are dropped.
+static REPLAYING: AtomicU32 = AtomicU32::new(0);
+/// What `GET_SAVESTATE_CONTEXT` answers: NORMAL (0) for a state that goes to
+/// disk, RUNAHEAD_SAME_INSTANCE (1) while a rollback saves and restores
+/// within one session, which lets a core take its fast path.
+static SAVESTATE_CONTEXT: AtomicU32 = AtomicU32::new(0);
+/// What the core declared through `SET_SERIALIZATION_QUIRKS` (44).
+static SERIALIZATION_QUIRKS: AtomicU64 = AtomicU64::new(0);
+/// The core's serialization "should not be relied upon for frame-sensitive
+/// frontend features such as netplay or rerecording".
+pub const QUIRK_INCOMPLETE: u64 = 1 << 0;
+const QUIRK_CORE_VARIABLE_SIZE: u64 = 1 << 2;
+const QUIRK_FRONT_VARIABLE_SIZE: u64 = 1 << 3;
+
+/// What `port`'s pad holds for the next frame. Port 0 is [`JOYPAD`].
+pub fn set_joypad(port: u8, bits: u32) {
+    match port {
+        0 => JOYPAD.store(bits, Ordering::Relaxed),
+        p if p < MAX_PORTS => JOYPADS_MORE[usize::from(p) - 1].store(bits, Ordering::Relaxed),
+        _ => {}
+    }
+}
+
+fn joypad(port: u32) -> u32 {
+    match port {
+        0 => JOYPAD.load(Ordering::Relaxed),
+        p if p < u32::from(MAX_PORTS) => JOYPADS_MORE[p as usize - 1].load(Ordering::Relaxed),
+        _ => 0,
+    }
+}
+
+/// Every port's pad released.
+pub fn pads_clear() {
+    JOYPAD.store(0, Ordering::Relaxed);
+    for p in &JOYPADS_MORE {
+        p.store(0, Ordering::Relaxed);
+    }
+}
+
+pub fn set_replaying(on: bool) {
+    REPLAYING.store(u32::from(on), Ordering::Relaxed);
+}
+
+fn replaying() -> bool {
+    REPLAYING.load(Ordering::Relaxed) != 0
+}
+
+/// `RETRO_SAVESTATE_CONTEXT_*`: 0 normal, 1 runahead in the same instance.
+pub fn set_savestate_context(context: u32) {
+    SAVESTATE_CONTEXT.store(context, Ordering::Relaxed);
+}
+
+/// The `RETRO_SERIALIZATION_QUIRK_*` bits the core declared, if any.
+pub fn serialization_quirks() -> u64 {
+    SERIALIZATION_QUIRKS.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------- netpacket
+//
+// A core that brings its own network (ADR 0036): dosbox-pure's emulated IPX
+// driver and modem. Under `SET_NETPACKET_INTERFACE` (78) the core hands over
+// a struct of callbacks and the frontend owns the connections; the core
+// sends its own bytes through `send_fn` and is handed the other machines'
+// through `receive`. The frontend carries bytes and nothing else, which is
+// what keeps every player on their own emulated machine (invariant 7).
+
+type NetSendFn = unsafe extern "C" fn(c_int, *const c_void, usize, u16);
+type NetPollReceiveFn = unsafe extern "C" fn();
+
+/// `struct retro_netpacket_callback`, field for field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NetpacketCallback {
+    start: Option<unsafe extern "C" fn(u16, NetSendFn, NetPollReceiveFn)>,
+    receive: Option<unsafe extern "C" fn(*const c_void, usize, u16)>,
+    stop: Option<unsafe extern "C" fn()>,
+    poll: Option<unsafe extern "C" fn()>,
+    connected: Option<unsafe extern "C" fn(u16) -> bool>,
+    disconnected: Option<unsafe extern "C" fn(u16)>,
+    protocol_version: *const c_char,
+}
+
+// The struct holds a pointer into the core, read once at registration and
+// never dereferenced after the core is gone.
+unsafe impl Send for NetpacketCallback {}
+
+static NETPACKET: Mutex<Option<NetpacketCallback>> = Mutex::new(None);
+/// Set once `start` has been called on the core, so `stop` is owed.
+static NET_STARTED: AtomicU32 = AtomicU32::new(0);
+/// What the core asked to send since the last drain: client id, flags, bytes.
+static NET_OUTBOX: Mutex<Vec<(u16, c_int, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// `RETRO_NETPACKET_BROADCAST`: every other client.
+pub const NETPACKET_BROADCAST: u16 = 0xFFFF;
+/// `RETRO_NETPACKET_RELIABLE`: must arrive, in order.
+pub const NETPACKET_RELIABLE: c_int = 1;
+
+unsafe extern "C" fn cb_netpacket_send(flags: c_int, buf: *const c_void, len: usize, client_id: u16) {
+    if buf.is_null() || len == 0 {
+        return;
+    }
+    let bytes = std::slice::from_raw_parts(buf as *const u8, len).to_vec();
+    lock(&NET_OUTBOX).push((client_id, flags, bytes));
+}
+
+unsafe extern "C" fn cb_netpacket_poll_receive() {
+    // Everything that arrived is delivered before the frame; nothing to do.
+}
+
+/// Whether the core registered a network of its own.
+pub fn netpacket_supported() -> bool {
+    lock(&NETPACKET).is_some()
+}
+
+/// The protocol version the core named, if it named one: what two machines
+/// must agree on before their cores talk.
+pub fn netpacket_protocol() -> Option<String> {
+    let cb = (*lock(&NETPACKET))?;
+    if cb.protocol_version.is_null() {
+        return None;
+    }
+    Some(unsafe { cstr(cb.protocol_version) })
+}
+
+/// Join the session as `client_id`: 0 hosts, in the sense the game's own
+/// netcode gives the word. `false` if the core registered no network.
+pub fn netpacket_start(client_id: u16) -> bool {
+    let Some(cb) = *lock(&NETPACKET) else { return false };
+    let Some(start) = cb.start else { return false };
+    unsafe { start(client_id, cb_netpacket_send, cb_netpacket_poll_receive) };
+    NET_STARTED.store(1, Ordering::Relaxed);
+    true
+}
+
+/// Bytes another client's machine sent this one.
+pub fn netpacket_receive(bytes: &[u8], client_id: u16) {
+    let cb = *lock(&NETPACKET);
+    if let Some(receive) = cb.and_then(|c| c.receive) {
+        unsafe { receive(bytes.as_ptr() as *const c_void, bytes.len(), client_id) };
+    }
+}
+
+/// The frontend's turn to say the session has ended.
+pub fn netpacket_stop() {
+    if NET_STARTED.swap(0, Ordering::Relaxed) == 0 {
+        return;
+    }
+    let cb = *lock(&NETPACKET);
+    if let Some(stop) = cb.and_then(|c| c.stop) {
+        unsafe { stop() };
+    }
+}
+
+/// The core's own look at its queues, once a frame.
+pub fn netpacket_poll() {
+    let cb = *lock(&NETPACKET);
+    if let Some(poll) = cb.and_then(|c| c.poll) {
+        unsafe { poll() };
+    }
+}
+
+/// Another client joined (the host hears this). The core may refuse it.
+pub fn netpacket_connected(client_id: u16) -> bool {
+    let cb = *lock(&NETPACKET);
+    match cb.and_then(|c| c.connected) {
+        Some(connected) => unsafe { connected(client_id) },
+        None => true,
+    }
+}
+
+pub fn netpacket_disconnected(client_id: u16) {
+    let cb = *lock(&NETPACKET);
+    if let Some(disconnected) = cb.and_then(|c| c.disconnected) {
+        unsafe { disconnected(client_id) };
+    }
+}
+
+/// Everything the core asked to send since the last call.
+pub fn netpacket_outgoing() -> Vec<(u16, c_int, Vec<u8>)> {
+    std::mem::take(&mut *lock(&NET_OUTBOX))
+}
 
 /// This frame's mouse motion, in host pixels, and its held buttons as a bitmask
 /// indexed by the `MOUSE_*` ids. Latched once per frame by [`set_mouse`], so a
@@ -938,7 +1140,7 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            *(data as *mut c_uint) = 1; // port 0 only; one local player
+            *(data as *mut c_uint) = PORTS.load(Ordering::Relaxed);
             true
         }
         ENV_GET_INPUT_DEVICE_CAPABILITIES => {
@@ -955,8 +1157,12 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             }
             // Bit 0 video, bit 1 audio. A headless run still wants video: the
             // framebuffer is what a spectator gets (ADR 0003) and what a
-            // screenshot is taken from.
-            *(data as *mut c_uint) = 0b11;
+            // screenshot is taken from. A replayed frame wants no picture —
+            // and still wants the audio *emulated*: bit 3, HARD_DISABLE_AUDIO,
+            // lets a core skip the work, and the state it leaves behind would
+            // then differ from the other machine's (ADR 0036). The samples are
+            // dropped in the callbacks instead.
+            *(data as *mut c_uint) = if replaying() { 0b10 } else { 0b11 };
             true
         }
         ENV_GET_FASTFORWARDING => {
@@ -1007,7 +1213,24 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            *(data as *mut c_uint) = 0; // RETRO_SAVESTATE_CONTEXT_NORMAL
+            *(data as *mut c_uint) = SAVESTATE_CONTEXT.load(Ordering::Relaxed);
+            true
+        }
+        // The core says how far its serialization can be trusted; the
+        // frontend answers with the flags it supports. A core that calls its
+        // own state incomplete cannot host a bout (ADR 0036), and the runner
+        // reads that here.
+        ENV_SET_SERIALIZATION_QUIRKS => {
+            if data.is_null() {
+                return false;
+            }
+            let quirks = *(data as *mut u64);
+            SERIALIZATION_QUIRKS.store(quirks, Ordering::Relaxed);
+            let mut answer = quirks;
+            if quirks & QUIRK_CORE_VARIABLE_SIZE != 0 {
+                answer |= QUIRK_FRONT_VARIABLE_SIZE;
+            }
+            *(data as *mut u64) = answer;
             true
         }
         ENV_GET_USERNAME => {
@@ -1103,6 +1326,22 @@ unsafe extern "C" fn cb_environment(cmd: u32, data: *mut c_void) -> bool {
                 return false;
             }
             *lock(&KEYBOARD_CB) = (*(data as *const KeyboardCallback)).callback;
+            true
+        }
+        // The core brings its own network (ADR 0036): the frontend will carry
+        // its packets, and nothing else, between the players' machines.
+        ENV_SET_NETPACKET_INTERFACE => {
+            if data.is_null() {
+                return false;
+            }
+            let cb = *(data as *const NetpacketCallback);
+            *lock(&NETPACKET) = Some(cb);
+            let protocol = if cb.protocol_version.is_null() {
+                "the core version".to_string()
+            } else {
+                cstr(cb.protocol_version)
+            };
+            println!("[net]  the core brings its own network (netpacket interface, protocol {protocol})");
             true
         }
         // A core-supplied status line. Worth surfacing: it is where dosbox-pure
@@ -1220,6 +1459,10 @@ unsafe extern "C" fn cb_video_refresh(data: *const c_void, width: u32, height: u
     if data.is_null() || width == 0 || height == 0 {
         return;
     }
+    // A replayed frame was seen already (ADR 0036).
+    if replaying() {
+        return;
+    }
     let (w, h) = (width as usize, height as usize);
     let fmt = PIXEL_FORMAT.load(Ordering::Relaxed);
 
@@ -1285,6 +1528,9 @@ fn push_sample(ring: &mut AudioRing, left: f32, right: f32) {
 }
 
 unsafe extern "C" fn cb_audio_sample(left: i16, right: i16) {
+    if replaying() {
+        return;
+    }
     if let Some(tap) = lock(&AUDIO_TAP).as_mut() {
         if tap.len() < AUDIO_TAP_CAP {
             tap.push(left);
@@ -1299,7 +1545,7 @@ unsafe extern "C" fn cb_audio_sample(left: i16, right: i16) {
 }
 
 unsafe extern "C" fn cb_audio_sample_batch(data: *const i16, frames: usize) -> usize {
-    if data.is_null() {
+    if data.is_null() || replaying() {
         return frames;
     }
     if let Some(tap) = lock(&AUDIO_TAP).as_mut() {
@@ -1331,12 +1577,17 @@ unsafe extern "C" fn cb_input_poll() {
 }
 
 unsafe extern "C" fn cb_input_state(port: u32, device: u32, _index: u32, id: u32) -> i16 {
-    if port != 0 {
+    if port >= PORTS.load(Ordering::Relaxed) {
+        return 0;
+    }
+    // A keyboard and a mouse are port 0's only; a shared machine's other
+    // ports carry pads (ADR 0036).
+    if port != 0 && device & RETRO_DEVICE_MASK != RETRO_DEVICE_JOYPAD {
         return 0;
     }
     match device & RETRO_DEVICE_MASK {
         RETRO_DEVICE_JOYPAD => {
-            let bits = JOYPAD.load(Ordering::Relaxed);
+            let bits = joypad(port);
             if id == JOY_MASK {
                 return bits as i16;
             }
@@ -1429,6 +1680,14 @@ impl Core {
         *lock(&KEYBOARD_CB) = None;
         SHUTDOWN.store(0, Ordering::Relaxed);
         VARIABLES_DIRTY.store(1, Ordering::Relaxed);
+        PORTS.store(1, Ordering::Relaxed);
+        REPLAYING.store(0, Ordering::Relaxed);
+        SAVESTATE_CONTEXT.store(0, Ordering::Relaxed);
+        SERIALIZATION_QUIRKS.store(0, Ordering::Relaxed);
+        *lock(&NETPACKET) = None;
+        NET_STARTED.store(0, Ordering::Relaxed);
+        lock(&NET_OUTBOX).clear();
+        pads_clear();
 
         let lib = unsafe { Library::new(path) }
             .map_err(|e| format!("cannot load core {}: {e}", path.display()))?;
@@ -1588,7 +1847,18 @@ impl Core {
         }
         self.game_loaded = true;
         unsafe { (self.fn_set_controller_port_device)(0, device) };
+        PORTS.store(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Plug `ports` pads, port 0 first: a shared machine seats one player per
+    /// port (ADR 0036). Port 0 keeps whatever device it was loaded with.
+    pub fn plug_ports(&mut self, ports: u8) {
+        let ports = ports.clamp(1, MAX_PORTS);
+        for p in 1..ports {
+            unsafe { (self.fn_set_controller_port_device)(u32::from(p), RETRO_DEVICE_JOYPAD) };
+        }
+        PORTS.store(u32::from(ports), Ordering::Relaxed);
     }
 
     /// Unload and reload the same content, giving a core the closest thing to a
@@ -1603,7 +1873,7 @@ impl Core {
             self.game_loaded = false;
         }
         keys_clear();
-        JOYPAD.store(0, Ordering::Relaxed);
+        pads_clear();
         self.load_game(rom_path, rom, device)
     }
 
@@ -1698,6 +1968,8 @@ impl Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // A session the core was told had started is told it has ended.
+        netpacket_stop();
         unsafe {
             if self.game_loaded {
                 (self.fn_unload_game)();

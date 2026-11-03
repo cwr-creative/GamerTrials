@@ -27,6 +27,10 @@ content-gen = { path = "../content-gen" }
 # run is the mistake ADR 0017 exists to prevent. The dependency points the
 # allowed way: core still knows nothing of this crate (invariant 1).
 challenge-core = { path = "../challenge-core" }
+# For the harness binary only, likewise: `--synctest` proves a core rolls
+# back exactly by driving the runner through the bout session with no network
+# (ADR 0036). The library half must never use it.
+head-to-head = { path = "../head-to-head" }
 
 libloading = "0.8"   # load the libretro core ourselves (ADR 0001)
 # Window + framebuffer blit + keyboard. X11 only on Linux, never Wayland: the

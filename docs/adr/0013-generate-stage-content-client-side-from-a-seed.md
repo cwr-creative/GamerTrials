@@ -1,7 +1,7 @@
 # 0013. Generate stage content on each client from a server-issued seed
 
 Date: 2026-08-20
-Status: Proposed
+Status: Accepted
 
 ## Context
 

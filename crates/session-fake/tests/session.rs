@@ -140,6 +140,7 @@ fn steady(c: &ChallengeSpec) -> Vec<Attempt> {
             Attempt::meeting(&c.complete_when, at_least(c, 900)),
         ],
         ChallengeKind::Survival => vec![Attempt::meeting(&c.complete_when, at_least(c, 1200))],
+        ChallengeKind::HeadToHead => unreachable!("a bout is not played on a runner of one"),
     }
 }
 
@@ -153,6 +154,7 @@ fn reckless(c: &ChallengeSpec) -> Vec<Attempt> {
             Attempt::new(),
         ],
         ChallengeKind::Survival => vec![Attempt::new().died(50)],
+        ChallengeKind::HeadToHead => unreachable!("a bout is not played on a runner of one"),
     }
 }
 
@@ -177,7 +179,9 @@ fn library() -> Vec<ChallengeSpec> {
         if path.extension().is_some_and(|e| e == "toml") {
             let text = fs::read_to_string(&path).unwrap();
             let lib = Library::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            specs.extend(lib.specs());
+            // A bout is not played on a runner of one; the lobby deals one
+            // only by its own toggle (ADR 0036). These tests are solo runs.
+            specs.extend(lib.specs().into_iter().filter(|c| c.kind != ChallengeKind::HeadToHead));
         }
     }
     assert!(!specs.is_empty(), "no manifests in {}", dir.display());
@@ -193,6 +197,7 @@ fn challenge(kind: ChallengeKind, complete_when: Completion) -> ChallengeSpec {
         kind,
         complete_when,
         ends_attempt_on: Default::default(),
+        slots: 1,
     }
 }
 
@@ -243,6 +248,7 @@ fn a_dealt_session_places_every_player_on_every_challenge() {
                 assert_eq!(places, [1, 1, 3], "{}", c.id);
                 assert_eq!(outcome.result("reckless").ending, Ending::Failed(AttemptEnd::Died));
             }
+            ChallengeKind::HeadToHead => unreachable!("no manifest deals a bout here"),
         }
     }
 }

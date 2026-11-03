@@ -441,3 +441,56 @@ keep an eye on:
 4. **Take the last hit** and confirm the death frame reports `died` and not
    `damaged` — the `unless = ["death"]` guard is what stops both, and it is the
    one rule here whose interaction has not been watched live.
+
+## Deathmatch over the emulated network (ADR 0036)
+
+Doom brings its own netcode: two DOS machines on IPX, in lockstep, each a
+node of one game. dosbox-pure emulates the IPX driver and hands its packets
+to the frontend under the libretro netpacket interface, which
+`session-libretro` answers and the `head-to-head` crate carries between the
+two players over UDP (`Networked`, `Relay`). Nothing is rolled back: a late
+packet costs what Doom says it costs, a stall, and an internet bout wants a
+short round trip. The manifest says `netplay = "packets"`.
+
+It is a game of its own, `manifests/doom2.toml`, on a bundle of its own,
+`assets/ROMs/dos/doom2-dm.zip`: the shareware 1.9 `DOOM.EXE`, which boots
+the full `DOOM2.WAD` into MAP01 unchanged and at the same addresses, id's
+`IPXSETUP.EXE` from the same `doom19s` distribution, `DEFAULT.CFG`, and a
+`dosbox.conf` of
+
+```
+[ipx]
+ipx=true
+
+[autoexec]
+C:
+IPXSETUP -nodes 2 -deathmatch -nomonsters -warp 1
+```
+
+so that both machines boot into IPXSETUP and wait for each other. The
+entry is `named`: the netpacket contract forbids restoring a state while
+connected, so a bout starts with a cold boot, about 1100 frames, and the
+game itself starts only after `Go`, when the packets begin to flow and
+IPXSETUP finds its second node. The client joins the core's network before
+the boot, since dosbox-pure resets a game it finds running when the network
+comes up early, and `[ipx] ipx=true` has the driver there from the start.
+The bundle is built, not shipped: it carries the commercial WAD.
+
+Doom's lockstep simulates every player on every machine, so the facts are
+per slot as on a rolled-back machine, not the local player's alone:
+`players[0]` is slot 0 and `players[1]`, one `player_t` (0x118) after it,
+slot 1. A player's frags are the entry in their `frags[]` for the other
+player (`players[0].frags[1]` at 0x389EDC, `players[1].frags[0]` at
+0x389FF0); a suicide lands in `frags[self]` and counts for nobody. Health
+and `playerstate` per slot give `damaged` and `died`, a death being a
+respawn here.
+
+The first deathmatch, two clients on one machine through the server with
+`--script` pressing keys: both booted, joined, found each other through the
+rendezvous and the hello, said prepared; after `Go` the level started on
+both with both players at full health; one player died to a barrel at
+frame 4117 on one machine and 4116 on the other — each machine's frames
+count from its own boot, and the game begins at a moment of wall-clock, so
+the same fact can sit a frame apart — and nobody fragged anybody in 150
+seconds of random keys, so both timed out and the round was a draw, agreed
+by both clients and the server.

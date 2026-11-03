@@ -23,7 +23,7 @@ if (-not $SkipBuild) {
 }
 
 $commit = (git rev-parse --short HEAD).Trim()
-if (git status --porcelain) { $commit = "$commit-dirty" }
+if (git status --porcelain --untracked-files=no) { $commit = "$commit-dirty" }
 $name = "GamerTrials-$commit"
 $dist = Join-Path $root 'dist'
 $out = Join-Path $dist $name
@@ -174,8 +174,22 @@ Set-Content -Encoding ascii (Join-Path $out 'README.txt') @(
     '3. Join game takes the invite the host sends: host[:port]/CODE.'
     ''
     'To host a server on this machine, run "Start server.cmd" and forward TCP'
-    '7878 to it. Every player must run the same build: a client whose manifests'
-    'hash differently from the server''s is refused, and says which hash it holds.'
+    '7878 and UDP 7878 to it: the lobby and the match ride the TCP port, and a'
+    'head-to-head bout probes the UDP one so the two players can find each'
+    'other and then play directly.'
+    ''
+    'The players then talk directly on the bout port, UDP 7879 (Settings >'
+    'Profile). Forward UDP 7879 to this machine too if your opponent plays from'
+    'a phone or behind a VPN: one side of every pair must be reachable, and'
+    'two that both cannot be reached cannot play a bout.'
+    ''
+    'Every player must run the same build: a'
+    'client whose manifests hash differently from the server''s is refused,'
+    'and says which hash it holds.'
+    ''
+    'A head-to-head bout is dealt only when the host ticks "Allow head-to-head'
+    'challenges" in the lobby and at least two players are in; the Street'
+    'Fighter II dump is the one it needs.'
     ''
     'Input replay (replay-spike.md): Record.cmd records a played run, Record'
     'scripted.cmd records one of each game with nobody playing, and Replay.cmd'

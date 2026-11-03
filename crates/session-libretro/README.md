@@ -66,6 +66,12 @@ is the other half of the work: checking that an address is the right address.
   The id is required: a manifest may declare a base ROM and hacks of it
 - `--frames 600` — run headless and print what fired. Same frame numbers as on
   screen, because they are emulated frames (ADR 0005)
+- `--synctest 1800 --slots 2` — prove the core rolls back exactly (ADR 0036):
+  run headless through a rollback session with no network, which restores and
+  replays `--check` frames (default 3) on every advance and compares checksums
+  over system RAM and the watcher. Scripted input on every slot from `--script`;
+  `--digest-log` writes a checksum a frame, so two machines can be diffed. Exits
+  2 on a mismatch. Run it before a manifest says `netplay = "rollback"`.
 - `--capture <PATH>` — write a savestate where a `--frames` run ended. With a
   `named` entry point that is the whole authoring loop in one command
 - F3-F8/F10 hunt for a value that persists; F11 reports what a one-shot event

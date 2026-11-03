@@ -13,14 +13,22 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
-use challenge_core::{Deal, Entry, Match, Next, Run, RunResult, Settings};
+use challenge_core::{Bout, Deal, Entry, Match, Next, Run, RunResult, Settings};
 use challenge_library::{Catalog, Challenge, Library};
 use protocol::{
-    ChallengeRef, FileReport, LobbyPlayer, LobbySettings, LobbyState, RunOutcome, ToClient,
-    ToServer,
+    ChallengeRef, FileReport, LobbyPlayer, LobbySettings, LobbyState, Peer, RunOutcome,
+    ToClient, ToServer,
 };
-use session_api::PlayerId;
+use session_api::{PlayerId, Slot};
+
+/// How long the players not seated in a bout have to back a slot before
+/// one is assigned to them (ADR 0036).
+pub const BACKING_SECONDS: u32 = 15;
+/// After a seated player reports its link lost, how long the server waits
+/// for the other side's own report or give-up before calling the bout.
+pub const LOST_GRACE: Duration = Duration::from_secs(2);
 
 /// One connection, as the transport names it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -36,23 +44,44 @@ struct Seat {
     files: Option<FileReport>,
 }
 
+/// Where a seated player's machine can be reached, as it comes in.
+#[derive(Default)]
+struct Endpoint {
+    token: Option<u64>,
+    local: Option<String>,
+    public: Option<String>,
+}
+
 struct SeatRun {
-    run: Run,
+    /// This player's own run. `None` in a bout, where the [`Bout`] holds it.
+    run: Option<Run>,
     artifact: Option<String>,
     /// The server's verdict.
     verdict: Option<RunResult>,
     /// The client's provisional one, to be checked against the verdict.
     claimed: Option<RunOutcome>,
+    /// Bout: the player said its link died on this frame. No claim will
+    /// come; the server's ruling stands alone.
+    lost: Option<u64>,
+    endpoint: Endpoint,
 }
 
 struct RoundState {
     deal: Deal,
+    /// One per seated player: everyone, or a bout's slots.
     seats: BTreeMap<PlayerId, SeatRun>,
+    /// The judge of a head-to-head round (ADR 0036).
+    bout: Option<Bout>,
     /// `Go` has been sent: runs are live.
     started: bool,
     /// Who watches whom (ADR 0032). Dropped with the round, so nothing is
     /// watched across one.
     watching: BTreeMap<PlayerId, PlayerId>,
+    /// When the deal was first seen by the clock, for the backing window.
+    dealt_at: Option<Instant>,
+    peers_sent: bool,
+    /// When the first lost link was first seen by the clock.
+    lost_at: Option<Instant>,
 }
 
 struct Live {
@@ -72,6 +101,11 @@ pub struct Server {
     /// The seed the next match takes. Stepped after each.
     seed: u64,
     live: Option<Live>,
+    /// Where a head-to-head player's probes go, told at hello. `None` when
+    /// this server has no UDP side and deals no bouts.
+    rendezvous: Option<String>,
+    /// Probes seen before the `Endpoint` naming their token arrived.
+    probes: BTreeMap<u64, String>,
 }
 
 impl Server {
@@ -92,7 +126,16 @@ impl Server {
             next_conn: 1,
             seed,
             live: None,
+            rendezvous: None,
+            probes: BTreeMap::new(),
         }
+    }
+
+    /// Where head-to-head probes go (ADR 0036): `host:port`, or `:port` for
+    /// this connection's own host. Without one, no bout is dealable.
+    pub fn with_rendezvous(mut self, addr: impl Into<String>) -> Server {
+        self.rendezvous = Some(addr.into());
+        self
     }
 
     pub fn library_hash(&self) -> String {
@@ -165,6 +208,18 @@ impl Server {
             ToServer::Forfeit { round, frame } => {
                 let player = self.seats[seat].id.clone();
                 self.forfeit(conn, player, round, frame)
+            }
+            ToServer::Back { round, player: target } => {
+                let player = self.seats[seat].id.clone();
+                self.back(conn, player, round, PlayerId(target))
+            }
+            ToServer::Endpoint { round, token, local } => {
+                let player = self.seats[seat].id.clone();
+                self.endpoint(player, round, token, local)
+            }
+            ToServer::PeerLost { round, frame } => {
+                let player = self.seats[seat].id.clone();
+                self.peer_lost(conn, player, round, frame)
             }
             ToServer::Watch { round, player: target } => {
                 let player = self.seats[seat].id.clone();
@@ -240,7 +295,10 @@ impl Server {
         }
         self.seats.push(Seat { conn, id: PlayerId(id.clone()), name, files: None });
         let lobby = self.lobby_state();
-        let mut out = vec![(conn, ToClient::Welcome { player: id, lobby: lobby.clone() })];
+        let mut out = vec![(
+            conn,
+            ToClient::Welcome { player: id, lobby: lobby.clone(), rendezvous: self.rendezvous.clone() },
+        )];
         for s in &self.seats {
             if s.conn != conn {
                 out.push((s.conn, ToClient::Lobby(lobby.clone())));
@@ -249,14 +307,17 @@ impl Server {
         out
     }
 
+    /// Whether the settings, and for a bout the lobby, admit `c`: the mode;
+    /// the custom toggle; and for a head-to-head challenge the toggle, a
+    /// rendezvous to broker it with, and enough players to fill its slots
+    /// (ADR 0036).
     fn admits(&self, c: &Challenge) -> bool {
         let mode: challenge_core::Mode = self.settings.mode.into();
-        let kind_ok = match mode {
-            challenge_core::Mode::TimeTrial => c.kind == session_api::ChallengeKind::TimeTrial,
-            challenge_core::Mode::Survival => c.kind == session_api::ChallengeKind::Survival,
-            challenge_core::Mode::Both => true,
-        };
-        kind_ok && (self.settings.allow_custom || !c.is_custom())
+        let bout_ok = !c.is_head_to_head()
+            || (self.settings.allow_head_to_head
+                && self.rendezvous.is_some()
+                && self.seats.len() >= usize::from(c.slots));
+        mode.admits(c.kind) && (self.settings.allow_custom || !c.is_custom()) && bout_ok
     }
 
     /// Games some player cannot run.
@@ -383,17 +444,36 @@ impl Server {
             }
             Some(deal) => {
                 let mut seats = BTreeMap::new();
-                for p in live.m.active() {
-                    let run = match Run::new(deal.challenge.clone()) {
-                        Ok(r) => r.with_limit(deal.limit),
+                let bout = if deal.is_bout() {
+                    match Bout::new(deal.challenge.clone(), Some(deal.limit)) {
+                        Ok(b) => Some(b),
                         Err(e) => return self.fail(e.to_string()),
+                    }
+                } else {
+                    None
+                };
+                for p in &deal.slots {
+                    let run = if bout.is_some() {
+                        None
+                    } else {
+                        match Run::new(deal.challenge.clone()) {
+                            Ok(r) => Some(r.with_limit(deal.limit)),
+                            Err(e) => return self.fail(e.to_string()),
+                        }
                     };
                     seats.insert(
                         p.clone(),
-                        SeatRun { run, artifact: None, verdict: None, claimed: None },
+                        SeatRun {
+                            run,
+                            artifact: None,
+                            verdict: None,
+                            claimed: None,
+                            lost: None,
+                            endpoint: Endpoint::default(),
+                        },
                     );
                 }
-                let players: Vec<String> = seats.keys().map(|p| p.0.clone()).collect();
+                let players: Vec<String> = deal.slots.iter().map(|p| p.0.clone()).collect();
                 let msg = ToClient::Dealt {
                     round: deal.index,
                     challenge: ChallengeRef {
@@ -404,11 +484,221 @@ impl Server {
                     seed: deal.seed,
                     limit_frames: deal.limit,
                     players,
+                    backing_seconds: bout.as_ref().map(|_| BACKING_SECONDS),
                 };
-                live.round = Some(RoundState { deal, seats, started: false, watching: BTreeMap::new() });
+                live.round = Some(RoundState {
+                    deal,
+                    seats,
+                    bout,
+                    started: false,
+                    watching: BTreeMap::new(),
+                    dealt_at: None,
+                    peers_sent: false,
+                    lost_at: None,
+                });
+                self.probes.clear();
                 self.broadcast(msg)
             }
         }
+    }
+
+    /// The pending round's slot for `player`, if seated in it.
+    fn slot_of(rs: &RoundState, player: &PlayerId) -> Option<Slot> {
+        rs.deal.slots.iter().position(|p| p == player).map(|i| Slot(i as u8))
+    }
+
+    // ------------------------------------------------------------ head-to-head
+
+    /// A player not seated in the bout backs `target`, who is (ADR 0036).
+    fn back(&mut self, conn: ConnId, player: PlayerId, round: u64, target: PlayerId) -> Outbox {
+        let Some(live) = self.live.as_mut() else { return Vec::new() };
+        let pending = live.round.as_ref().is_some_and(|r| r.deal.index == round && !r.started);
+        if !pending {
+            return vec![(conn, ToClient::Refused { reason: "the round is not open for backing".into() })];
+        }
+        if let Err(e) = live.m.back(player, target) {
+            return vec![(conn, ToClient::Refused { reason: e.to_string() })];
+        }
+        let mut out = self.sides();
+        out.extend(self.maybe_go());
+        out
+    }
+
+    fn sides(&self) -> Outbox {
+        let Some(live) = self.live.as_ref() else { return Vec::new() };
+        let Some(rs) = live.round.as_ref() else { return Vec::new() };
+        let backing = live.m.backing().iter().map(|(b, t)| (b.0.clone(), t.0.clone())).collect();
+        self.broadcast(ToClient::Sides { round: rs.deal.index, backing })
+    }
+
+    /// A seated player says where its machine is: the token its probes
+    /// carry and its own address.
+    fn endpoint(&mut self, player: PlayerId, round: u64, token: u64, local: String) -> Outbox {
+        let public = self.probes.remove(&token);
+        let Some(seat) = self.seat_run(round, &player) else { return Vec::new() };
+        seat.endpoint.token = Some(token);
+        seat.endpoint.local = Some(local);
+        if public.is_some() {
+            seat.endpoint.public = public;
+        }
+        self.maybe_peers()
+    }
+
+    /// A probe carrying `token` reached the server's UDP side from `addr`.
+    /// Not a protocol message: whoever owns the socket calls this.
+    pub fn observed(&mut self, token: u64, addr: String) -> Outbox {
+        let seat = self
+            .live
+            .as_mut()
+            .and_then(|l| l.round.as_mut())
+            .and_then(|rs| rs.seats.values_mut().find(|s| s.endpoint.token == Some(token)));
+        match seat {
+            Some(seat) => {
+                seat.endpoint.public = Some(addr);
+                self.maybe_peers()
+            }
+            None => {
+                // Keep a few: the `Endpoint` naming this token may be on its way.
+                if self.probes.len() < 64 {
+                    self.probes.insert(token, addr);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// Once every seated player's machine is known, every seated player
+    /// hears where the others are.
+    fn maybe_peers(&mut self) -> Outbox {
+        let Some(rs) = self.live.as_mut().and_then(|l| l.round.as_mut()) else { return Vec::new() };
+        if rs.bout.is_none() || rs.peers_sent {
+            return Vec::new();
+        }
+        let known = rs
+            .seats
+            .values()
+            .all(|s| s.endpoint.local.is_some() && s.endpoint.public.is_some());
+        if !known {
+            return Vec::new();
+        }
+        rs.peers_sent = true;
+        let round = rs.deal.index;
+        let peers: Vec<Peer> = rs
+            .deal
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let e = &rs.seats[p].endpoint;
+                let mut candidates = vec![e.local.clone().unwrap()];
+                let public = e.public.clone().unwrap();
+                if !candidates.contains(&public) {
+                    candidates.push(public);
+                }
+                Peer { player: p.0.clone(), slot: i as u8, candidates }
+            })
+            .collect();
+        let msg = ToClient::Peers { round, peers };
+        self.seats
+            .iter()
+            .filter(|s| rs_seated(self.live.as_ref().unwrap().round.as_ref().unwrap(), &s.id))
+            .map(|s| (s.conn, msg.clone()))
+            .collect()
+    }
+
+    /// `Go`, once every seated player is prepared on one artifact and, for
+    /// a bout, every backer has picked or the window has closed.
+    fn maybe_go(&mut self) -> Outbox {
+        let Some(live) = self.live.as_mut() else { return Vec::new() };
+        let Some(rs) = live.round.as_mut() else { return Vec::new() };
+        if rs.started || rs.seats.values().any(|s| s.artifact.is_none()) {
+            return Vec::new();
+        }
+        if rs.bout.is_some() && !live.m.unbacked().is_empty() {
+            return Vec::new();
+        }
+        rs.started = true;
+        let round = rs.deal.index;
+        match rs.bout.as_mut() {
+            Some(b) => b.enter(),
+            None => {
+                for s in rs.seats.values_mut() {
+                    if let Some(run) = s.run.as_mut() {
+                        run.enter();
+                    }
+                }
+            }
+        }
+        self.broadcast(ToClient::Go { round })
+    }
+
+    /// The clock, from whoever drives this server: closes a bout's backing
+    /// window and calls a bout whose link died. Nothing a player did is
+    /// measured against it (ADR 0005).
+    pub fn tick(&mut self, now: Instant) -> Outbox {
+        let Some(live) = self.live.as_mut() else { return Vec::new() };
+        let Some(rs) = live.round.as_mut() else { return Vec::new() };
+        if rs.bout.is_none() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let dealt_at = *rs.dealt_at.get_or_insert(now);
+        if !rs.started
+            && now.duration_since(dealt_at) >= Duration::from_secs(u64::from(BACKING_SECONDS))
+            && !live.m.unbacked().is_empty()
+        {
+            let seed = step(self.seed ^ rs.deal.index);
+            live.m.assign_backers(seed);
+            out.extend(self.sides());
+            out.extend(self.maybe_go());
+        }
+        let Some(live) = self.live.as_mut() else { return out };
+        let Some(rs) = live.round.as_mut() else { return out };
+        if rs.seats.values().any(|s| s.lost.is_some() && s.verdict.is_none()) {
+            let lost_at = *rs.lost_at.get_or_insert(now);
+            if now.duration_since(lost_at) >= LOST_GRACE {
+                let verdicts = rs.bout.as_mut().map(|b| b.abandon()).unwrap_or_default();
+                let round = rs.deal.index;
+                out.extend(self.settle(round, verdicts));
+            }
+        }
+        out
+    }
+
+    /// A seated player's link to the other slots died on its side.
+    fn peer_lost(&mut self, conn: ConnId, player: PlayerId, round: u64, frame: u64) -> Outbox {
+        let Some(rs) = self.live.as_mut().and_then(|l| l.round.as_mut()) else { return Vec::new() };
+        if rs.deal.index != round || !rs.started {
+            return vec![(conn, ToClient::Refused { reason: "no round is live".into() })];
+        }
+        let Some(slot) = Server::slot_of(rs, &player) else { return Vec::new() };
+        let seat = rs.seats.get_mut(&player).expect("seated");
+        if seat.verdict.is_some() {
+            return Vec::new();
+        }
+        seat.lost = Some(frame);
+        let verdicts = rs.bout.as_mut().map(|b| b.lost(slot, frame)).unwrap_or_default();
+        self.settle(round, verdicts)
+    }
+
+    /// Verdicts a bout settled: each is its player's, announced, and the
+    /// round recorded once every slot has one.
+    fn settle(&mut self, round: u64, verdicts: Vec<(Slot, RunResult)>) -> Outbox {
+        let mut out = Vec::new();
+        for (slot, result) in verdicts {
+            let Some(rs) = self.live.as_mut().and_then(|l| l.round.as_mut()) else { break };
+            let player = rs.deal.slots[usize::from(slot.0)].clone();
+            if let Some(seat) = rs.seats.get_mut(&player) {
+                seat.verdict = Some(result.clone());
+            }
+            out.extend(self.broadcast(ToClient::PlayerFinished {
+                round,
+                player: player.0,
+                outcome: (&result).into(),
+            }));
+        }
+        out.extend(self.maybe_record());
+        out
     }
 
     /// The seat's run in the pending round, if the message is for that round
@@ -439,12 +729,7 @@ impl Server {
             return self.fail(format!("artifact hashes differ: {}", list.join(", ")));
         }
         let _ = conn;
-        let rs = self.live.as_mut().unwrap().round.as_mut().unwrap();
-        rs.started = true;
-        for s in rs.seats.values_mut() {
-            s.run.enter();
-        }
-        self.broadcast(ToClient::Go { round })
+        self.maybe_go()
     }
 
     /// A player cannot run the round. Nobody plays it, its challenge is
@@ -486,18 +771,36 @@ impl Server {
         if !started {
             return vec![(conn, ToClient::Refused { reason: "no round is live".into() })];
         }
-        let Some(seat) = self.seat_run(round, &player) else { return Vec::new() };
-        if seat.verdict.is_some() {
+        let rs = self.live.as_mut().unwrap().round.as_mut().unwrap();
+        let Some(slot) = Server::slot_of(rs, &player) else { return Vec::new() };
+        let seat = rs.seats.get_mut(&player).expect("seated");
+        if seat.verdict.is_some() || seat.lost.is_some() {
             return Vec::new();
         }
         let session: Vec<_> = events.iter().map(|e| e.to_session()).collect();
-        let next = seat.run.observe(frame, &session);
-        if matches!(next, Next::Reenter) {
-            seat.run.enter();
-        }
+        // A bout settles in frame order across every slot (ADR 0036); a run
+        // of one settles itself.
+        let (settled, attempt, clock) = match (rs.bout.as_mut(), seat.run.as_mut()) {
+            (Some(b), _) => {
+                let v = b.observe(slot, frame, &session);
+                let run = b.run(slot);
+                (v, run.attempts(), run.frames())
+            }
+            (None, Some(run)) => {
+                let next = run.observe(frame, &session);
+                if matches!(next, Next::Reenter) {
+                    run.enter();
+                }
+                let settled = match next {
+                    Next::Finished(r) => vec![(slot, r)],
+                    _ => Vec::new(),
+                };
+                (settled, run.attempts(), run.frames())
+            }
+            (None, None) => unreachable!("a seat without a bout has a run"),
+        };
         // Whoever watches hears where the run stands, in a few bytes that
         // reach them when the picture cannot (ADR 0034).
-        let (attempt, clock) = (seat.run.attempts(), seat.run.frames());
         let mut out = self.relay(&player, round, |p| ToClient::Progress {
             round,
             player: p,
@@ -506,21 +809,10 @@ impl Server {
             clock,
             events: events.clone(),
         });
-        match next {
-            Next::Continue | Next::Reenter => out,
-            Next::Finished(result) => {
-                if let Some(seat) = self.seat_run(round, &player) {
-                    seat.verdict = Some(result.clone());
-                }
-                out.extend(self.broadcast(ToClient::PlayerFinished {
-                    round,
-                    player: player.0.clone(),
-                    outcome: (&result).into(),
-                }));
-                out.extend(self.maybe_record());
-                out
-            }
+        if !settled.is_empty() {
+            out.extend(self.settle(round, settled));
         }
+        out
     }
 
     fn forfeit(&mut self, conn: ConnId, player: PlayerId, round: u64, frame: u64) -> Outbox {
@@ -532,32 +824,39 @@ impl Server {
         if !started {
             return vec![(conn, ToClient::Refused { reason: "no round is live".into() })];
         }
-        let Some(seat) = self.seat_run(round, &player) else { return Vec::new() };
+        let rs = self.live.as_mut().unwrap().round.as_mut().unwrap();
+        let Some(slot) = Server::slot_of(rs, &player) else { return Vec::new() };
+        let seat = rs.seats.get_mut(&player).expect("seated");
         if seat.verdict.is_some() {
             return Vec::new();
         }
-        // The frames up to the give-up count; the limit may have beaten it.
-        let result = match seat.run.observe(frame, &[]) {
-            Next::Finished(r) => r,
-            Next::Reenter => unreachable!("no event, no re-entry"),
-            Next::Continue => seat.run.forfeit(),
+        let settled = match (rs.bout.as_mut(), seat.run.as_mut()) {
+            (Some(b), _) => b.forfeit(slot, frame),
+            (None, Some(run)) => {
+                // The frames up to the give-up count; the limit may have beaten it.
+                let result = match run.observe(frame, &[]) {
+                    Next::Finished(r) => r,
+                    Next::Reenter => unreachable!("no event, no re-entry"),
+                    Next::Continue => run.forfeit(),
+                };
+                vec![(slot, result)]
+            }
+            (None, None) => unreachable!("a seat without a bout has a run"),
         };
-        seat.verdict = Some(result.clone());
-        let mut out = self.broadcast(ToClient::PlayerFinished {
-            round,
-            player: player.0.clone(),
-            outcome: (&result).into(),
-        });
-        out.extend(self.maybe_record());
-        out
+        self.settle(round, settled)
     }
 
     fn finished(&mut self, conn: ConnId, player: PlayerId, round: u64, claimed: RunOutcome) -> Outbox {
         let _ = conn;
+        let bout = self.live.as_ref().and_then(|l| l.round.as_ref()).is_some_and(|r| r.bout.is_some());
         let Some(seat) = self.seat_run(round, &player) else { return Vec::new() };
         let verdict = seat.verdict.as_ref().map(RunOutcome::from);
         seat.claimed = Some(claimed.clone());
         match verdict {
+            // In a bout the beaten client's claim can beat the winner's
+            // completing frame to the server by a socket; the claims are
+            // compared once every slot has a verdict (ADR 0036).
+            None if bout => Vec::new(),
             None => self.fail(format!(
                 "{player} reports a finished run the server has not seen finish: {claimed:?}"
             )),
@@ -626,13 +925,26 @@ impl Server {
             .collect()
     }
 
-    /// Records the round once every active player has both verdicts in.
+    /// Records the round once every seated player has both verdicts in — or,
+    /// for a slot whose link died, the server's alone.
     fn maybe_record(&mut self) -> Outbox {
-        let Some(live) = self.live.as_mut() else { return Vec::new() };
-        let Some(rs) = live.round.as_ref() else { return Vec::new() };
-        if rs.seats.values().any(|s| s.verdict.is_none() || s.claimed.is_none()) {
+        let Some(rs) = self.live.as_ref().and_then(|l| l.round.as_ref()) else { return Vec::new() };
+        if rs.seats.values().any(|s| s.verdict.is_none() || (s.claimed.is_none() && s.lost.is_none())) {
             return Vec::new();
         }
+        // A bout's claims were held until now (`finished`).
+        let mismatch = rs.bout.as_ref().and_then(|_| {
+            rs.seats.iter().find_map(|(p, s)| {
+                let v = RunOutcome::from(s.verdict.as_ref().unwrap());
+                s.claimed.as_ref().filter(|c| **c != v).map(|c| {
+                    format!("{p}: client and server disagree on the run: client {c:?}, server {v:?}")
+                })
+            })
+        });
+        if let Some(why) = mismatch {
+            return self.fail(why);
+        }
+        let live = self.live.as_mut().unwrap();
         let rs = live.round.take().unwrap();
         let round = rs.deal.index;
         let results: Vec<(PlayerId, RunResult)> =
@@ -685,6 +997,10 @@ impl Server {
 
 fn standings_of(m: &Match) -> Vec<protocol::Standing> {
     m.standings().iter().map(Into::into).collect()
+}
+
+fn rs_seated(rs: &RoundState, player: &PlayerId) -> bool {
+    rs.seats.contains_key(player)
 }
 
 /// The next match's seed from this one: SplitMix64's step, written out like

@@ -1,0 +1,147 @@
+# U.N. Squadron (SNES).
+#
+# Two boss fights as survival runs. No RAM map for this game was found
+# published; the object table and the scroll come from cbroker1/jev-un-squadron
+# (docs/notes/MEMORY_MAP.md, measured on this same dump), and everything a rule
+# reads was found here by scripted runs from the two entry states, a frame
+# picture beside every number. Read docs/games/unsquad.md before trusting one.
+
+schema_version = 3
+
+[game]
+id = "unsquad"
+title = "U.N. Squadron"
+console = "snes"
+region = "usa"
+genre = "shooter"
+year = 1991
+framerate = 60.0988
+
+[[rom]]
+id = "base"
+name = "U.N. Squadron (USA)"
+path = "assets/ROMs/snes/U.N. Squadron (USA).sfc"
+header = "copier-optional"
+min_bytes = 32768
+# A headerless 1 MB file; the same dump jev-un-squadron mapped.
+sha1 = "a2dd48574b9f7a49977c91d12d5c52c17c2c82aa"
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+core_dir = "cores/snes"
+pad_layout = "snes"
+
+[runner.libretro.memory]
+base = 0x7E0000
+size = 0x20000
+system_ram_bytes = 131072
+prefer = "system_ram"
+default_width = "u8"
+
+# ---------------------------------------------------------------- what to read
+
+# The player is the first record of the object table at $1000, 0x40 bytes a
+# record (jev-un-squadron). +8 is the jet's condition and +3 the bank of its
+# routine pointer.
+
+[watch.hp]
+at = 0x1008
+note = "Player object +8. Full is 3 on the Minks save and 6 on Wolfpack's (the plane and armour differ); falls on each hit (3 -> 2, 6 -> 4) and enters 0 on the frame the jet is destroyed. $0E83 is a copy the death leaves alone"
+
+[watch.player_bank]
+at = 0x1003
+note = "Player object +3, the bank of its routine ($04:DF96 in flight). 4 through a death; 0 only when the game wipes the table, which zeroes hp on the same frame - the guard that tells that from a death"
+
+[watch.mission]
+at = 0x00AE
+note = "Mission number: 3 for Wolfpack, 5 for Minks. Poked to 4 before Wolfpack's clear, the screen read MISSION 4 CLEAR!"
+
+[watch.lives]
+at = 0x00F4
+note = "Lives, one more than the HUD's =N. Falls about 120 frames after the death, as the screen fades; up one on the clear's bonus"
+
+[watch.mission_clear]
+at = 0x00A9
+note = "0 -> 1 when the clear sequence takes the jet (Wolfpack: 93 frames after the last fighter falls, as the screen dims), back to 0 as the tally ends. Quiet through a death and 30000 frames of Minks"
+
+[watch.reversed]
+at = 0x14F5
+note = "Minks only: 0 -> 1 as the camera turns at the battleship's stern, 1 -> 0 at the bow, every pass. A different object's timer in Wolfpack, hence the mission guard"
+
+[watch.scroll]
+at = 0x007B
+width = "u16"
+note = "jev-un-squadron: level scroll in pixels, half a pixel a frame. Falls once Minks reverses; reset to 0 when the stage is left"
+
+[display]
+# Not `reversed`: in Wolfpack it is a timer, and the objective logs itself.
+fields = ["hp", "lives", "mission_clear"]
+
+# -------------------------------------------------------------------- rules
+
+[[rule]]
+field = "hp"
+edge = "decreases"
+emit = "damaged"
+guard = { field = "player_bank", test = "ne", value = 0 }
+
+[[rule]]
+field = "hp"
+edge = "enters"
+value = 0
+emit = "died"
+guard = { field = "player_bank", test = "ne", value = 0 }
+
+[[rule]]
+field = "mission_clear"
+edge = "enters"
+value = 1
+emit = "stage_cleared"
+
+[[rule]]
+field = "reversed"
+edge = "enters"
+value = 1
+emit = "objective"
+objective = "passed-minks"
+guard = { field = "mission", test = "eq", value = 5 }
+
+# ------------------------------------------------------------------- stages
+
+[[stage]]
+id = "minks"
+name = "Minks"
+rom = "base"
+# Mission 5, the first frames of the run in to the battleship.
+entry = { state = "assets/states/unsquad_minks.state" }
+
+[[stage]]
+id = "wolfpack"
+name = "Wolfpack"
+rom = "base"
+# Mission 3, the first frames of the fight with the fighter squadron.
+entry = { state = "assets/states/unsquad_wolfpack.state" }
+
+# --------------------------------------------------------------- challenges
+
+[[challenge]]
+id = "minks-survival"
+name = "Minks"
+stage = "minks"
+kind = "survival"
+complete_when = { objectives = ["passed-minks"] }
+goal = "Fly the length of the battleship Minks!"
+# The camera turns at the stern about 41 s in, at the stage's own pace.
+limit_seconds = 75
+
+[[challenge]]
+id = "wolfpack-survival"
+name = "Wolfpack"
+stage = "wolfpack"
+kind = "survival"
+complete_when = { cleared = true }
+goal = "Shoot down the Wolfpack!"
+# Cleared in 29 s by a jet firing straight ahead and never dodging.
+limit_seconds = 120

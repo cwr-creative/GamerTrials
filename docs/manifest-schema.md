@@ -174,6 +174,7 @@ controller = "pad"             # optional, default "pad"; "pad" | "keyboard"
 pad_layout = "snes"            # "nes" | "snes"; only with controller = "pad"
 boot_seconds = 16.0            # optional; required by a `named` entry point
 settle_ms = 5                  # optional; only for a core that runs on its own thread
+netplay = "rollback"           # "rollback" | "packets"; required by a head_to_head challenge
 ```
 
 `controller` says how port 0 is driven.
@@ -210,6 +211,21 @@ on it, only whether the frames counted are the same on every machine — and it
 must be less than a frame, or a paced client could not keep the game's rate.
 It depends on the pinned cycles, which is why the manifest says it. A console
 manifest omits it.
+
+`netplay` says how this game's machine is shared when a `head_to_head`
+challenge is dealt (ADR 0036), and a manifest with such a challenge must say
+it. **`rollback`**: the client saves the core every frame and restores it
+when its guess about the other player's input was wrong, so the core's state
+must be exact and cheap — the console cores are; it is refused beside a
+`settle_ms` (a core on its own thread cannot be saved and restored every
+frame) or `controller = "keyboard"` (a shared machine's slots are pads), and
+a core that declares its own serialization incomplete is refused at load.
+The machine seats the biggest bout's `slots`, one pad per port. Prove a core
+before dealing on it: `harness --game <name> --synctest 1800 --slots 2`
+rolls it back on every frame and compares checksums. **`packets`**: the core
+brings its own network and keeps itself in step — dosbox-pure's emulated IPX
+driver, under which a DOS game's own netcode runs — and the client only
+carries its packets.
 
 ### `[runner.libretro.options]`
 
@@ -433,6 +449,7 @@ emit = "died"
 | `counter` | `count` only: the counter's name |
 | `objective` | `objective` only: the milestone's name |
 | `log` | a sentence appended to this rule's console line |
+| `slot` | head-to-head only: whose fact this is, a slot number from 0. Absent, the fact is everyone's (ADR 0036) |
 
 ### Edges
 
@@ -624,11 +641,12 @@ reason adding a challenge is a data change (ADR 0017).
 id = "mine-cart-carnage-survival"
 name = "Mine Cart Carnage"     # optional; defaults to the stage's name
 stage = "mine-cart-carnage"    # a [[stage]] id
-kind = "survival"              # "time_trial" | "survival"
+kind = "survival"              # "time_trial" | "survival" | "head_to_head"
 complete_when = { cleared = true }
 ends_attempt_on = []           # optional; facts that cost what a death costs
 goal = "Reach the end!"        # optional; composed from complete_when if absent
 limit_seconds = 120            # optional; the run's bound, else the lobby's default
+slots = 2                      # head_to_head only, required there: players seated
 note = "optional, for whatever the id and the criteria do not say"
 ```
 
@@ -648,20 +666,33 @@ A challenge may additionally carry `generator_version` and a `patch_slot` table,
 which makes it a *generated* challenge: same stage, same kind, same criteria, on
 a ROM rolled per attempt from a seed. See [patch slots](#patch-slots).
 
-### The two kinds
+### The three kinds
 
 They differ in what a death costs and what gets scored, **not** in what
 completes them.
 
-| | `time_trial` | `survival` |
-|---|---|---|
-| On death | re-enter at the stage's entry point; the clock keeps running | the run is over; the player spectates |
-| Scored on | total frames across every attempt | whether the criteria were met at all |
-| Ends when | the criteria are met — that is when the clock stops | the criteria are met, or the player dies |
+| | `time_trial` | `survival` | `head_to_head` |
+|---|---|---|---|
+| On death | re-enter at the stage's entry point; the clock keeps running | the run is over; the player spectates | whatever the game does — a round lost, a respawn; nobody re-enters a shared machine |
+| Scored on | total frames across every attempt | whether the criteria were met at all | whether this slot met the criteria first |
+| Ends when | the criteria are met — that is when the clock stops | the criteria are met, or the player dies | the criteria are met, or another slot's are, or the player leaves the stage |
 
 Because a death ends a survival run by definition, **"without dying" is not a
 criterion** — it is what the kind means. That is why one criteria vocabulary
-serves both.
+serves all three.
+
+A `head_to_head` challenge (ADR 0036) is one stage shared by `slots` players
+on one machine, kept in step over the network by the client. The manifest's
+runner half must say how (`[runner.libretro].netplay`), or the manifest does
+not load. Its facts are per slot: a `[[rule]]` with `slot = 0` reports the
+first player's own tally or milestone, and one without a `slot` reports
+something that happened to everyone. `complete_when` is read for each slot
+against that slot's facts, so "first to two rounds" is
+`counts = { rounds_won = 2 }` with one `rounds_won` rule per slot.
+`survive_seconds` has no meaning here and is refused. `ends_attempt_on` ends
+the slot's run, which leaves the others to play on. When a bout is dealt to
+more players than it has slots, the players who sit are drawn by the server
+and the rest back one of them, scored as that player is.
 
 Some challenges only make sense as one kind, and the manifest says so by simply
 not declaring the other: a forced-scrolling level where everyone finishes in the

@@ -28,13 +28,21 @@
 //! * **A round nobody can prepare is void** (ADR 0029). It is recorded for no
 //!   one, does not count toward a format, and its challenge is withdrawn for
 //!   the rest of the match. A match with nothing left to deal is over.
+//! * **A bout seats some and the rest back a slot** (ADR 0036). A
+//!   head-to-head challenge is dealt only while the active players number at
+//!   least its slots, and is passed over, not withdrawn, otherwise. Who sits
+//!   is drawn from the match seed and the round index. Everyone else backs a
+//!   seated player — by choice, or assigned when the caller says the time for
+//!   choosing is up — and is recorded with a copy of that player's entry, so
+//!   every format and standing reads a backer as it reads a competitor.
+//!   Points are still players placed behind you, backers counted.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use session_api::{ChallengeId, ChallengeKind, ChallengeSpec, GameId, PlayerId};
 
-use crate::deal::{DealError, Dealer, Mode};
+use crate::deal::{derive, DealError, Dealer, Mode, SplitMix64, SLOTS};
 use crate::rank::places;
 use crate::run::RunResult;
 
@@ -74,6 +82,11 @@ pub enum MatchError {
     DuplicatePlayer(PlayerId),
     /// A count or a limit that was zero, named.
     Zero(&'static str),
+    /// A head-to-head challenge seating fewer than two.
+    TooFewSlots(ChallengeId),
+    /// [`Match::back`] refused: no bout is pending, or the backer or the
+    /// target is not who the call needs them to be.
+    Backing(String),
 }
 
 impl fmt::Display for MatchError {
@@ -83,6 +96,10 @@ impl fmt::Display for MatchError {
             MatchError::NoPlayers => f.write_str("a match needs at least one player"),
             MatchError::DuplicatePlayer(p) => write!(f, "player `{p}` is listed twice"),
             MatchError::Zero(what) => write!(f, "{what} cannot be zero"),
+            MatchError::TooFewSlots(c) => {
+                write!(f, "head-to-head challenge `{c}` seats fewer than two slots")
+            }
+            MatchError::Backing(why) => f.write_str(why),
         }
     }
 }
@@ -105,13 +122,31 @@ pub struct Deal {
     pub seed: u64,
     /// The frame limit every run of this round takes (`Run::with_limit`).
     pub limit: u64,
+    /// Who plays the round, in slot order: every active player for a time
+    /// trial or a survival challenge; for a bout, the players drawn to sit,
+    /// one per slot (ADR 0036). The rest of the active players back one of
+    /// these.
+    pub slots: Vec<PlayerId>,
+}
+
+impl Deal {
+    pub fn is_bout(&self) -> bool {
+        self.challenge.kind == ChallengeKind::HeadToHead
+    }
+
+    pub fn seats(&self, player: &PlayerId) -> bool {
+        self.slots.contains(player)
+    }
 }
 
 /// One player's reading of one round.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RoundEntry {
     pub player: PlayerId,
+    /// A backer's is a copy of the backed player's.
     pub result: RunResult,
+    /// The seated player this one backed, if this one did not play.
+    pub backed: Option<PlayerId>,
     pub completed: bool,
     /// Standard competition ranking among the round's players.
     pub place: u32,
@@ -175,6 +210,8 @@ pub struct Match {
     dealer: Dealer,
     limits: BTreeMap<(GameId, ChallengeId), u64>,
     pending: Option<Deal>,
+    /// Backer to seated player, for the pending bout.
+    backing: BTreeMap<PlayerId, PlayerId>,
     rounds: Vec<Round>,
     tallies: Vec<Tally>,
     ended: bool,
@@ -214,6 +251,9 @@ impl Match {
                 }
                 limits.insert((entry.spec.game.clone(), entry.spec.id.clone()), limit);
             }
+            if entry.spec.kind == ChallengeKind::HeadToHead && entry.spec.slots < 2 {
+                return Err(MatchError::TooFewSlots(entry.spec.id));
+            }
             specs.push(entry.spec);
         }
         let dealer = Dealer::new(specs, settings.mode, seed)?;
@@ -224,6 +264,7 @@ impl Match {
             dealer,
             limits,
             pending: None,
+            backing: BTreeMap::new(),
             rounds: Vec::new(),
             tallies,
             ended: false,
@@ -258,7 +299,7 @@ impl Match {
     }
 
     pub fn is_over(&self) -> bool {
-        if self.ended || self.dealer.exhausted() {
+        if self.ended || self.dealer.exhausted() || !self.anything_playable() {
             return true;
         }
         match self.settings.format {
@@ -275,6 +316,18 @@ impl Match {
     pub fn end(&mut self) {
         self.ended = true;
         self.pending = None;
+        self.backing.clear();
+    }
+
+    /// Whether `spec` can be dealt to the players active now: a bout needs
+    /// at least as many of them as it has slots (ADR 0036).
+    fn playable(spec: &ChallengeSpec, active: usize) -> bool {
+        spec.kind != ChallengeKind::HeadToHead || usize::from(spec.slots) <= active
+    }
+
+    fn anything_playable(&self) -> bool {
+        let active = self.active().len();
+        self.dealer.remaining().any(|c| Match::playable(c, active))
     }
 
     /// Drops the pending round unplayed, because a player could not prepare
@@ -287,6 +340,7 @@ impl Match {
     /// If no round is pending.
     pub fn void(&mut self) -> Deal {
         let deal = self.pending.take().expect("no round is pending");
+        self.backing.clear();
         self.dealer.withdraw(&deal.challenge.game, &deal.challenge.id);
         deal
     }
@@ -301,35 +355,98 @@ impl Match {
             return None;
         }
         assert!(self.pending.is_none(), "the previous round has not been recorded");
-        let dealt = self.dealer.deal();
+        let active: Vec<PlayerId> = self.active().into_iter().cloned().collect();
+        let dealt = self.dealer.deal_where(|c| Match::playable(c, active.len()))?;
         let limit = self
             .limits
             .get(&(dealt.challenge.game.clone(), dealt.challenge.id.clone()))
             .copied()
             .unwrap_or(self.settings.default_limit);
-        let deal = Deal { index: dealt.index, challenge: dealt.challenge, seed: dealt.seed, limit };
+        let slots = if dealt.challenge.kind == ChallengeKind::HeadToHead {
+            draw(&active, usize::from(dealt.challenge.slots), self.dealer.seed(), dealt.index)
+        } else {
+            active
+        };
+        let deal =
+            Deal { index: dealt.index, challenge: dealt.challenge, seed: dealt.seed, limit, slots };
+        self.backing.clear();
         self.pending = Some(deal.clone());
         Some(deal)
     }
 
-    /// Records every active player's result for the pending round and reads it.
+    /// `backer`, active and not seated in the pending bout, throws in their
+    /// lot with `target`, who is. Picking again replaces the pick.
+    pub fn back(&mut self, backer: PlayerId, target: PlayerId) -> Result<(), MatchError> {
+        let refuse = |why: String| Err(MatchError::Backing(why));
+        let Some(deal) = self.pending.as_ref().filter(|d| d.is_bout()) else {
+            return refuse("no bout is pending".into());
+        };
+        if !self.active().contains(&&backer) {
+            return refuse(format!("{backer} is not in the match"));
+        }
+        if deal.seats(&backer) {
+            return refuse(format!("{backer} is playing this bout"));
+        }
+        if !deal.seats(&target) {
+            return refuse(format!("{target} is not playing this bout"));
+        }
+        self.backing.insert(backer, target);
+        Ok(())
+    }
+
+    /// Who each backer backs, for the pending bout.
+    pub fn backing(&self) -> &BTreeMap<PlayerId, PlayerId> {
+        &self.backing
+    }
+
+    /// Active players neither seated in the pending bout nor backing anyone
+    /// yet, in player order. Empty when no bout is pending.
+    pub fn unbacked(&self) -> Vec<PlayerId> {
+        let Some(deal) = self.pending.as_ref().filter(|d| d.is_bout()) else { return Vec::new() };
+        self.active()
+            .into_iter()
+            .filter(|p| !deal.seats(p) && !self.backing.contains_key(*p))
+            .cloned()
+            .collect()
+    }
+
+    /// Time is up: everyone [unbacked](Match::unbacked) is given a seated
+    /// player, drawn from `seed`. The caller supplies the seed because this
+    /// draw depends on which picks arrived, so it is nobody's to reproduce.
+    pub fn assign_backers(&mut self, seed: u64) {
+        let Some(slots) = self.pending.as_ref().filter(|d| d.is_bout()).map(|d| d.slots.clone())
+        else {
+            return;
+        };
+        let mut rng = SplitMix64(seed);
+        for backer in self.unbacked() {
+            let target = slots[rng.below(slots.len() as u64) as usize].clone();
+            self.backing.insert(backer, target);
+        }
+    }
+
+    /// Records every seated player's result for the pending round and reads
+    /// it. For a bout, every other active player must be backing someone.
     ///
     /// # Panics
     ///
-    /// If no round is pending, if the results are not exactly one per active
-    /// player, or if a result is for another challenge. Each is the caller's
-    /// bug, and a silently misread round would be worse than stopping.
+    /// If no round is pending, if the results are not exactly one per seated
+    /// player, if a result is for another challenge, or if a bout has an
+    /// active player neither seated nor backing. Each is the caller's bug,
+    /// and a silently misread round would be worse than stopping.
     pub fn record(&mut self, results: Vec<(PlayerId, RunResult)>) -> &Round {
         let deal = self.pending.take().expect("no round is pending");
+        let backing = std::mem::take(&mut self.backing);
         let active: Vec<PlayerId> = self.active().into_iter().cloned().collect();
+        let seated = &deal.slots;
         assert_eq!(
             results.len(),
-            active.len(),
-            "round {} needs one result per active player",
+            seated.len(),
+            "round {} needs one result per seated player",
             deal.index
         );
-        let mut ordered: Vec<RunResult> = Vec::with_capacity(active.len());
-        for player in &active {
+        let mut ordered: Vec<RunResult> = Vec::with_capacity(seated.len());
+        for player in seated {
             let result = results
                 .iter()
                 .filter(|(p, _)| p == player)
@@ -345,11 +462,26 @@ impl Match {
             ordered.push(result);
         }
 
-        let places = places(&ordered);
+        // Every active player's side: themselves, or whom they backed.
+        let side: Vec<usize> = active
+            .iter()
+            .map(|p| {
+                let seat = seated.iter().position(|s| s == p).or_else(|| {
+                    backing.get(p).and_then(|t| seated.iter().position(|s| s == t))
+                });
+                seat.unwrap_or_else(|| {
+                    panic!("`{p}` is neither seated in round {} nor backing anyone", deal.index)
+                })
+            })
+            .collect();
+
+        let seat_places = places(&ordered);
+        let places: Vec<u32> = side.iter().map(|&s| seat_places[s]).collect();
         let bottom = places.iter().copied().max().unwrap_or(1);
         let everyone_ties = places.iter().all(|&p| p == 1);
         let mut entries = Vec::with_capacity(active.len());
-        for (i, (player, result)) in active.iter().zip(ordered.iter()).enumerate() {
+        for (i, player) in active.iter().enumerate() {
+            let result = &ordered[side[i]];
             let completed = result.completed();
             let place = places[i];
             let (success, failure) = match deal.challenge.kind {
@@ -357,11 +489,12 @@ impl Match {
                     completed && place == 1,
                     !completed || (place == bottom && !everyone_ties),
                 ),
-                ChallengeKind::Survival => (completed, !completed),
+                ChallengeKind::Survival | ChallengeKind::HeadToHead => (completed, !completed),
             };
             entries.push(RoundEntry {
                 player: player.clone(),
                 result: result.clone(),
+                backed: backing.get(player).cloned(),
                 completed,
                 place,
                 frames: if completed { result.frames } else { deal.limit },
@@ -453,6 +586,21 @@ impl Match {
     }
 }
 
+/// Which `n` of `active` sit in a bout's slots, in slot order: a partial
+/// Fisher-Yates under a seed derived from the match seed and the round
+/// index, so whoever holds the seed can say who sat (ADR 0036).
+fn draw(active: &[PlayerId], n: usize, seed: u64, index: u64) -> Vec<PlayerId> {
+    let mut pool: Vec<PlayerId> = active.to_vec();
+    let n = n.min(pool.len());
+    let mut rng = SplitMix64(derive(seed, SLOTS, index));
+    for i in 0..n {
+        let j = i + rng.below((pool.len() - i) as u64) as usize;
+        pool.swap(i, j);
+    }
+    pool.truncate(n);
+    pool
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +618,7 @@ mod tests {
             kind,
             complete_when: Completion { cleared: true, ..Default::default() },
             ends_attempt_on: Default::default(),
+            slots: if kind == ChallengeKind::HeadToHead { 2 } else { 1 },
         }
     }
 
@@ -588,11 +737,13 @@ mod tests {
             (ChallengeKind::TimeTrial, _) => result(d, Ending::TimedOut, LIMIT),
             (ChallengeKind::Survival, 0 | 1) => done(d, 500),
             (ChallengeKind::Survival, _) => died(d),
+            (ChallengeKind::HeadToHead, _) => unreachable!("not in this pool"),
         });
         let points: Vec<u32> = first.entries.iter().map(|e| e.points).collect();
         match first.deal.challenge.kind {
             ChallengeKind::TimeTrial => assert_eq!(points, [3, 2, 0, 0]),
             ChallengeKind::Survival => assert_eq!(points, [2, 2, 0, 0]),
+            ChallengeKind::HeadToHead => unreachable!("not in this pool"),
         }
     }
 
@@ -890,6 +1041,217 @@ mod tests {
         assert!(m.is_over());
         assert_eq!(m.deal(), None);
         assert_eq!(m.standings()[0].wins, 1, "what was played still stands");
+    }
+
+    fn beaten(deal: &Deal, frames: u64) -> RunResult {
+        result(deal, Ending::Failed(AttemptEnd::Beaten), frames)
+    }
+
+    fn bout_pool(n: usize) -> Vec<Entry> {
+        (0..n)
+            .map(|i| Entry {
+                spec: spec("sf2", &format!("fight{i}"), ChallengeKind::HeadToHead),
+                limit: None,
+            })
+            .collect()
+    }
+
+    /// Three players, two slots: the drawn two fight, the third backs one.
+    #[test]
+    fn a_bout_seats_two_from_the_seed_and_the_backer_takes_their_sides_entry() {
+        let mut m = Match::new(
+            bout_pool(3),
+            players(&["ann", "bob", "cy"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            5,
+        )
+        .unwrap();
+        let deal = m.deal().unwrap();
+        assert!(deal.is_bout());
+        assert_eq!(deal.slots.len(), 2);
+        let backer = m.unbacked();
+        assert_eq!(backer.len(), 1);
+        let backer = backer[0].clone();
+        assert!(!deal.seats(&backer));
+
+        // Reproducible from the seed: the same match deals the same slots.
+        let again = Match::new(
+            bout_pool(3),
+            players(&["ann", "bob", "cy"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            5,
+        )
+        .unwrap()
+        .deal()
+        .unwrap();
+        assert_eq!(again.slots, deal.slots);
+
+        let (winner, loser) = (deal.slots[0].clone(), deal.slots[1].clone());
+        m.back(backer.clone(), loser.clone()).unwrap();
+        assert!(m.unbacked().is_empty());
+        let round = m
+            .record(vec![(winner.clone(), done(&deal, 2000)), (loser.clone(), beaten(&deal, 2000))])
+            .clone();
+        assert_eq!(round.entries.len(), 3);
+        let of = |p: &PlayerId| round.entry(p).unwrap().clone();
+        assert_eq!(of(&winner).place, 1);
+        assert_eq!(of(&winner).points, 2, "two players placed behind the winner");
+        assert_eq!(of(&loser).place, 2);
+        assert!(of(&loser).failure);
+        let b = of(&backer);
+        assert_eq!(b.backed, Some(loser.clone()));
+        assert_eq!((b.place, b.completed, b.success, b.failure, b.points), (2, false, false, true, 0));
+        assert_eq!(b.frames, LIMIT, "a beaten side costs the limit, backer included");
+        assert_eq!(b.result, of(&loser).result);
+        assert_eq!(m.standings().iter().find(|s| s.player == winner).unwrap().points, 2);
+    }
+
+    #[test]
+    fn backing_the_winner_in_a_wins_match_is_a_win_and_the_loser_in_stock_a_strike() {
+        let mut m = Match::new(
+            bout_pool(2),
+            players(&["ann", "bob", "cy"]),
+            settings(Mode::Survival, Format::Stock(1)),
+            9,
+        )
+        .unwrap();
+        let deal = m.deal().unwrap();
+        let backer = m.unbacked()[0].clone();
+        let (winner, loser) = (deal.slots[0].clone(), deal.slots[1].clone());
+        m.back(backer.clone(), winner.clone()).unwrap();
+        let round = m
+            .record(vec![(winner.clone(), done(&deal, 100)), (loser.clone(), beaten(&deal, 100))])
+            .clone();
+        assert_eq!(round.eliminated, vec![loser.clone()]);
+        assert!(round.entry(&backer).unwrap().success);
+        let wins: Vec<(String, u32)> =
+            m.standings().into_iter().map(|s| (s.player.0, s.wins)).collect();
+        assert!(wins.iter().filter(|(_, w)| *w == 1).count() == 2, "{wins:?}");
+    }
+
+    #[test]
+    fn unbacked_players_are_assigned_when_time_is_up() {
+        let mut m = Match::new(
+            bout_pool(2),
+            players(&["a", "b", "c", "d", "e"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            3,
+        )
+        .unwrap();
+        let deal = m.deal().unwrap();
+        assert_eq!(m.unbacked().len(), 3);
+        let first = m.unbacked()[0].clone();
+        m.back(first.clone(), deal.slots[1].clone()).unwrap();
+        m.assign_backers(77);
+        assert!(m.unbacked().is_empty());
+        assert_eq!(m.backing()[&first], deal.slots[1], "a pick made stands");
+        assert!(m.backing().values().all(|t| deal.seats(t)));
+    }
+
+    #[test]
+    fn backing_is_refused_for_the_wrong_people() {
+        let mut m = Match::new(
+            bout_pool(2),
+            players(&["a", "b", "c"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            3,
+        )
+        .unwrap();
+        let p = |s: &str| PlayerId(s.into());
+        assert!(matches!(m.back(p("a"), p("b")), Err(MatchError::Backing(_))), "no bout yet");
+        let deal = m.deal().unwrap();
+        let backer = m.unbacked()[0].clone();
+        let seated = deal.slots[0].clone();
+        assert!(m.back(seated.clone(), deal.slots[1].clone()).is_err(), "seated players play");
+        assert!(m.back(backer.clone(), backer.clone()).is_err(), "a backer is not seated");
+        assert!(m.back(p("zed"), seated.clone()).is_err(), "not in the match");
+        assert!(m.back(backer, seated).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "neither seated")]
+    fn recording_a_bout_with_an_unbacked_player_is_a_caller_bug() {
+        let mut m = Match::new(
+            bout_pool(2),
+            players(&["a", "b", "c"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            3,
+        )
+        .unwrap();
+        let deal = m.deal().unwrap();
+        m.record(vec![
+            (deal.slots[0].clone(), done(&deal, 1)),
+            (deal.slots[1].clone(), beaten(&deal, 1)),
+        ]);
+    }
+
+    /// Two players, two slots: everyone sits, nobody backs, and a draw at
+    /// the limit is everyone failing (ADR 0026).
+    #[test]
+    fn a_two_player_bout_has_no_backers_and_a_draw_fails_both() {
+        let mut m = Match::new(
+            bout_pool(2),
+            players(&["a", "b"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            3,
+        )
+        .unwrap();
+        let deal = m.deal().unwrap();
+        assert!(m.unbacked().is_empty());
+        let round = play_this(&mut m, &deal, |d, _| result(d, Ending::TimedOut, LIMIT));
+        assert!(round.entries.iter().all(|e| e.failure && e.backed.is_none() && e.place == 1));
+    }
+
+    fn play_this(m: &mut Match, deal: &Deal, outcomes: impl Fn(&Deal, usize) -> RunResult) -> Round {
+        let results =
+            deal.slots.iter().enumerate().map(|(i, p)| (p.clone(), outcomes(deal, i))).collect();
+        m.record(results).clone()
+    }
+
+    /// A bout that seats more than are active is passed over, not withdrawn;
+    /// with nothing else in the pool the match is over.
+    #[test]
+    fn a_bout_with_too_many_slots_is_passed_over() {
+        let mut four = spec("smk", "battle", ChallengeKind::HeadToHead);
+        four.slots = 4;
+        let mut pool = pool(ChallengeKind::Survival, 1);
+        pool.push(Entry { spec: four.clone(), limit: None });
+        let mut m = Match::new(
+            pool,
+            players(&["a", "b", "c"]),
+            settings(Mode::Both, Format::Challenges(3)),
+            1,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            let deal = m.deal().unwrap();
+            assert_ne!(deal.challenge.id, four.id, "three cannot fill four slots");
+            play_this(&mut m, &deal, |d, _| done(d, 10));
+        }
+        let mut only = Match::new(
+            vec![Entry { spec: four, limit: None }],
+            players(&["a", "b", "c"]),
+            settings(Mode::Both, Format::Challenges(3)),
+            1,
+        )
+        .unwrap();
+        assert!(only.is_over());
+        assert_eq!(only.deal(), None);
+    }
+
+    #[test]
+    fn a_bout_seating_one_is_refused() {
+        let mut one = spec("g", "solo", ChallengeKind::HeadToHead);
+        one.slots = 1;
+        let err = Match::new(
+            vec![Entry { spec: one, limit: None }],
+            players(&["a", "b"]),
+            settings(Mode::Both, Format::Challenges(1)),
+            1,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err, MatchError::TooFewSlots(ChallengeId("solo".into())));
     }
 
     #[test]

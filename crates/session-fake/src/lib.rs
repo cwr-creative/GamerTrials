@@ -33,7 +33,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod machine;
+
 use std::collections::BTreeMap;
+
+pub use machine::FakeMachine;
 
 use session_api::{
     AssetKey, ChallengeSpec, Completion, EntryPoint, ExitReason, RunnerError, SessionEvent,
@@ -483,6 +487,7 @@ mod tests {
             kind: ChallengeKind::TimeTrial,
             complete_when: Completion { cleared: true, ..Default::default() },
             ends_attempt_on: Default::default(),
+            slots: 1,
         };
         assert_eq!(stage_for(&c("dkc", "a")), stage_for(&c("dkc", "b")));
         assert_ne!(stage_for(&c("dkc", "a")).content, stage_for(&c("doom", "a")).content);

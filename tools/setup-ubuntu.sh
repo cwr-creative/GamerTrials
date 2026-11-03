@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Everything an Ubuntu machine needs to build and run GamerTrials: the system
 # libraries the client links (WebKitGTK for Tauri, ALSA for sound, udev for
-# gamepads, OpenSSL for wss://) and a Rust toolchain from rustup.
+# gamepads, OpenSSL for wss://), the H.264 decoder WebKitGTK needs to show a
+# watched player's picture (gstreamer1.0-libav), and a Rust toolchain from
+# rustup.
 #
 #   bash tools/setup-ubuntu.sh
 #
@@ -14,6 +16,7 @@ sudo apt-get install -y \
     libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
     libssl-dev libasound2-dev libudev-dev \
     libx11-dev libxtst6 \
+    gstreamer1.0-libav \
     fonts-noto-color-emoji
 
 if ! command -v cargo >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/cargo" ]; then

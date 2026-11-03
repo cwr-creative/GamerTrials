@@ -1,0 +1,157 @@
+# Super Mario Bros. (NES).
+#
+# One challenge: beat Bowser on the bridge at the end of World 8-4. The entry
+# state, every address a rule reads and how each was found are in
+# docs/games/smb1.md. Read that before trusting one.
+
+schema_version = 3
+
+[game]
+id = "smb1"
+title = "Super Mario Bros."
+console = "nes"
+region = "world"
+genre = "platformer"
+# 1985 in both Japan and North America; the "World" dump is the one cartridge.
+year = 1985
+# NTSC NES, as for SMB3.
+framerate = 60.0988
+
+[[rom]]
+id = "base"
+name = "Super Mario Bros. (World)"
+path = "assets/ROMs/Super Mario Bros. (World).nes"
+header = "ines"
+# The whole file, header included: the No-Intro dump (headerless sha1
+# facee9c5...) with an NES 2.0 header. The entry state was captured on it.
+sha1 = "33d23c2f2cfa4c9efec87f7bc1321ce3ce6c89bd"
+
+[runner]
+kind = "libretro"
+
+[runner.libretro]
+core_dir = "cores"
+pad_layout = "nes"
+
+[runner.libretro.memory]
+# NES CPU addresses. Unlike SMB3 the cartridge has no WRAM, so everything a
+# rule reads is internal RAM at $0000-$07FF and the system RAM region is enough.
+base = 0x0000
+size = 0x0800
+system_ram_bytes = 2048
+default_width = "u8"
+prefer = "system_ram"
+
+# ---------------------------------------------------------------- what to read
+
+# OperMode: 0 the title, 1 playing, 2 the victory sequence, 3 game over. The
+# game sets 2 itself on the frame Mario touches the axe (HandleAxeMetatile), and
+# nothing else does.
+[watch.oper_mode]
+at = 0x0770
+note = "verified: 1 -> 2 on the frame the axe is touched, as the bridge starts to fall"
+
+# GameEngineSubroutine: which player routine the engine runs this frame.
+[watch.engine]
+at = 0x000E
+note = "verified: 7 rising out of a pipe, 8 in control, 11 on the frame a flame or Bowser kills, 6 as the life is taken"
+
+# DeathMusicLoaded: set by the fell-off-the-screen check, so a lava death is
+# seen here, while $000E still reads 8.
+[watch.fell]
+at = 0x0712
+note = "verified: 0 -> 1 on the frame Mario dropped below the screen into lava; untouched by a flame or Bowser death"
+
+[watch.world]
+at = 0x075F
+note = "verified: world - 1. 7 throughout 8-4"
+
+[watch.level]
+at = 0x075C
+note = "verified: level - 1, the number on the HUD. 3 throughout 8-4"
+
+[watch.lives]
+at = 0x075A
+note = "verified: lives - 1. Taken as $000E enters 6, about 4 s after the death"
+
+[label.oper_mode]
+0x00 = "title"
+0x01 = "playing"
+0x02 = "victory"
+0x03 = "game over"
+
+[label.engine]
+0x06 = "losing a life"
+0x07 = "entering"
+0x08 = "in control"
+0x0B = "dying"
+
+[label.world]
+0x07 = "world 8"
+
+[label.level]
+0x03 = "level 4"
+
+[display]
+fields = ["world", "level", "lives", "engine", "oper_mode", "fell"]
+
+# --------------------------------------------------------------- what it means
+
+# Touched by a flame, a hammer or Bowser. Small Mario has nothing to lose but
+# the life, so a hit is a death. The clock running out lands here as well, but
+# it has 363 on it at the entry, about 145 s, and the run's limit is shorter.
+[[rule]]
+field = "engine"
+edge = "enters"
+value = 0x0B
+emit = "died"
+log = "hit by a flame, a hammer or Bowser"
+
+# Into the lava. $000E stays 8 until the life is taken four seconds later, so
+# this is the earliest sign.
+[[rule]]
+field = "fell"
+edge = "leaves"
+value = 0
+emit = "died"
+log = "fell into the lava"
+
+# The axe. Touching it drops the bridge and Bowser with it, and it is the only
+# way 8-4 ends: small Mario has no fireballs, and the bridge has no item block.
+# The objective first, so it is reported before the terminal clear on the same
+# frame.
+[[rule]]
+field = "oper_mode"
+edge = "enters"
+value = 2
+emit = "objective"
+objective = "bowser-defeated"
+log = "the axe: the bridge falls, and Bowser with it"
+
+[[rule]]
+field = "oper_mode"
+edge = "enters"
+value = 2
+emit = "stage_cleared"
+
+# ------------------------------------------------------------------- stages
+
+[[stage]]
+id = "8-4-bridge"
+name = "World 8-4: Bowser's Bridge"
+rom = "base"
+entry = { state = "assets/states/smb1_8-4-bridge.state" }
+note = "small Mario, stopped at the edge of the last pillar before the bridge, facing it; a flame reaches him if he stands there for 5 s"
+
+# --------------------------------------------------------------- challenges
+
+[[challenge]]
+id = "8-4-bowser-survival"
+name = "Bowser's Bridge"
+stage = "8-4-bridge"
+kind = "survival"
+complete_when = { objectives = ["bowser-defeated"] }
+goal = "Defeat Bowser!"
+# A scripted search reached the axe 2.5 s after the entry. A minute is room to
+# wait for an opening.
+limit_seconds = 60

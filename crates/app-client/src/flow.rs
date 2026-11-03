@@ -18,11 +18,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use protocol::{ChallengeRef, FileReport, LobbySettings, LobbyState, ToClient, ToServer};
+use std::net::{SocketAddr, ToSocketAddrs};
+
+use protocol::{ChallengeRef, FileReport, Kind, LobbySettings, LobbyState, ToClient, ToServer};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::game::{self, Command, Load, Report};
+use crate::game::{self, BoutLoad, Command, Load, Report};
 use crate::library::Library;
 use crate::overlay::Overlay;
 use crate::link::{self, Link};
@@ -62,6 +64,8 @@ pub enum UiCmd {
     Recheck,
     /// Watch another player, from the spectate sheet (ADR 0032).
     Watch { player: String },
+    /// Back a seated player in the bout, from the backing sheet (ADR 0036).
+    Back { player: String },
 }
 
 /// How often the lobby checks this machine's files again.
@@ -82,6 +86,13 @@ pub struct Auto {
     pub format: Option<protocol::Format>,
     pub games: Option<Vec<String>>,
     pub limit: Option<f64>,
+    /// `--h2h`: allow head-to-head challenges in the lobby (ADR 0036).
+    pub head_to_head: bool,
+    /// `--players <n>`: with `--start`, wait until this many are in.
+    pub players: Option<usize>,
+    /// `--script <seed>`: press random buttons instead of reading the pad,
+    /// for a bout played by two clients with nobody at either keyboard.
+    pub script: Option<u64>,
 }
 
 /// The round being played, as the overlay needs to describe it.
@@ -125,6 +136,16 @@ pub struct Flow {
     spectate: Option<Spectate>,
     /// Which challenge each dealt round was, for the cards.
     dealt: BTreeMap<u64, ChallengeRef>,
+    /// Who plays each dealt round, in slot order (ADR 0036).
+    slots: BTreeMap<u64, Vec<String>>,
+    /// Where a bout's probes go, as the server said at hello.
+    rendezvous: Option<String>,
+    /// The bout this player is backing someone in, if any.
+    backing_round: Option<u64>,
+    /// The round this player has claimed a verdict for. A relayed bout's
+    /// judge sees only its own machine's facts, so the other slot's
+    /// completion reaches it as the server's verdict, which it then claims.
+    claimed: Option<u64>,
     spiked: bool,
     auto: Auto,
     /// `--start` has been acted on.
@@ -177,6 +198,10 @@ impl Flow {
                     current: None,
                     spectate: None,
                     dealt: BTreeMap::new(),
+                    slots: BTreeMap::new(),
+                    rendezvous: None,
+                    backing_round: None,
+                    claimed: None,
                     spiked: false,
                     auto,
                     auto_started: false,
@@ -291,6 +316,11 @@ impl Flow {
                 self.passthrough(true);
             }
             UiCmd::Watch { player } => self.watch(Some(player)),
+            UiCmd::Back { player } => {
+                if let Some(round) = self.backing_round {
+                    self.send(ToServer::Back { round, player });
+                }
+            }
         }
     }
 
@@ -298,9 +328,10 @@ impl Flow {
 
     fn server(&mut self, m: ToClient) {
         match m {
-            ToClient::Welcome { player, lobby } => {
+            ToClient::Welcome { player, lobby, rendezvous } => {
                 println!("[lobby] joined {} as {player}", lobby.code);
                 self.player = Some(player.clone());
+                self.rendezvous = rendezvous;
                 let invite = self.link.as_ref().and_then(|l| l.server.as_ref()).map(|s| link::invite(s, &lobby.code));
                 let _ = self.app.emit_to("main", "session", &json!({ "me": player, "invite": invite }));
                 if !lobby.players.first().is_some_and(|p| p.id == player) {
@@ -320,6 +351,10 @@ impl Flow {
                 }
                 if let Some(l) = self.auto.limit {
                     settings.default_limit_seconds = l;
+                    changed = true;
+                }
+                if self.auto.head_to_head {
+                    settings.allow_head_to_head = true;
                     changed = true;
                 }
                 let only: Option<Vec<ChallengeRef>> = self.auto.games.as_ref().map(|games| {
@@ -348,21 +383,34 @@ impl Flow {
                 }
                 self.show_lobby(lobby);
             }
-            ToClient::Dealt { round, challenge, kind, seed, limit_frames, players } => {
+            ToClient::Dealt { round, challenge, kind, seed, limit_frames, players, backing_seconds } => {
                 println!(
                     "[match] round {round}: {} / {} ({kind:?}), seed {seed}, limit {limit_frames} frames, players {players:?}",
                     challenge.game, challenge.challenge
                 );
                 self.dealt.insert(round, challenge.clone());
+                self.slots.insert(round, players.clone());
+                self.backing_round = None;
                 let me = self.player.clone().unwrap_or_default();
+                let bout = kind == Kind::HeadToHead;
                 self.stop_spectating();
                 if !players.contains(&me) {
-                    // Out of the match: nothing to play, so watch (ADR 0032).
+                    // Out of the match, or not seated in this bout: nothing
+                    // to play, so watch (ADR 0032) — and in a bout, back a
+                    // slot first (ADR 0036).
                     if let Some(g) = &self.game {
                         let _ = g.send(Command::Unload);
                     }
                     self.current = None;
-                    self.emit(json!({ "kind": "eliminated", "round": round, "players": players }));
+                    if bout {
+                        self.backing_round = Some(round);
+                        self.emit(json!({
+                            "kind": "backing", "round": round, "players": players,
+                            "seconds": backing_seconds.unwrap_or(15),
+                        }));
+                    } else {
+                        self.emit(json!({ "kind": "eliminated", "round": round, "players": players }));
+                    }
                     self.start_spectating(round, players);
                     return;
                 }
@@ -385,6 +433,14 @@ impl Flow {
                 if let Some(scale) = self.scale {
                     video.window_scale = scale;
                 }
+                let bout = bout.then(|| {
+                    let slot = players.iter().position(|p| *p == me).unwrap_or(0) as u8;
+                    let (input_delay, port) = {
+                        let s = self.settings.lock().unwrap();
+                        (s.bout_input_delay, s.bout_port)
+                    };
+                    BoutLoad { slot, slots: players.len() as u8, rendezvous: self.rendezvous_addr(), input_delay, port }
+                });
                 let load = Load {
                     round,
                     manifest: self.library.paths[game].clone(),
@@ -395,6 +451,8 @@ impl Flow {
                     input,
                     video,
                     display,
+                    bout,
+                    script: self.auto.script,
                 };
                 self.emit(json!({ "kind": "loading", "round": round }));
                 match &self.game {
@@ -409,7 +467,9 @@ impl Flow {
                 }
             }
             ToClient::Go { round } => {
-                if self.current.as_ref().map_or(true, |c| c.round != round) {
+                if self.backing_round == Some(round) {
+                    self.emit(json!({ "kind": "bout_go", "round": round }));
+                } else if self.current.as_ref().map_or(true, |c| c.round != round) {
                     eprintln!("[match] go for round {round}, which is not the one being prepared");
                 }
                 self.emit(json!({ "kind": "go", "round": round }));
@@ -441,10 +501,40 @@ impl Flow {
             }
             ToClient::PlayerFinished { round, player, outcome } => {
                 println!("[match] round {round}: {player} {outcome:?}");
+                let me = self.player.clone().unwrap_or_default();
+                if player == me && self.is_current(round) && self.claimed != Some(round) {
+                    // The server ruled on a run this client could not judge
+                    // for itself: the other machine's facts never came here,
+                    // or the link was lost. Its verdict is the claim.
+                    self.claimed = Some(round);
+                    let completed = outcome.completed();
+                    self.emit(json!({
+                        "kind": if completed { "garland" } else { "skull" },
+                        "frame": outcome.frames,
+                        "text": format!("{:?}", outcome.ending).to_lowercase(),
+                    }));
+                    if outcome.ending != protocol::Ending::Forfeited {
+                        self.send(ToServer::Finished { round, outcome: outcome.clone() });
+                    }
+                }
+                // A seated opponent who gave up hands this player the win
+                // (ADR 0036); the judge on the game thread is told.
+                if outcome.ending == protocol::Ending::Forfeited && self.is_current(round) {
+                    if let Some(slot) = self.slots.get(&round).and_then(|s| s.iter().position(|p| *p == player)) {
+                        if let Some(g) = &self.game {
+                            let _ = g.send(Command::PeerForfeited { slot: slot as u8, frame: outcome.frames });
+                        }
+                    }
+                }
                 if let Some(c) = self.current.as_mut().filter(|c| c.round == round) {
                     c.playing.retain(|p| p != &player);
                     let playing = c.playing.clone();
                     self.emit(json!({ "kind": "playing", "round": round, "players": playing }));
+                    // This player's bout is over by the server's word: watch
+                    // whoever is still going, if anyone is.
+                    if player == me && self.spectate.is_none() && !playing.is_empty() {
+                        self.start_spectating(round, playing);
+                    }
                 }
                 if let Some(s) = self.spectate.as_mut().filter(|s| s.round == round) {
                     s.players.retain(|p| p != &player);
@@ -492,6 +582,30 @@ impl Flow {
                         "kind": "progress", "player": player, "frame": frame, "attempt": attempt,
                         "clock": clock, "fps": fps, "events": said,
                     }));
+                }
+            }
+            ToClient::Sides { round, backing } => {
+                println!("[match] round {round} sides: {backing:?}");
+                self.emit(json!({ "kind": "sides", "round": round, "backing": backing, "me": self.player }));
+            }
+            ToClient::Peers { round, peers } => {
+                println!("[match] round {round} peers: {peers:?}");
+                if !self.is_current(round) {
+                    return;
+                }
+                let parsed: Vec<(u8, Vec<SocketAddr>)> = peers
+                    .iter()
+                    .map(|p| {
+                        let addrs = p
+                            .candidates
+                            .iter()
+                            .filter_map(|c| c.to_socket_addrs().ok().and_then(|mut a| a.next()))
+                            .collect();
+                        (p.slot, addrs)
+                    })
+                    .collect();
+                if let Some(g) = &self.game {
+                    let _ = g.send(Command::Peers(parsed));
                 }
             }
             ToClient::RoundResult { round, entries, eliminated, standings } => {
@@ -597,6 +711,7 @@ impl Flow {
             }
             Report::Finished { round, result, forfeited_at } => {
                 println!("[match] round {round}: provisional {result}");
+                self.claimed = Some(round);
                 if let Some(frame) = forfeited_at {
                     self.send(ToServer::Forfeit { round, frame });
                 }
@@ -608,7 +723,10 @@ impl Flow {
                     "frame": result.frames,
                     "text": result.ending.to_string(),
                 }));
-                // Done, and others are not: watch them (ADR 0032).
+                // Done, and others are not: watch them (ADR 0032). In a bout
+                // the server settles later than this judge does, and a watch
+                // before it has is refused; `PlayerFinished` starts it then.
+                let bout = self.dealt_kind(round) == Some(Kind::HeadToHead);
                 let me = self.player.clone().unwrap_or_default();
                 let others: Vec<String> = self
                     .current
@@ -616,7 +734,7 @@ impl Flow {
                     .filter(|c| c.round == round)
                     .map(|c| c.playing.iter().filter(|p| **p != me).cloned().collect())
                     .unwrap_or_default();
-                if !others.is_empty() {
+                if !others.is_empty() && !bout {
                     self.start_spectating(round, others);
                 }
             }
@@ -625,6 +743,17 @@ impl Flow {
             }
             Report::Audio { round, frame, rate, channels, data } => {
                 self.send(ToServer::Audio { round, frame, rate, channels, data: data.into() });
+            }
+            Report::Endpoint { round, token, local } => {
+                if self.is_current(round) {
+                    self.send(ToServer::Endpoint { round, token, local });
+                }
+            }
+            Report::PeerLost { round, frame } => {
+                if self.is_current(round) {
+                    self.send(ToServer::PeerLost { round, frame });
+                    self.emit(json!({ "kind": "hud", "text": "lost the other player's machine; the server rules" }));
+                }
             }
             Report::Paused => {
                 let actions = self.settings.lock().unwrap().input.actions.clone();
@@ -663,6 +792,34 @@ impl Flow {
 
     fn is_current(&self, round: u64) -> bool {
         self.current.as_ref().is_some_and(|c| c.round == round)
+    }
+
+    /// The kind of the challenge dealt for `round`, from the library.
+    fn dealt_kind(&self, round: u64) -> Option<Kind> {
+        let c = self.dealt.get(&round)?;
+        let lib = self.library.catalog.game(&c.game)?;
+        Some(lib.challenge(&c.challenge)?.kind.into())
+    }
+
+    /// Where a bout's probes go: the server's own word, with `:port` meaning
+    /// the host this link dialled (ADR 0036). `None` on the in-process
+    /// server, which deals no bouts.
+    fn rendezvous_addr(&self) -> Option<SocketAddr> {
+        let said = self.rendezvous.as_deref()?;
+        let addr = match said.strip_prefix(':') {
+            Some(port) => {
+                let host = self.link.as_ref().and_then(|l| l.server.as_ref()).map(|s| s.host().to_string())?;
+                format!("{host}:{port}")
+            }
+            None => said.to_string(),
+        };
+        match addr.to_socket_addrs() {
+            Ok(mut a) => a.find(|a| a.is_ipv4()).or_else(|| addr.to_socket_addrs().ok()?.next()),
+            Err(e) => {
+                eprintln!("[bout] rendezvous {addr}: {e}");
+                None
+            }
+        }
     }
 
     // ---------------------------------------------------------- spectating
@@ -813,6 +970,8 @@ impl Flow {
         let settings_applied = self.auto.mode.map_or(true, |m| m == lobby.settings.mode)
             && self.auto.format.map_or(true, |f| f == lobby.settings.format)
             && self.auto.limit.map_or(true, |l| l == lobby.settings.default_limit_seconds)
+            && (!self.auto.head_to_head || lobby.settings.allow_head_to_head)
+            && self.auto.players.map_or(true, |n| lobby.players.len() >= n)
             && self.auto.games.as_ref().map_or(true, |g| lobby.enabled.iter().all(|r| g.contains(&r.game)));
         if self.auto.start && !self.auto_started && lobby.can_start && settings_applied {
             self.auto_started = true;
@@ -875,15 +1034,24 @@ impl Flow {
         let Some(ch) = lib.challenge(&c.challenge) else {
             return json!({ "kind": "intro", "title": lib.game.title, "console": lib.game.console, "goal": "" });
         };
+        let me = self.player.clone().unwrap_or_default();
+        let vs: Vec<String> = self
+            .current
+            .as_ref()
+            .and_then(|cur| self.slots.get(&cur.round))
+            .map(|s| s.iter().filter(|p| **p != me).cloned().collect())
+            .unwrap_or_default();
         json!({
             "kind": "intro",
             "title": ch.display_title(lib),
             "name": ch.name,
             "console": lib.game.console.to_uppercase(),
             "goal": ch.goal_text(),
+            "vs": if ch.is_head_to_head() { vs } else { Vec::new() },
             "challenge_kind": match ch.kind {
                 session_api::ChallengeKind::TimeTrial => "Time trial",
                 session_api::ChallengeKind::Survival => "Survival",
+                session_api::ChallengeKind::HeadToHead => "Head-to-head",
             },
             "custom": ch.is_custom(),
         })

@@ -4,6 +4,7 @@ members = [
     "crates/challenge-core",
     "crates/challenge-library",
     "crates/content-gen",
+    "crates/head-to-head",
     "crates/session-api",
     "crates/session-fake",
     "crates/session-libretro",

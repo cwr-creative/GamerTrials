@@ -75,8 +75,9 @@ impl Server {
         }
     }
 
-    /// The name a certificate must carry.
-    fn host(&self) -> &str {
+    /// The name a certificate must carry, and the host a `:port` rendezvous
+    /// means (ADR 0036).
+    pub fn host(&self) -> &str {
         self.addr.rsplit_once(':').map_or(&self.addr, |(h, _)| h)
     }
 }

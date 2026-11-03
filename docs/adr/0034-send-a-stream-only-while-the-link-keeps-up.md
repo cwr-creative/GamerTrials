@@ -75,7 +75,12 @@ per connection lets each watcher get what their own link carries.
 and Doom is now emulated (ADR 0018), which removes one of 0003's two
 objections. The other — two machines' emulators diverging silently — still
 stands, and replay would replace this stream rather than rescue it on a slow
-link. It is being explored separately; this decision does not depend on it.
+link. A spike on the `input-replication` branch measured it
+(`docs/replay-spike.md` there): Mesen and Snes9x replay exactly, across
+machines and from Windows to Linux, but dosbox-pure restored into a core with
+a history — as a watcher's always is — replays the game and not its sound.
+The relay was kept after matches over the internet with live players; the
+spike stays on its branch.
 
 **A second socket for the stream.** Control could never queue behind a
 picture. But a second socket competes for the same slow link, doubles the
