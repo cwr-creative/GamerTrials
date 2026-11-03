@@ -276,6 +276,10 @@ Open, roughly in order:
   players on separate machines over the internet, generated challenges
   dealt and every artifact hash agreeing, so **ADR 0013 is Accepted**.
   Head-to-head is Phase D, above.
+- **On `input-replication`, `cores/dos` is not the nightly**: dosbox-pure
+  1.0-preview7 built here with a patch that finishes its frame before it
+  reads input (`tools/dosbox-pure/`), so a replay catches up unsettled
+  (ADR 0037). Rebuild both platforms from it whenever the nightly moves.
 - **Linux (ADR 0035, Proposed) plays under WSLg, not yet on a desktop.**
   A round of each game runs with the overlay aligned over it; a real window
   manager, fullscreen, mouse capture, sound and a match against a Windows

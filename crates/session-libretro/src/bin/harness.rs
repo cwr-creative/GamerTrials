@@ -236,6 +236,9 @@ struct Args {
     quiet_before_state: Option<u64>,
     /// With --replay: resume from this state rather than play up to it.
     resume_state: Option<PathBuf>,
+    /// With --replay: play as a watcher catching up does, checking only the
+    /// picture, and say how fast.
+    fast: bool,
     settle: Option<Duration>,
     warmup: Option<u64>,
     synctest: Option<u64>,
@@ -651,7 +654,7 @@ fn run() -> Result<(), String> {
         // sound holds the same samples on both sides.
         replay::arm(&runner, false);
         warm_up(&mut runner, &spec, warmup, settle)?;
-        return replay_main(&mut runner, &spec, log, &header, args.passes, settle, warmup, args.resume_state.clone());
+        return replay_main(&mut runner, &spec, log, &header, args.passes, settle, warmup, args.resume_state.clone(), args.fast);
     }
     let mut recorder = match &args.record {
         Some(path) => {
@@ -1118,6 +1121,7 @@ fn replay_main(
     settle: Duration,
     warmup: u64,
     resume_state: Option<PathBuf>,
+    fast: bool,
 ) -> Result<(), String> {
     let mine = |k: &str| here.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
     for key in ["content", "entry"] {
@@ -1155,7 +1159,11 @@ fn replay_main(
             Some(p) => Some(fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?),
             None => None,
         };
-        let report = replay::replay(runner, spec, log, settle, resume.as_deref())?;
+        let started = std::time::Instant::now();
+        let report = replay::replay(runner, spec, log, settle, resume.as_deref(), fast)?;
+        let secs = started.elapsed().as_secs_f64();
+        let frames: u64 = report.attempts.iter().map(|a| a.frames).sum();
+        println!("[replay] {frames} frames in {secs:.1} s: {:.0} frames a second", frames as f64 / secs.max(1e-9));
         let title = if pass == 1 && warmup == 0 {
             "pass 1 (fresh core)".to_string()
         } else if pass == 1 {
@@ -1634,6 +1642,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         save_state_at: None,
         quiet_before_state: None,
         resume_state: None,
+        fast: false,
         settle: None,
         warmup: None,
         synctest: None,
@@ -1756,6 +1765,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 let v = value("--quiet-before-state")?;
                 args.quiet_before_state = Some(v.parse().map_err(|_| format!("--quiet-before-state wants frames, got {v}"))?);
             }
+            "--fast" => args.fast = true,
             "--resume-state" => args.resume_state = Some(PathBuf::from(value("--resume-state")?)),
             "--passes" => {
                 let v = value("--passes")?;

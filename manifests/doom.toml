@@ -87,6 +87,12 @@ boot_seconds = 16.0
 # client has already spent most of a 14 ms frame by its next turn and pays
 # nothing for this.
 settle_ms = 10
+# The core in cores/dos is dosbox-pure patched to finish its frame in flight
+# before it reads input (tools/dosbox-pure/), so input lands at the frame
+# boundary however soon the next frame follows, and a replay catching up a
+# late watcher need not settle at all: Doom catches up at ~800 frames a second
+# rather than ~100 (ADR 0037). Memory is still read settled.
+input_at_boundary = true
 
 # What each RetroPad button presses when a player drives DOOM with a gamepad
 # (ADR 0028). A suggestion, not a remap: the keyboard still passes straight

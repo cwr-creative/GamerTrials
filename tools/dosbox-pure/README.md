@@ -25,6 +25,17 @@ taken, not that the thread runs on after `retro_run` returns.
   version of the nightly DLLs in `cores/dos`, so the entry states still load.
 - GPL v2 or later, as dosbox-pure is.
 
+## Measured (2026-11-02)
+
+Built with the commands below — MSBuild 18 for Windows, gcc under Ubuntu 22.04
+in WSL for Linux — and in `cores/dos` on this branch. The patched core loads
+the Doom entry state and offers the same options. `harness --replay --fast`,
+which plays a recording as a catching-up watcher does, replayed 4200 frames
+of scripted Doom with every picture matching at ~800 frames a second, against
+~97 on the nightly, which must settle; the Linux build replayed the Windows
+recording the same way at ~720. Replayed normally, settled, it is in step as
+the nightly is.
+
 ## Building
 
 Both platforms at once, or neither (ADR 0035).

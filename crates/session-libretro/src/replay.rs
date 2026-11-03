@@ -749,6 +749,7 @@ pub fn replay(
     log: &Log,
     settle_for: Duration,
     resume: Option<&[u8]>,
+    fast: bool,
 ) -> Result<Report, String> {
     let labels = log.regions();
     // With a state from the recording machine: restored straight after the
@@ -792,12 +793,19 @@ pub fn replay(
                     break;
                 }
                 apply_input(input);
-                let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
-                settle(settle_for);
                 played += 1;
                 attempt.frames += 1;
-                let got = digest(runner, &events);
-                let differs = got.differs(want, &labels);
+                // `fast`: as a watcher catches up — nothing read but the
+                // picture, and no settle on a core that takes its input at
+                // the frame boundary (ADR 0037).
+                let differs = if fast {
+                    runner.advance_unobserved();
+                    if picture_digest(runner) == want.video { Vec::new() } else { vec!["video".to_string()] }
+                } else {
+                    let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
+                    settle(settle_for);
+                    digest(runner, &events).differs(want, &labels)
+                };
                 attempt.ended_in_step = differs.is_empty();
                 if differs.is_empty() {
                     continue;

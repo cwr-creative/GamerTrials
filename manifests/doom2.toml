@@ -47,6 +47,12 @@ controller = "keyboard"
 # other machine. The game itself starts only once both are in, after `Go`.
 boot_seconds = 16.0
 settle_ms = 10
+# The core in cores/dos is dosbox-pure patched to finish its frame in flight
+# before it reads input (tools/dosbox-pure/), so input lands at the frame
+# boundary however soon the next frame follows, and a replay catching up a
+# late watcher need not settle at all: Doom catches up at ~800 frames a second
+# rather than ~100 (ADR 0037). Memory is still read settled.
+input_at_boundary = true
 # The machine brings its own network (ADR 0036): the client joins it before
 # the game boots and relays its packets to the other player's machine.
 netplay = "packets"

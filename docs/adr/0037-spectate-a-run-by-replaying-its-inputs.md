@@ -102,8 +102,15 @@ settings and hears it from their own core.
 while the attempt replays: seconds on a console, longer on Doom, whose 10 ms
 settle bounds it near 100 frames a second against the run's 70 — measured, a
 15 s backlog took 27 s, and one of two minutes would not be caught before the
-round ends. Only dosbox-pure itself can lift that: read input after it has
-finished the frame in flight, and a catch-up needs no settle at all.
+round ends. Only dosbox-pure itself can lift that, and on this branch it does:
+`cores/dos` is dosbox-pure 1.0-preview7 patched to finish the frame in flight
+before it reads input (`tools/dosbox-pure/`), the manifests say
+`input_at_boundary`, and a catch-up runs unsettled. Measured in the harness,
+4200 frames of Doom replay exactly at ~800 frames a second on Windows and
+~720 on the Linux build of the same patch, against ~97; in the client, a
+watcher who gave up 15 s in caught up the attempt's 1040 frames in about
+1.3 s and stayed live, every picture check passing. The cost is a core
+built here rather than taken from the buildbot, on both platforms at once.
 
 **Doom's sound may differ** for a watcher, and every core this project adds
 must replay its picture exactly to be spectated, which the spike's harness
