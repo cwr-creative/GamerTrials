@@ -845,12 +845,14 @@ fn every_shipped_challenge_has_the_goal_it_should() {
     // Doom
     assert_eq!(goal("e1m1-time-trial"), "Reach the end!");
     assert_eq!(goal("e1m1-survival"), "Reach the end!");
+    // SMB1
+    assert_eq!(goal("8-4-bowser-survival"), "Defeat Bowser!");
 }
 
-/// E1M1, the SF2 bout and the U.N. Squadron bosses carry their own bounds;
-/// everything else takes the lobby's default.
+/// E1M1, the SF2 bout and the boss fights carry their own bounds; everything
+/// else takes the lobby's default.
 #[test]
-fn only_the_doom_stages_the_sf2_bout_and_the_unsquad_bosses_declare_a_limit() {
+fn only_the_doom_stages_the_sf2_bout_and_the_boss_fights_declare_a_limit() {
     let cat = shipped_catalog();
     for (lib, c) in cat.challenges() {
         let expected = match (lib.game.id.0.as_str(), c.id.0.as_str()) {
@@ -859,6 +861,7 @@ fn only_the_doom_stages_the_sf2_bout_and_the_unsquad_bosses_declare_a_limit() {
             ("sf2", _) => Some(14424),
             ("unsquad", "minks-survival") => Some(4507),
             ("unsquad", _) => Some(7212),
+            ("smb1", _) => Some(3606),
             _ => None,
         };
         assert_eq!(c.limit_frames, expected, "{}", c.id.0);
@@ -906,19 +909,20 @@ fn the_shipped_games_group_as_the_lobby_will_show_them() {
     };
     assert_eq!(
         ids(cat.grouping(Grouping::Era)),
-        [("1990s".to_string(), vec!["dkc".to_string(), "doom".into(), "doom2".into(), "sf2".into(), "smb3".into(), "unsquad".into()])]
+        [("1980s".to_string(), vec!["smb1".to_string()]),
+         ("1990s".into(), vec!["dkc".into(), "doom".into(), "doom2".into(), "sf2".into(), "smb3".into(), "unsquad".into()])]
     );
     assert_eq!(
         ids(cat.grouping(Grouping::Genre)),
         [("fighting".to_string(), vec!["sf2".to_string()]),
          ("fps".into(), vec!["doom".into(), "doom2".into()]),
-         ("platformer".into(), vec!["dkc".into(), "smb3".into()]),
+         ("platformer".into(), vec!["dkc".into(), "smb1".into(), "smb3".into()]),
          ("shooter".into(), vec!["unsquad".into()])]
     );
     assert_eq!(
         ids(cat.grouping(Grouping::Console)),
         [("dos".to_string(), vec!["doom".to_string(), "doom2".into()]),
-         ("nes".into(), vec!["smb3".into()]),
+         ("nes".into(), vec!["smb1".into(), "smb3".into()]),
          ("snes".into(), vec!["dkc".into(), "sf2".into(), "unsquad".into()])]
     );
 }
