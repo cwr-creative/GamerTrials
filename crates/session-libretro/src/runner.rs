@@ -471,8 +471,38 @@ impl SharedRunner for LibretroRunner {
     }
 
     fn snapshot(&mut self) -> Result<Snapshot, RunnerError> {
+        self.snapshot_in(SAVESTATE_SAME_INSTANCE)
+    }
+
+    fn restore(&mut self, snapshot: &Snapshot) -> Result<(), RunnerError> {
+        self.restore_in(snapshot, SAVESTATE_SAME_INSTANCE)
+    }
+
+    fn digest(&self) -> Vec<u8> {
+        // What the facts are read from, and the observer that reads them:
+        // the spike proved these exact across machines; the core's own
+        // state blob carries headers and host buffers it did not.
+        let mut out = self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]).to_vec();
+        out.extend(self.watcher.state());
+        out
+    }
+}
+
+impl LibretroRunner {
+    /// A snapshot another machine can restore: the same as a rollback's, in
+    /// the ordinary savestate context, which a core may not take shortcuts in
+    /// that hold only for its own address space (ADR 0037).
+    pub fn snapshot_portable(&mut self) -> Result<Snapshot, RunnerError> {
+        self.snapshot_in(0)
+    }
+
+    pub fn restore_portable(&mut self, snapshot: &Snapshot) -> Result<(), RunnerError> {
+        self.restore_in(snapshot, 0)
+    }
+
+    fn snapshot_in(&mut self, context: u32) -> Result<Snapshot, RunnerError> {
         self.settle();
-        libretro::set_savestate_context(SAVESTATE_SAME_INSTANCE);
+        libretro::set_savestate_context(context);
         let state = self.core.save_state();
         libretro::set_savestate_context(0);
         let state = state.map_err(RunnerError)?;
@@ -485,7 +515,7 @@ impl SharedRunner for LibretroRunner {
         Ok(Snapshot(bytes))
     }
 
-    fn restore(&mut self, snapshot: &Snapshot) -> Result<(), RunnerError> {
+    fn restore_in(&mut self, snapshot: &Snapshot, context: u32) -> Result<(), RunnerError> {
         let b = &snapshot.0;
         if b.len() < 12 {
             return Err(RunnerError("snapshot is too short to be one of this runner's".into()));
@@ -495,7 +525,7 @@ impl SharedRunner for LibretroRunner {
         let observer = b.get(12..12 + n).ok_or_else(|| RunnerError("snapshot is short".into()))?;
         let state = &b[12 + n..];
         self.settle();
-        libretro::set_savestate_context(SAVESTATE_SAME_INSTANCE);
+        libretro::set_savestate_context(context);
         let loaded = self.core.load_state(state);
         libretro::set_savestate_context(0);
         loaded.map_err(RunnerError)?;
@@ -505,15 +535,6 @@ impl SharedRunner for LibretroRunner {
         self.slot_events.clear();
         self.last_frame = Some(Instant::now());
         Ok(())
-    }
-
-    fn digest(&self) -> Vec<u8> {
-        // What the facts are read from, and the observer that reads them:
-        // the spike proved these exact across machines; the core's own
-        // state blob carries headers and host buffers it did not.
-        let mut out = self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]).to_vec();
-        out.extend(self.watcher.state());
-        out
     }
 }
 

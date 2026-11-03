@@ -131,6 +131,35 @@ differed in places that never reached the screen or the facts: on one run for
 14 frames, on the other for nearly all of them. What those bytes are is not
 known; host-side state such as file timestamps in DOS's buffers is a guess.
 
+## Catching up from a state (2026-11-02)
+
+Tried as the way a late watcher of Doom could skip its slow replay of the
+backlog (ADR 0037). `--save-state-at <frame>` writes a portable state beside
+a recording — the frame's pad, mouse buttons and held keys, then the runner's
+snapshot in the ordinary savestate context — and `--resume-state <file>`
+restores it straight after the first entry and compares only the frames after
+it. `--quiet-before-state <n>` makes the script hold nothing over the frames
+before the save.
+
+- **Snes9x** resumes exactly; **Mesen** exactly but for 120 frames of sound.
+- **dosbox-pure** keeps which keys and buttons are down outside its state, and
+  passes a release on only for one it has seen pressed, so a replica restored
+  with nothing held loses the player's next release. Restoring after giving
+  the replica the player's input and running one throwaway frame mends that.
+- **It still diverges, at the first sound after the restore.** Captured with
+  nothing held, the restored Doom matched until frame 2901, where an item was
+  picked up; captured at 1500 or at 2200, with the mouse or without, at a 10
+  or a 50 ms settle, it parts on that frame and looks elsewhere after it (half
+  the 3D view's pixels differ; the status bar does not). Its mixer is partly
+  reset on load and partly outside the state, and Doom's sound library drives
+  its own timer from the sound card.
+
+So the state catch-up was not built into the client: the cores it would be
+exact for replay fast enough already, and the one it was for it is not exact
+for. What would lift Doom's catch-up is dosbox-pure reading input only once
+the frame in flight is finished, which would leave a replay nothing to settle
+for.
+
 ## Consequences outside the spike
 
 Found on the way. Fixed on `server-relay`, for the client as much as the

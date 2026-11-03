@@ -155,6 +155,63 @@ pub fn decode_frames(bytes: &[u8], count: usize) -> Result<Vec<Input>, String> {
     Ok(out)
 }
 
+/// The format of [`save_state`]'s bytes.
+const STATE_FORMAT: u8 = 1;
+
+/// The machine as a watcher on another machine can resume it (ADR 0037): the
+/// input the frame just run was given — pad, mouse buttons, keys held — then
+/// the runner's portable snapshot: its frame, its watcher's state, the
+/// core's. Taken at a frame boundary.
+pub fn save_state(runner: &mut LibretroRunner) -> Result<Vec<u8>, String> {
+    let pad = libretro::JOYPAD.load(Ordering::Relaxed);
+    let (_, _, buttons) = libretro::mouse();
+    let keys = libretro::keys_held();
+    let snapshot = runner.snapshot_portable().map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(8 + keys.len() * 2 + snapshot.0.len());
+    out.push(STATE_FORMAT);
+    out.extend_from_slice(&(pad as u16).to_le_bytes());
+    out.extend_from_slice(&(buttons as u16).to_le_bytes());
+    out.push(keys.len().min(255) as u8);
+    for code in keys.iter().take(255) {
+        out.extend_from_slice(&(*code as u16).to_le_bytes());
+    }
+    out.extend_from_slice(&snapshot.0);
+    Ok(out)
+}
+
+/// Resumes `runner` where [`save_state`] left another machine's, and returns
+/// the frame that was.
+///
+/// A core may keep notes on its input outside the state it saves:
+/// dosbox-pure keeps which keys and buttons are down, passes a release on
+/// only for one it has seen pressed, and turns a change in the pad or the
+/// mouse into an event by comparing with the last frame. Restored with this
+/// machine's notes, the other's next release is lost and the game goes
+/// another way. So first this machine is given the other's input and run one
+/// frame, which brings the notes into line and spends the events they raise
+/// on a machine about to be replaced; then the state replaces it.
+pub fn restore_state(runner: &mut LibretroRunner, bytes: &[u8]) -> Result<u64, String> {
+    let head = bytes.get(..6).ok_or("a state cut short")?;
+    if head[0] != STATE_FORMAT {
+        return Err(format!("a state in format {}, which this build cannot read", head[0]));
+    }
+    let pad = u32::from(u16::from_le_bytes([head[1], head[2]]));
+    let buttons = u32::from(u16::from_le_bytes([head[3], head[4]]));
+    let n = head[5] as usize;
+    let keys = bytes.get(6..6 + 2 * n).ok_or("a state cut short in its keys")?;
+    let keys: Vec<u32> = keys.chunks_exact(2).map(|k| u32::from(u16::from_le_bytes([k[0], k[1]]))).collect();
+    let snapshot = session_api::Snapshot(bytes[6 + 2 * n..].to_vec());
+    libretro::keys_clear();
+    for &code in &keys {
+        libretro::key_down(code);
+    }
+    libretro::JOYPAD.store(pad, Ordering::Relaxed);
+    libretro::set_mouse(0, 0, buttons);
+    runner.run_frame_raw();
+    runner.restore_portable(&snapshot).map_err(|e| e.to_string())?;
+    Ok(runner.frame())
+}
+
 /// The picture the core last presented, as a number: its size and every pixel.
 /// What a watcher compares with the player's to know it is still watching the
 /// same game (ADR 0037). It is the picture rather than memory because the
@@ -577,6 +634,19 @@ impl Script {
         self.next() % one_in == 0
     }
 
+    /// Let go of everything, for a frame with nothing held.
+    pub fn release_all(&mut self) {
+        for code in std::mem::take(&mut self.held_keys) {
+            libretro::key_up(code);
+        }
+        self.held_pad = 0;
+        self.buttons = 0;
+        libretro::JOYPAD.store(0, Ordering::Relaxed);
+        if self.mouse {
+            libretro::set_mouse(0, 0, 0);
+        }
+    }
+
     /// Set the input for the next frame.
     pub fn drive(&mut self) {
         for i in 0..self.pad.len() {
@@ -678,8 +748,14 @@ pub fn replay(
     spec: &StageSpec,
     log: &Log,
     settle_for: Duration,
+    resume: Option<&[u8]>,
 ) -> Result<Report, String> {
     let labels = log.regions();
+    // With a state from the recording machine: restored straight after the
+    // first entry, and the frames it already holds skipped rather than
+    // played (ADR 0037's catch-up).
+    let mut skip = 0u64;
+    let mut resume = resume;
     let mut report = Report::default();
     let mut parts: Vec<(String, u64)> = labels.iter().cloned().map(|l| (l, 0)).collect();
     parts.push(("video".into(), 0));
@@ -694,6 +770,17 @@ pub fn replay(
                 // them away for the same reason.
                 libretro::take_key_edges();
                 report.attempts.push(AttemptReport::default());
+                // The state belongs to the first attempt alone.
+                skip = 0;
+                if let Some(state) = resume.take() {
+                    skip = restore_state(runner, state)?;
+                    println!("[replay] resumed from a state at frame {skip}");
+                }
+            }
+            Step::Frame(_, _) if skip > 0 && report.attempts.last().is_some_and(|a| a.frames < skip) => {
+                let attempt = report.attempts.last_mut().expect("checked");
+                attempt.frames += 1;
+                played += 1;
             }
             Step::Frame(input, want) => {
                 let attempt = report

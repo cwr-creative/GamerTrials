@@ -889,6 +889,19 @@ pub fn deliver_keys() {
 /// restored — a key the core thinks is held across an entry is a stage that
 /// starts with the player walking into a wall. The mouse is released with the
 /// keys, for the same reason: a fire button held across an entry is a shot.
+pub fn keys_held() -> Vec<u32> {
+    lock(&KEYS_DOWN).iter().copied().collect()
+}
+
+/// Make `codes` the held keys without telling the core: for a state restored
+/// from another machine, whose own keyboard state came with it (ADR 0037).
+/// Edges still waiting for the core are dropped; they belong to the machine
+/// that was replaced.
+pub fn set_keys_held(codes: &[u32]) {
+    *lock(&KEYS_DOWN) = codes.iter().copied().collect();
+    lock(&PENDING_KEYS).clear();
+}
+
 pub fn keys_clear() {
     let held: Vec<u32> = lock(&KEYS_DOWN).iter().copied().collect();
     for k in held {

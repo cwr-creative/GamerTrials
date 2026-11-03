@@ -230,6 +230,12 @@ struct Args {
     script: Option<u64>,
     replay: Option<PathBuf>,
     passes: u32,
+    /// With --record: save a portable state after this frame, beside the log.
+    save_state_at: Option<u64>,
+    /// With --save-state-at: hold nothing for this many frames before it.
+    quiet_before_state: Option<u64>,
+    /// With --replay: resume from this state rather than play up to it.
+    resume_state: Option<PathBuf>,
     settle: Option<Duration>,
     warmup: Option<u64>,
     synctest: Option<u64>,
@@ -645,7 +651,7 @@ fn run() -> Result<(), String> {
         // sound holds the same samples on both sides.
         replay::arm(&runner, false);
         warm_up(&mut runner, &spec, warmup, settle)?;
-        return replay_main(&mut runner, &spec, log, &header, args.passes, settle, warmup);
+        return replay_main(&mut runner, &spec, log, &header, args.passes, settle, warmup, args.resume_state.clone());
     }
     let mut recorder = match &args.record {
         Some(path) => {
@@ -697,13 +703,25 @@ fn run() -> Result<(), String> {
                 break;
             }
             if let Some(s) = script.as_mut() {
-                s.drive();
+                // `--quiet-before-state`: nothing held over the frames before
+                // the state is saved.
+                let next = runner.frame() + 1;
+                match (args.save_state_at, args.quiet_before_state) {
+                    (Some(at), Some(q)) if next + q > at && next <= at => s.release_all(),
+                    _ => s.drive(),
+                }
             }
             let input = recorder.as_ref().map(|_| replay::capture_input());
             let events = runner.advance().map_err(|e| e.to_string())?.to_vec();
             replay::settle(settle);
             if let (Some(rec), Some(input)) = (recorder.as_mut(), input) {
                 rec.frame(input, replay::digest(&mut runner, &events))?;
+                if args.save_state_at == Some(runner.frame()) && run.as_ref().map_or(true, |r| r.attempts() == 1) {
+                    let state = replay::save_state(&mut runner)?;
+                    let path = args.record.as_ref().expect("recording").with_extension("state");
+                    fs::write(&path, &state).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                    println!("[record] state after frame {} -> {} ({} bytes)", runner.frame(), path.display(), state.len());
+                }
             }
             for event in &events {
                 if let SessionEvent::StageCleared { .. } | SessionEvent::StageExited { .. } = event
@@ -1099,6 +1117,7 @@ fn replay_main(
     passes: u32,
     settle: Duration,
     warmup: u64,
+    resume_state: Option<PathBuf>,
 ) -> Result<(), String> {
     let mine = |k: &str| here.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
     for key in ["content", "entry"] {
@@ -1132,7 +1151,11 @@ fn replay_main(
     );
     let mut clean = true;
     for pass in 1..=passes.max(1) {
-        let report = replay::replay(runner, spec, log, settle)?;
+        let resume = match &resume_state {
+            Some(p) => Some(fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?),
+            None => None,
+        };
+        let report = replay::replay(runner, spec, log, settle, resume.as_deref())?;
         let title = if pass == 1 && warmup == 0 {
             "pass 1 (fresh core)".to_string()
         } else if pass == 1 {
@@ -1608,6 +1631,9 @@ fn parse_args() -> Result<Option<Args>, String> {
         script: None,
         replay: None,
         passes: 2,
+        save_state_at: None,
+        quiet_before_state: None,
+        resume_state: None,
         settle: None,
         warmup: None,
         synctest: None,
@@ -1722,6 +1748,15 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.warmup =
                     Some(v.parse().map_err(|_| format!("--warmup wants a count, got {v}"))?);
             }
+            "--save-state-at" => {
+                let v = value("--save-state-at")?;
+                args.save_state_at = Some(v.parse().map_err(|_| format!("--save-state-at wants a frame, got {v}"))?);
+            }
+            "--quiet-before-state" => {
+                let v = value("--quiet-before-state")?;
+                args.quiet_before_state = Some(v.parse().map_err(|_| format!("--quiet-before-state wants frames, got {v}"))?);
+            }
+            "--resume-state" => args.resume_state = Some(PathBuf::from(value("--resume-state")?)),
             "--passes" => {
                 let v = value("--passes")?;
                 args.passes = v.parse().map_err(|_| format!("--passes wants a count, got {v}"))?;

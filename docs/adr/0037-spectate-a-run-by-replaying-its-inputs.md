@@ -72,10 +72,21 @@ rejected for good; `main` keeps it.
 arrives. Keeps a player's uplink idle, but makes every arrival a request to
 the player and a burst on their link, for a stream that costs a few kilobits.
 
-**Catch up from a savestate** the sender captures on request. Instant for a
-console, 3.6 MB for Doom over a player's uplink, and a state of a mid-frame
-threaded core is the one thing the spike showed not to trust. Replaying the
-attempt from its entry state uses what both sides already hold.
+**Catch up from a savestate** the sender captures on request. Tried, for
+the one core that needs it, and measured in the harness (`--save-state-at`,
+`--resume-state`): a state taken mid-attempt at a frame boundary and restored
+on another process carries Snes9x on exactly and Mesen exactly but for 120
+frames of sound, but not dosbox-pure. Its saved state leaves out what it keeps
+on input — keys and buttons down, which it needs to pass a release on — and
+part of its mixer. The first is mended by giving the replica the player's
+held input and running one throwaway frame before the restore; the second is
+not: the restored Doom plays the same game until the first sound after the
+restore — an item picked up — and from that frame looks elsewhere, on the
+same frame whether the state was taken at 1500 or 2200, with or without the
+mouse, at any settle. Doom's sound library times itself off the sound card,
+which is this ADR's warning come true. The 1.4 MB a Doom state compresses to
+would also be 16 s of a phone's uplink. Replaying the attempt from its entry
+state uses what both sides already hold, and is exact.
 
 **Check memory, not the picture.** The spike's whole-memory digests showed
 dosbox-pure's sound-side memory differing while the game did not; the picture
@@ -89,7 +100,10 @@ settings and hears it from their own core.
 
 **A watcher needs the game's content**, as a player does. A late watcher waits
 while the attempt replays: seconds on a console, longer on Doom, whose 10 ms
-settle bounds it near 100 frames a second.
+settle bounds it near 100 frames a second against the run's 70 — measured, a
+15 s backlog took 27 s, and one of two minutes would not be caught before the
+round ends. Only dosbox-pure itself can lift that: read input after it has
+finished the frame in flight, and a catch-up needs no settle at all.
 
 **Doom's sound may differ** for a watcher, and every core this project adds
 must replay its picture exactly to be spectated, which the spike's harness
