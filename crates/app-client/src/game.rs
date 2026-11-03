@@ -466,9 +466,14 @@ impl Replica {
     }
 
     /// Plays `input` and checks the picture where the player sent a check.
-    fn play(&mut self, input: &replay::Input, runner: &mut LibretroRunner) -> Result<(), String> {
+    /// Catching up, nothing is read from the frame but its picture.
+    fn play(&mut self, input: &replay::Input, runner: &mut LibretroRunner, catching_up: bool) -> Result<(), String> {
         replay::apply_input(input);
-        runner.advance().map_err(|e| e.to_string())?;
+        if catching_up {
+            runner.advance_unobserved();
+        } else {
+            runner.advance().map_err(|e| e.to_string())?;
+        }
         self.played += 1;
         let frame = runner.frame();
         let want = self.attempts.front().and_then(|a| a.checks.get(&frame)).copied();
@@ -1093,7 +1098,7 @@ fn replica_turn(l: &mut Loaded, r: &mut Replica, window: &mut Window) -> Result<
         let outcome = (|| {
             while r.ahead() > LEAD && Instant::now() < until {
                 let Some(input) = r.next(l.machine.runner_mut(), &l.spec)? else { break };
-                r.play(&input, l.machine.runner_mut())?;
+                r.play(&input, l.machine.runner_mut(), true)?;
                 played = true;
             }
             Ok::<_, String>(())
@@ -1116,7 +1121,7 @@ fn replica_turn(l: &mut Loaded, r: &mut Replica, window: &mut Window) -> Result<
         return Ok(false);
     };
     r.playing = true;
-    r.play(&input, l.machine.runner_mut())?;
+    r.play(&input, l.machine.runner_mut(), false)?;
     Ok(true)
 }
 

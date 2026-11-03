@@ -367,6 +367,19 @@ impl LibretroRunner {
         self.fresh = false;
     }
 
+    /// One frame and nothing read from it: for a replay catching up, which
+    /// shows no facts and checks only the picture (ADR 0037). A core that
+    /// takes its input at the frame boundary itself is not waited for, which
+    /// is the whole of what makes catching up fast on a threaded one.
+    pub fn advance_unobserved(&mut self) {
+        if !self.manifest.libretro.input_at_boundary {
+            self.settle();
+        }
+        self.frame += 1;
+        self.run_core_frame();
+        self.fresh = false;
+    }
+
     /// One `retro_run`, and when it returned.
     fn run_core_frame(&mut self) {
         self.core.run_frame();

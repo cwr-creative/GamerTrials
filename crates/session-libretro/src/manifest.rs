@@ -124,6 +124,9 @@ struct LibretroDoc {
     /// Host milliseconds, not emulated time: see [`LibretroConfig::settle`].
     #[serde(default)]
     settle_ms: Option<u64>,
+    /// See [`LibretroConfig::input_at_boundary`].
+    #[serde(default)]
+    input_at_boundary: bool,
     /// How a head-to-head machine is shared: `"rollback"` or `"packets"`
     /// (ADR 0036). Required when any challenge is head-to-head.
     #[serde(default)]
@@ -480,6 +483,13 @@ pub struct LibretroConfig {
     /// (invariant 4). It depends on the game's pinned cycles, which is why it
     /// is the manifest's to say.
     pub settle: Duration,
+    /// The core finishes the frame in flight before it reads a frame's input,
+    /// so that input lands at the frame boundary however soon `retro_run`
+    /// follows the last. dosbox-pure does once patched
+    /// (`tools/dosbox-pure/`); unpatched it reads input first, and only a
+    /// settle keeps the input where it belongs. A replay catching up, which
+    /// reads no memory, then needs no settle at all (ADR 0037).
+    pub input_at_boundary: bool,
     /// How this game's machine is shared for a bout, if it can be (ADR 0036).
     pub netplay: Option<Netplay>,
 }
@@ -1371,6 +1381,7 @@ impl Doc {
                 pad_keys,
                 boot_frames,
                 settle,
+                input_at_boundary: lr.input_at_boundary,
                 netplay,
             },
             watches,

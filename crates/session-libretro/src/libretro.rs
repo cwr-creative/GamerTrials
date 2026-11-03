@@ -1586,7 +1586,12 @@ fn clamp_i16(v: i32) -> i16 {
 }
 
 unsafe extern "C" fn cb_input_poll() {
-    // The main loop polls window and gamepad before calling retro_run.
+    // The main loop polls window and gamepad before calling retro_run. What
+    // is left is the keyboard callback's edges, handed over when the core
+    // asks for input rather than before `retro_run`: a core that finishes
+    // its frame in flight before it reads input (dosbox-pure, patched — ADR
+    // 0037) then takes them at the frame boundary however soon it was called.
+    deliver_keys();
 }
 
 unsafe extern "C" fn cb_input_state(port: u32, device: u32, _index: u32, id: u32) -> i16 {
@@ -1909,8 +1914,9 @@ impl Core {
         info
     }
 
+    /// One `retro_run`. Key edges go to the core when it polls for input
+    /// (`cb_input_poll`).
     pub fn run_frame(&mut self) {
-        deliver_keys();
         unsafe { (self.fn_run)() };
     }
 

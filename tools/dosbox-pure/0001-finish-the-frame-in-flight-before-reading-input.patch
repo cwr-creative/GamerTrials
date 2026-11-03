@@ -1,0 +1,19 @@
+diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
+index f9a91bf..366eae7 100644
+--- a/dosbox_pure_libretro.cpp
++++ b/dosbox_pure_libretro.cpp
+@@ -3472,6 +3472,14 @@ void retro_run(void)
+ 	if (!dbp_optionsupdatecallback && control && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &variable_update) && variable_update)
+ 		check_variables(); // can't do this while DOS has crashed (control is NULL)
+ 
++	// GamerTrials: finish the frame in flight before reading input, so input
++	// lands at the frame boundary whenever retro_run is called. Unpatched,
++	// input queued here is taken by the emulation thread mid-frame if that
++	// frame is still running, at a point host timing decides; a frontend that
++	// replays the same input must then wait the frame out itself. The wait
++	// below then finds no frame pending and returns.
++	if (dbp_state == DBPSTATE_RUNNING) DBP_ThreadControl(TCM_FINISH_FRAME);
++
+ 	// start input update
+ 	input_poll_cb();
+ 	//input_state_cb(0, RETRO_DEVICE_NONE, 0, 0); // poll keys? 
