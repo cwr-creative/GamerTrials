@@ -19,10 +19,10 @@ use crate::libretro::{
     self, Core, RETRO_DEVICE_JOYPAD, RETRO_DEVICE_KEYBOARD, RETRO_MEMORY_SAVE_RAM,
     RETRO_MEMORY_SYSTEM_RAM, VIDEO,
 };
-use crate::manifest::{Controller, Manifest, Netplay};
+use crate::manifest::{Controller, Manifest, Netplay, Ready};
 use crate::prep::Content;
 use crate::statebind;
-use crate::watch::Watcher;
+use crate::watch::{ReadyCheck, ReadyState, Watcher};
 
 pub struct LibretroRunner {
     manifest: Manifest,
@@ -73,6 +73,22 @@ pub struct LibretroRunner {
     /// When `retro_run` last returned, for a core that keeps emulating after
     /// it does (`LibretroConfig::settle`).
     last_frame: Option<Instant>,
+    /// Whether `enter` goes on to the stage's first playable frame. Off for an
+    /// author looking at what comes before it (`--no-ready`).
+    honour_ready: bool,
+    /// The machine at that frame, and what it was entered from: re-entering
+    /// restores this rather than running the frames again (ADR 0039).
+    at_ready: Option<(StageSpec, Vec<u8>)>,
+    /// A machine still on its way there under a caller's own pump, because it
+    /// needs a network to arrive (`arm_ready`).
+    lead_in: Option<LeadIn>,
+}
+
+/// A networked machine on its way to its first playable frame, and then
+/// standing there until the bout goes.
+struct LeadIn {
+    check: ReadyCheck,
+    state: ReadyState,
 }
 
 /// How long a threaded core is given to finish booting after the frame
@@ -237,6 +253,9 @@ impl LibretroRunner {
             content_key,
             rebind_state: rebindable,
             last_frame: None,
+            honour_ready: true,
+            at_ready: None,
+            lead_in: None,
         };
 
         // Some cores are not ready to unserialize until they have produced a
@@ -339,6 +358,49 @@ impl LibretroRunner {
         self.core.save_state()
     }
 
+    /// Whether `enter` runs on to a stage's `ready`. An author finding out
+    /// where that frame is turns it off, to see what comes before it.
+    pub fn honour_ready(&mut self, on: bool) {
+        self.honour_ready = on;
+    }
+
+    /// Forget the machine kept at `ready`: the entry state it came from has
+    /// been written over.
+    pub fn forget_ready(&mut self) {
+        self.at_ready = None;
+    }
+
+    /// For a machine that reaches its first playable frame on the network
+    /// (ADR 0039): from here each frame `advance` runs is silent, reports
+    /// nothing and does not count, until [`go`](LibretroRunner::go). The
+    /// caller pumps it and reads [`lead_state`](LibretroRunner::lead_state).
+    pub fn arm_ready(&mut self, spec: &StageSpec) {
+        let Some(ready) = self.manifest.stage(&spec.stage.0).and_then(|s| s.ready.clone()) else {
+            return;
+        };
+        libretro::set_silent(true);
+        self.lead_in =
+            Some(LeadIn { check: ReadyCheck::new(&self.manifest, &ready), state: ReadyState::Waiting });
+    }
+
+    /// Where an armed machine stands. `None` when none is armed.
+    pub fn lead_state(&self) -> Option<ReadyState> {
+        self.lead_in.as_ref().map(|l| l.state)
+    }
+
+    /// The countdown is over: this frame is frame 0, as it is on return from
+    /// `enter` for a machine that can get there alone.
+    pub fn go(&mut self) {
+        if self.lead_in.take().is_none() {
+            return;
+        }
+        libretro::set_silent(false);
+        self.watcher.reset();
+        self.frame = 0;
+        self.events.clear();
+        self.slot_events.clear();
+    }
+
     /// Allow a `State` entry to be rebound to the loaded ROM before it is
     /// restored (ADR 0019). The state file itself is never written to.
     pub fn set_state_rebinding(&mut self, on: bool) {
@@ -404,11 +466,66 @@ impl LibretroRunner {
         );
     }
 
+    /// One frame before the stage starts: nothing observed, nothing counted.
+    /// In the order [`step`](LibretroRunner::step) reads a threaded core in.
+    fn lead_in_frame(&mut self, check: &mut ReadyCheck) -> ReadyState {
+        let threaded = !self.manifest.libretro.settle.is_zero();
+        if threaded {
+            self.settle();
+        } else {
+            self.run_core_frame();
+        }
+        let state = check.tick(self.core.memory(RETRO_MEMORY_SYSTEM_RAM).unwrap_or(&[]));
+        if threaded {
+            self.run_core_frame();
+        }
+        state
+    }
+
+    /// From the entry point to the stage's first playable frame, with nobody
+    /// touching the machine, and keep it there for the next entry (ADR 0039).
+    fn run_to_ready(&mut self, spec: &StageSpec, ready: &Ready) -> Result<(), RunnerError> {
+        let mut check = ReadyCheck::new(&self.manifest, ready);
+        libretro::set_silent(true);
+        let reached = loop {
+            if libretro::shutdown_requested() {
+                break Err(RunnerError(format!(
+                    "{} shut down before reaching its first playable frame",
+                    spec.stage
+                )));
+            }
+            match self.lead_in_frame(&mut check) {
+                ReadyState::Waiting => {}
+                ReadyState::Ready => break Ok(()),
+                ReadyState::TimedOut => {
+                    break Err(RunnerError(format!(
+                        "{} never reached its first playable frame: {} frames and `ready` had \
+                         not fired",
+                        spec.stage,
+                        check.ran()
+                    )))
+                }
+            }
+        };
+        libretro::set_silent(false);
+        reached?;
+        println!("[stage] {} ready after {} frames", spec.stage, check.ran());
+        let state = self.capture_state().map_err(RunnerError)?;
+        self.at_ready = Some((spec.clone(), state));
+        Ok(())
+    }
+
     /// One frame of the machine, observed: what `advance` does, for every
     /// caller that advances.
     fn step(&mut self) {
         self.events.clear();
         self.slot_events.clear();
+        if let Some(mut lead) = self.lead_in.take() {
+            lead.state = self.lead_in_frame(&mut lead.check);
+            self.lead_in = Some(lead);
+            self.fresh = false;
+            return;
+        }
         self.frame += 1;
         if self.manifest.libretro.settle.is_zero() {
             self.run_core_frame();
@@ -440,6 +557,21 @@ impl LibretroRunner {
     pub fn plug(&mut self, ports: u8) {
         self.core.plug_ports(ports);
         self.ports = ports.clamp(1, libretro::MAX_PORTS);
+    }
+}
+
+impl LibretroRunner {
+    /// The machine is at the stage's first playable frame, and this is frame
+    /// 0. Every duration reported from here is measured from this point, which
+    /// is what makes two players comparable at all (ADR 0005). Boot frames and
+    /// the frames to `ready` are before the stage, so they are not in it.
+    fn entered(&mut self, spec: &StageSpec) {
+        self.fresh = false;
+        self.watcher.reset();
+        self.frame = 0;
+        self.events.clear();
+        self.slot_events.clear();
+        self.events.push(SessionEvent::StageEntered { frame: 0, stage: spec.stage.clone() });
     }
 }
 
@@ -598,6 +730,25 @@ impl StageRunner for LibretroRunner {
         self.settle();
         libretro::deliver_keys();
 
+        // Where the stage really starts, for a machine that gets there alone.
+        // One that needs its network to is armed by the caller instead.
+        let ready = match self.manifest.libretro.netplay {
+            Some(Netplay::Packets) => None,
+            _ if !self.honour_ready => None,
+            _ => self.manifest.stage(&spec.stage.0).and_then(|s| s.ready.clone()),
+        };
+        // A death in a time trial lands here: the frames to the first playable
+        // one were run once, and nobody is charged for them again.
+        let at_ready = match &self.at_ready {
+            Some((entered, state)) if ready.is_some() && entered == spec => Some(state),
+            _ => None,
+        };
+        if let Some(state) = at_ready {
+            self.core.load_state(state).map_err(RunnerError)?;
+            self.entered(spec);
+            return Ok(());
+        }
+
         match &spec.entry {
             EntryPoint::State(key) => {
                 let path = PathBuf::from(&key.0);
@@ -650,6 +801,18 @@ impl StageRunner for LibretroRunner {
                     path.display(),
                     data.len()
                 );
+                // A restore draws nothing, so the picture held through the
+                // countdown would be whatever the core drew at power-on. One
+                // frame draws it and the same restore takes the frame back,
+                // so every count stays as it was. A threaded core shows the
+                // frame before the one it runs, so one frame shows it nothing:
+                // such a stage says `ready` instead.
+                if self.fresh && ready.is_none() && self.manifest.libretro.settle.is_zero() {
+                    libretro::set_silent(true);
+                    self.run_core_frame();
+                    libretro::set_silent(false);
+                    self.core.load_state(&data).map_err(RunnerError)?;
+                }
             }
             // The game is asked to start somewhere itself. Nothing is passed to
             // the core: a DOS bundle carries its own `dosbox.conf`, whose
@@ -683,15 +846,10 @@ impl StageRunner for LibretroRunner {
             }
         }
 
-        self.fresh = false;
-        self.watcher.reset();
-        // Stage entry is frame 0. Every duration reported from here is measured
-        // from this point, which is what makes two players comparable at all
-        // (ADR 0005). Boot frames are before the stage, so they are not in it.
-        self.frame = 0;
-        self.events.clear();
-        self.slot_events.clear();
-        self.events.push(SessionEvent::StageEntered { frame: 0, stage: spec.stage.clone() });
+        if let Some(ready) = &ready {
+            self.run_to_ready(spec, ready)?;
+        }
+        self.entered(spec);
         Ok(())
     }
 

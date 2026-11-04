@@ -423,6 +423,9 @@ static PORTS: AtomicU32 = AtomicU32::new(1);
 /// A frame being run again after a restore (ADR 0036): the player saw and
 /// heard it already, so the picture and the sound it makes are dropped.
 static REPLAYING: AtomicU32 = AtomicU32::new(0);
+/// A frame before the stage starts (ADR 0039): its sound is nobody's, and its
+/// picture may be the one the player is shown when it does.
+static SILENT: AtomicU32 = AtomicU32::new(0);
 /// What `GET_SAVESTATE_CONTEXT` answers: NORMAL (0) for a state that goes to
 /// disk, RUNAHEAD_SAME_INSTANCE (1) while a rollback saves and restores
 /// within one session, which lets a core take its fast path.
@@ -466,6 +469,14 @@ pub fn set_replaying(on: bool) {
 
 fn replaying() -> bool {
     REPLAYING.load(Ordering::Relaxed) != 0
+}
+
+pub fn set_silent(on: bool) {
+    SILENT.store(u32::from(on), Ordering::Relaxed);
+}
+
+fn silent() -> bool {
+    SILENT.load(Ordering::Relaxed) != 0
 }
 
 /// `RETRO_SAVESTATE_CONTEXT_*`: 0 normal, 1 runahead in the same instance.
@@ -1482,7 +1493,7 @@ fn push_sample(ring: &mut AudioRing, left: f32, right: f32) {
 }
 
 unsafe extern "C" fn cb_audio_sample(left: i16, right: i16) {
-    if replaying() {
+    if replaying() || silent() {
         return;
     }
     if let Some(tap) = lock(&AUDIO_TAP).as_mut() {
@@ -1499,7 +1510,7 @@ unsafe extern "C" fn cb_audio_sample(left: i16, right: i16) {
 }
 
 unsafe extern "C" fn cb_audio_sample_batch(data: *const i16, frames: usize) -> usize {
-    if data.is_null() || replaying() {
+    if data.is_null() || replaying() || silent() {
         return frames;
     }
     if let Some(tap) = lock(&AUDIO_TAP).as_mut() {
@@ -1636,6 +1647,7 @@ impl Core {
         VARIABLES_DIRTY.store(1, Ordering::Relaxed);
         PORTS.store(1, Ordering::Relaxed);
         REPLAYING.store(0, Ordering::Relaxed);
+        SILENT.store(0, Ordering::Relaxed);
         SAVESTATE_CONTEXT.store(0, Ordering::Relaxed);
         SERIALIZATION_QUIRKS.store(0, Ordering::Relaxed);
         *lock(&NETPACKET) = None;

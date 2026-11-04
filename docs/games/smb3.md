@@ -579,7 +579,27 @@ built from the object list when the level loads (finding 3) — so a mid-level s
 carries an index built from the *unrolled* list and the rolled list is then read
 against it. It probably works, and "probably" is the problem. A map state has no
 index yet: the level loads fresh when the player walks in, from whatever bytes the
-roll wrote. The cost is the frames a map entry takes, and it is worth them.
+roll wrote. The cost is the frames a map entry takes, and nobody pays them any more:
+the stage's `ready` runs them before the countdown (ADR 0039). Both states were
+captured with the walk already under way, so they need no button pressed.
+
+Measured with nobody at the pad, by `--no-ready`, across rolls:
+
+| Frame | Bro Roulette | Sun Storm |
+|---|---|---|
+| 1 | the map | the map |
+| 30, 40 | black | black |
+| 50, 56 | the palette fading in | |
+| 60 | the level, with nobody in it | the level, with nobody in it |
+| 61 | input first does anything | |
+| 62 | Mario | input first seen to do anything; `$005B` rises 0 to 1 |
+| 63 | | Mario |
+| 64 | the four enemies. `ready` | the first sun. `ready` |
+
+The actors' frame held on all six rolls of Bro Roulette tried, and `$005B`'s on all
+eight of Sun Storm's. `$005B` is what a `ready` could wait for instead of a count,
+if either level ever came to vary; it rises at 61 on Bro Roulette. Its meaning has
+not been looked up.
 
 Nothing is rebound *onto the hack*. ADR 0019's rebind exists for a ROM the seeded
 engine derived, which is the same length, mapper and geometry as what it came
@@ -624,8 +644,8 @@ slots, rebinds the state and enters. To play the level *unrolled* — which is h
 its entry state was captured in the first place — leave `--seed` off, and it says
 so rather than quietly running a rolled ROM.
 
-Walk right off the map tile, and watch `$0671`–`$0675` fill as the suns take actor
-slots. Rolling `b` (one sun) and `max` (three) against the same state is the
+With `--no-ready`, watch `$0671`–`$0675` fill as the suns take actor slots while
+the level loads. Rolling `b` (one sun) and `max` (three) against the same state is the
 cheapest end-to-end check that a slot table does what it claims.
 ## Rollback
 

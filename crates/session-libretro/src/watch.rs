@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 
 use session_api::{SessionEvent, Slot};
 
-use crate::manifest::{Edge, Emit, Manifest, Marker, Rule, TestKind, WatchDef};
+use crate::manifest::{Edge, Emit, Manifest, Marker, Ready, Rule, TestKind, WatchDef};
 use crate::memory::{AddressSpace, Field};
 
 /// A rule with its field names resolved to indices.
@@ -657,6 +657,77 @@ fn edge_fires(edge: &Edge, prev: Option<u32>, cur: Option<u32>) -> bool {
     }
 }
 
+/// Where a machine stands on its way to a stage's first playable frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReadyState {
+    Waiting,
+    Ready,
+    /// The field never moved within the bound the manifest gave it.
+    TimedOut,
+}
+
+/// Runs a [`Ready`] against one frame after another (ADR 0039). An edge,
+/// like any rule's, so a value left over from before the game loaded cannot
+/// pass for the game having loaded; the first frame only reads its baseline.
+pub struct ReadyCheck {
+    space: AddressSpace,
+    wait: Option<(Field, Edge, u64)>,
+    prev: Option<u32>,
+    /// Frames left to run, once the edge has fired or if there is none.
+    left: Option<u64>,
+    frames: u64,
+    ran: u64,
+}
+
+impl ReadyCheck {
+    pub fn new(manifest: &Manifest, ready: &Ready) -> ReadyCheck {
+        let wait = ready.wait.as_ref().map(|w| {
+            let def = manifest
+                .watches
+                .iter()
+                .find(|d| d.name == w.trigger.field)
+                .expect("manifest validation proved the field resolves");
+            (Field { at: def.at, width: def.width }, w.trigger.edge.clone(), w.within_frames)
+        });
+        ReadyCheck {
+            space: manifest.libretro.space,
+            left: if wait.is_none() { Some(ready.frames) } else { None },
+            wait,
+            prev: None,
+            frames: ready.frames,
+            ran: 0,
+        }
+    }
+
+    /// One more frame has run, and `ram` is the machine now.
+    pub fn tick(&mut self, ram: &[u8]) -> ReadyState {
+        self.ran += 1;
+        let left = match (self.left, &self.wait) {
+            (Some(n), _) => n.saturating_sub(1),
+            (None, Some((field, edge, within))) => {
+                let cur = field.read(&self.space, ram);
+                let prev = std::mem::replace(&mut self.prev, cur);
+                if !edge_fires(edge, prev, cur) {
+                    return if self.ran >= *within { ReadyState::TimedOut } else { ReadyState::Waiting };
+                }
+                self.frames
+            }
+            (None, None) => 0,
+        };
+        self.left = Some(left);
+        if left == 0 {
+            ReadyState::Ready
+        } else {
+            ReadyState::Waiting
+        }
+    }
+
+    /// Frames run so far.
+    pub fn ran(&self) -> u64 {
+        self.ran
+    }
+}
+
 /// Every bit newly set between two values, low bit first.
 fn newly_set(prev: u32, cur: u32) -> Vec<u32> {
     let gained = cur & !prev;
@@ -703,6 +774,89 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn check(ready: &str) -> ReadyCheck {
+        let text = format!(
+            r#"
+schema_version = 3
+[game]
+id = "t"
+title = "Test"
+console = "nes"
+framerate = 60.0
+[[rom]]
+id = "base"
+[runner]
+kind = "libretro"
+[runner.libretro]
+core_dir = "cores"
+[runner.libretro.memory]
+base = 0
+size = 16
+prefer = "memory_map"
+default_width = "u8"
+[watch.up]
+at = 2
+[[stage]]
+id = "s"
+rom = "base"
+entry = {{ state = "s.state" }}
+ready = {ready}
+"#
+        );
+        let m = Manifest::parse(&text, Path::new("t.toml")).unwrap();
+        let ready = m.stage("s").unwrap().ready.clone().unwrap();
+        ReadyCheck::new(&m, &ready)
+    }
+
+    fn ram(up: u8) -> [u8; 16] {
+        let mut r = [0; 16];
+        r[2] = up;
+        r
+    }
+
+    #[test]
+    fn a_count_is_ready_on_its_last_frame_and_stays_there() {
+        let mut c = check("{ frames = 3 }");
+        assert_eq!(c.tick(&ram(0)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(0)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(0)), ReadyState::Ready);
+        assert_eq!(c.tick(&ram(0)), ReadyState::Ready);
+        assert_eq!(c.ran(), 4);
+    }
+
+    /// The value was there before anything moved, so nothing has happened: a
+    /// byte the state or a zeroed memory left at the value is not the game
+    /// having got there.
+    #[test]
+    fn a_value_already_there_is_not_an_edge() {
+        let mut c = check("{ field = \"up\", edge = \"enters\", value = 1, within_seconds = 1 }");
+        assert_eq!(c.tick(&ram(1)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(1)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(0)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(1)), ReadyState::Ready);
+        assert_eq!(c.tick(&ram(0)), ReadyState::Ready, "and it does not unhappen");
+    }
+
+    #[test]
+    fn frames_after_an_edge_count_from_the_edge() {
+        let mut c = check("{ field = \"up\", edge = \"enters\", value = 1, frames = 2, within_seconds = 1 }");
+        assert_eq!(c.tick(&ram(0)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(1)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(1)), ReadyState::Waiting);
+        assert_eq!(c.tick(&ram(1)), ReadyState::Ready);
+    }
+
+    /// Every wait is bounded, and only the wait for the edge: 1 s is 60 frames.
+    #[test]
+    fn an_edge_that_never_comes_times_out() {
+        let mut c = check("{ field = \"up\", edge = \"enters\", value = 1, within_seconds = 1 }");
+        for _ in 0..59 {
+            assert_eq!(c.tick(&ram(0)), ReadyState::Waiting);
+        }
+        assert_eq!(c.tick(&ram(0)), ReadyState::TimedOut);
+    }
 
     #[test]
     fn an_unset_field_never_fires() {

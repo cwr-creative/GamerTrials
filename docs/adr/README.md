@@ -80,6 +80,7 @@ What becomes easier. What becomes harder. What we have to live with.
 | [0036](0036-run-head-to-head-on-the-players-machines-over-rollback.md) | Run head-to-head on the players' own machines, over rollback, superseding 0004 | Proposed |
 | 0037 | Spectate a run by replaying its inputs | Proposed, on the `input-replication` branch only |
 | [0038](0038-show-the-other-players-in-a-sidebar-while-playing.md) | Show the other players in a sidebar while playing, superseding 0026 on spectating | Proposed |
+| [0039](0039-start-a-stage-at-its-first-playable-frame.md) | Start a stage at its first playable frame | Proposed |
 
 Linked numbers are written up, and 0003 is the exemplar. The rest are decided
 but unwritten; fill one in when its area next changes. An unwritten ADR is

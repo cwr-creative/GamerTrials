@@ -306,8 +306,30 @@ struct StageDoc {
     /// ADR 0020).
     rom: String,
     entry: EntryDoc,
+    /// The first frame of the stage a player can act on (ADR 0039).
+    #[serde(default)]
+    ready: Option<ReadyDoc>,
     #[serde(default)]
     note: Option<String>,
+}
+
+/// Either a number of frames, or a field's edge with a bound on the wait and
+/// an optional number of frames after it.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct ReadyDoc {
+    #[serde(default)]
+    field: Option<String>,
+    #[serde(default)]
+    edge: Option<String>,
+    #[serde(default)]
+    value: Option<i64>,
+    #[serde(default)]
+    bit: Option<u32>,
+    #[serde(default)]
+    frames: Option<u64>,
+    #[serde(default)]
+    within_seconds: Option<f64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -431,7 +453,28 @@ pub struct Stage {
     /// are on (ADR 0020).
     pub rom: String,
     pub entry: EntryPoint,
+    /// How far past `entry` the stage really starts (ADR 0039).
+    pub ready: Option<Ready>,
     pub note: Option<String>,
+}
+
+/// Where a stage's frame 0 is, when it is not the entry point itself: the
+/// first frame a player can act on, reached with nobody touching the machine
+/// (ADR 0039). A machine that always takes the same time declares only
+/// `frames`; one that does not waits for a field to move first.
+#[derive(Clone, Debug)]
+pub struct Ready {
+    pub wait: Option<ReadyWait>,
+    /// Frames to run after the edge, or after entry when there is none.
+    pub frames: u64,
+}
+
+/// An edge to wait for, and how long to wait: every wait is bounded, and a
+/// machine that never gets there is a round that cannot be prepared (ADR 0029).
+#[derive(Clone, Debug)]
+pub struct ReadyWait {
+    pub trigger: Trigger,
+    pub within_frames: u64,
 }
 
 /// Everything the libretro adapter needs about a game that is not an address
@@ -955,6 +998,49 @@ fn edge(
     Ok(e)
 }
 
+fn ready(
+    d: &ReadyDoc,
+    framerate: Framerate,
+    watches: &[WatchDef],
+    stage: &str,
+) -> Result<Ready, String> {
+    let what = format!("{stage}: ready");
+    let Some(field) = &d.field else {
+        if d.edge.is_some() || d.value.is_some() || d.bit.is_some() {
+            return Err(format!("{what}: an edge needs a `field` to read"));
+        }
+        if d.within_seconds.is_some() {
+            return Err(format!(
+                "{what}: `within_seconds` bounds a wait for a field, and there is none"
+            ));
+        }
+        return match d.frames {
+            Some(frames) if frames > 0 => Ok(Ready { wait: None, frames }),
+            _ => Err(format!("{what}: needs a `field` and `edge`, or a `frames` above zero")),
+        };
+    };
+    let Some(kind) = &d.edge else {
+        return Err(format!("{what}: `field` needs an `edge`"));
+    };
+    let Some(watch) = watches.iter().find(|w| w.name == *field) else {
+        return Err(format!("{what}: no [watch.{field}] is declared"));
+    };
+    if watch.at.is_none() {
+        return Err(format!("{what}: [watch.{field}] has no address, so it would never fire"));
+    }
+    let trigger = Trigger { field: field.clone(), edge: edge(kind, d.value, d.bit, &what)? };
+    let within_frames = match d.within_seconds {
+        Some(secs) if secs.is_finite() && secs > 0.0 => framerate.frames(secs),
+        Some(secs) => return Err(format!("{what}: `within_seconds` must be above zero, got {secs}")),
+        None => {
+            return Err(format!(
+                "{what}: a wait for a field needs `within_seconds`: every wait is bounded"
+            ))
+        }
+    };
+    Ok(Ready { wait: Some(ReadyWait { trigger, within_frames }), frames: d.frames.unwrap_or(0) })
+}
+
 fn test(d: &TestDoc, what: &str) -> Result<Test, String> {
     let kind = match d.test.as_str() {
         "eq" => TestKind::Eq(as_u32(
@@ -1323,11 +1409,28 @@ impl Doc {
                     roms.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
                 ));
             }
+            let ready = match &s.ready {
+                Some(d) => Some(ready(d, framerate, &watches, &what)?),
+                None => None,
+            };
+            // Such a machine reaches its first playable frame on the network,
+            // at a moment of wall-clock, and the bout is prepared only once
+            // it has (ADR 0039). A count of frames cannot say when that is.
+            if netplay == Some(Netplay::Packets)
+                && !ready.as_ref().is_some_and(|r| r.wait.is_some())
+            {
+                return Err(format!(
+                    "{what}: runner.libretro.netplay = \"packets\" needs `ready` to name a field \
+                     and an edge: the game starts when the network lets it, so only the machine \
+                     can say when it has (ADR 0039)"
+                ));
+            }
             stages.push(Stage {
                 id: named.id,
                 name: named.name,
                 rom: s.rom.clone(),
                 entry,
+                ready,
                 note: s.note.clone(),
             });
         }
@@ -1499,7 +1602,85 @@ complete_when = { counts = { rounds_won = 2 } }
 
     fn with_netplay(value: &str) -> String {
         let runner = format!("core_dir = \"cores\"\nnetplay = \"{value}\"");
-        format!("{}{FIGHT}", MINIMAL.replace("core_dir = \"cores\"", &runner))
+        let text = format!("{}{FIGHT}", MINIMAL.replace("core_dir = \"cores\"", &runner));
+        // A relayed machine has to say when its game has started (ADR 0039).
+        if value == "packets" {
+            return text.replace(
+                "entry = { state = \"vs.state\" }",
+                "entry = { state = \"vs.state\" }\n\
+                 ready = { field = \"p1_rounds\", edge = \"changes\", within_seconds = 30 }",
+            );
+        }
+        text
+    }
+
+    // ------------------------------------------------ the first playable frame
+
+    fn staged(ready: &str) -> String {
+        format!(
+            "{MINIMAL}[watch.nowhere]\nnote = \"not found yet\"\n\
+             [[stage]]\nid = \"s\"\nrom = \"base\"\nentry = {{ state = \"s.state\" }}\n{ready}\n"
+        )
+    }
+
+    #[test]
+    fn a_stage_starts_at_its_entry_unless_it_says_otherwise() {
+        let m = parse(&staged("")).unwrap();
+        assert!(m.stage("s").unwrap().ready.is_none());
+        let m = parse(&staged("ready = { frames = 64 }")).unwrap();
+        let ready = m.stage("s").unwrap().ready.clone().unwrap();
+        assert_eq!(ready.frames, 64);
+        assert!(ready.wait.is_none());
+    }
+
+    #[test]
+    fn a_wait_for_a_field_converts_its_bound_to_frames() {
+        let m = parse(&staged(
+            "ready = { field = \"lives\", edge = \"enters\", value = 3, frames = 5, within_seconds = 2 }",
+        ))
+        .unwrap();
+        let ready = m.stage("s").unwrap().ready.clone().unwrap();
+        assert_eq!(ready.frames, 5);
+        let wait = ready.wait.unwrap();
+        assert_eq!(wait.trigger.edge, Edge::Enters(3));
+        assert_eq!(wait.within_frames, 120);
+    }
+
+    /// Every one of these is a contributor who believes something that is not
+    /// so, and most would be a round that hangs if it were let through.
+    #[test]
+    fn a_ready_that_could_not_work_is_refused() {
+        for (ready, says) in [
+            ("ready = { }", "above zero"),
+            ("ready = { frames = 0 }", "above zero"),
+            ("ready = { edge = \"changes\" }", "`field`"),
+            ("ready = { frames = 5, within_seconds = 2 }", "within_seconds"),
+            ("ready = { field = \"lives\", within_seconds = 2 }", "`edge`"),
+            ("ready = { field = \"lives\", edge = \"changes\" }", "every wait is bounded"),
+            ("ready = { field = \"lives\", edge = \"changes\", within_seconds = 0 }", "above zero"),
+            ("ready = { field = \"gone\", edge = \"changes\", within_seconds = 2 }", "[watch.gone]"),
+            ("ready = { field = \"nowhere\", edge = \"changes\", within_seconds = 2 }", "no address"),
+            ("ready = { field = \"lives\", edge = \"enters\", within_seconds = 2 }", "`value`"),
+            ("ready = { seconds = 2 }", "seconds"),
+        ] {
+            let e = parse(&staged(ready)).unwrap_err();
+            assert!(e.contains(says), "{ready}: {e}");
+        }
+    }
+
+    /// Its game starts when the network lets it, which no count can say.
+    #[test]
+    fn a_relayed_machine_must_wait_for_a_field() {
+        let bare = with_netplay("packets").replace(
+            "\nready = { field = \"p1_rounds\", edge = \"changes\", within_seconds = 30 }",
+            "",
+        );
+        assert!(parse(&bare).unwrap_err().contains("needs `ready`"));
+        let counted = with_netplay("packets").replace(
+            "ready = { field = \"p1_rounds\", edge = \"changes\", within_seconds = 30 }",
+            "ready = { frames = 64 }",
+        );
+        assert!(parse(&counted).unwrap_err().contains("needs `ready`"));
     }
 
     #[test]

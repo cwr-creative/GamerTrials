@@ -43,6 +43,10 @@ inferred from a stage: 100 levels as time trials is 100 `[[challenge]]` entries,
 and 200 if they should also be survival runs. Completion criteria are a closed
 predicate set over facts the same manifest emits — never code, never arithmetic.
 
+A stage's frame 0 is the first frame a player can act on, not its entry point:
+`[[stage]].ready` says how far past it that is, and the runner gets there before
+the countdown, with nobody touching the machine (ADR 0039).
+
 Every run is bounded: a manifest may hint a `limit_seconds`, the lobby supplies
 a default otherwise, and a run that does not complete costs the full limit in
 any total (ADR 0026).
@@ -255,6 +259,15 @@ each other, and ran the level in lockstep with both players present until
 the limit. **Not yet**: two machines over the internet with ggrs's numbers
 recorded against ADR 0036 (which stays Proposed until then), a frag scored
 by anything but random keys, and a bout with hands on the pads.
+
+**A stage starts at its first playable frame (ADR 0039, Proposed).** `enter`
+runs on to `[[stage]].ready` silently, keeps that machine for the next
+re-entry, and holds its picture through the countdown; a state entry with no
+`ready` draws its own. A relayed bout gets there behind the intro and says
+`Prepared` only then, and runs on through the countdown, since lockstep cannot
+be stopped on one machine. Measured and hand-run on one machine: SMB3's two map
+entries, Doom's state, and DOOM II and SF2 bouts between two clients. **Not
+yet**: a relayed bout over the internet.
 
 Behind it: Phase 1 (an SMB3-only harness), Phase 2 (one libretro adapter,
 games as manifests — ADR 0016), contributor-authored `[[challenge]]`

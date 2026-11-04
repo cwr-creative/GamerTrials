@@ -44,7 +44,8 @@ kind = "libretro"
 core_dir = "cores/dos"
 controller = "keyboard"
 # Cold boot: DOS starts, the [autoexec] runs IPXSETUP, which waits for the
-# other machine. The game itself starts only once both are in, after `Go`.
+# other machine. The game itself starts only once both are in, behind the
+# intro, and the stage's `ready` says when it has (ADR 0039).
 boot_seconds = 16.0
 settle_ms = 10
 # The machine brings its own network (ADR 0036): the client joins it before
@@ -177,6 +178,10 @@ name = "MAP01: Entryway, deathmatch"
 # entry for a bout.
 rom = "base"
 entry = { named = "MAP01" }
+# The game starts when both machines have found each other, so only the
+# machine can say when it has: the player spawns at full health, and the
+# screen melt and the gun coming up take most of the next second.
+ready = { field = "p1_health", edge = "enters", value = 100, frames = 70, within_seconds = 60 }
 
 # --------------------------------------------------------------- challenges
 

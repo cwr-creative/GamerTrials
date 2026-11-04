@@ -433,6 +433,11 @@ pub trait StageRunner {
     /// second `enter` on the same stage, and the run is worth the sum of the
     /// frames each attempt reached. A runner counts one attempt and knows
     /// nothing about the challenge it belongs to (ADR 0005, ADR 0017).
+    ///
+    /// On return the machine stands at frame 0, which is the first frame of
+    /// the stage a player can act on, and its picture is that frame's: however
+    /// the runner got there is before the stage, and is not in any count
+    /// (ADR 0039).
     fn enter(&mut self, spec: &StageSpec) -> Result<(), RunnerError>;
 
     /// Advance exactly one emulated frame and report what happened on it.

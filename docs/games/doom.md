@@ -469,9 +469,13 @@ IPXSETUP -nodes 2 -deathmatch -nomonsters -warp 1
 
 so that both machines boot into IPXSETUP and wait for each other. The
 entry is `named`: the netpacket contract forbids restoring a state while
-connected, so a bout starts with a cold boot, about 1100 frames, and the
-game itself starts only after `Go`, when the packets begin to flow and
-IPXSETUP finds its second node. The client joins the core's network before
+connected, so a bout starts with a cold boot, about 1100 frames. The packets
+begin to flow when the two machines have answered each other's hellos, IPXSETUP
+finds its second node, and the game starts behind the intro (ADR 0039). `ready`
+is `p1_health` entering 100 when the player spawns, and 70 frames for the melt
+and the gun coming up; only then is the round prepared. Doom's lockstep cannot be
+stopped on one machine, so it runs on through the countdown with input released,
+and `Begin` makes that frame 0. The client joins the core's network before
 the boot, since dosbox-pure resets a game it finds running when the network
 comes up early, and `[ipx] ipx=true` has the driver there from the start.
 The bundle is built, not shipped: it carries the commercial WAD.
@@ -486,11 +490,20 @@ and `playerstate` per slot give `damaged` and `died`, a death being a
 respawn here.
 
 The first deathmatch, two clients on one machine through the server with
-`--script` pressing keys: both booted, joined, found each other through the
-rendezvous and the hello, said prepared; after `Go` the level started on
-both with both players at full health; one player died to a barrel at
+`--script` pressing keys, before ADR 0039 moved the start ahead of `Go`: both
+booted, joined, found each other through the rendezvous and the hello, said
+prepared; after `Go` the level started on both with both players at full
+health; one player died to a barrel at
 frame 4117 on one machine and 4116 on the other — each machine's frames
 count from its own boot, and the game begins at a moment of wall-clock, so
 the same fact can sit a frame apart — and nobody fragged anybody in 150
 seconds of random keys, so both timed out and the round was a draw, agreed
 by both clients and the server.
+
+With the start ahead of `Go`, the same two clients said prepared three seconds
+after their hellos, each showing MAP01 with the gun up where the countdown used
+to show IPXSETUP. Frames now count from each machine's own `Begin`, so 150
+seconds of the limit are 150 seconds of level: both timed out on frame 10513,
+agreed by both clients and the server, with nobody fragging anybody again.
+**Not yet**: this over the internet, where the hellos and the game's own start
+are a round trip apart rather than none.

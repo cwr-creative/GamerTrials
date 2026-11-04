@@ -586,6 +586,7 @@ id = "mine-cart-carnage"
 name = "Mine Cart Carnage"
 rom = "base"                   # a [[rom]] id; required on every stage
 entry = { state = "assets/states/dkc_mine-cart-carnage.state" }
+ready = { frames = 64 }        # optional: where the stage really starts
 note = "forced-scrolling: everyone finishes in the same number of frames"
 ```
 
@@ -622,6 +623,52 @@ harness --game doom --stage e1m1-hangar-boot --frames 120         --capture asse
 
 or interactively: enter at the `named` stage, play to wherever the stage should
 begin, and press F1.
+
+### `ready`
+
+**Frame 0 is the first frame of the stage a player can act on** (ADR 0039). When
+that is not the entry point itself, `ready` says how far past it to go. The runner
+gets there with nobody touching the machine, sound dropped and nothing observed,
+before the countdown, so the player looks at that frame while counted in and
+every count starts from it.
+
+```toml
+# A machine that takes the same time on every entry.
+ready = { frames = 64 }
+
+# One that does not: an edge on a watched field, and how long to wait for it.
+ready = { field = "p1_health", edge = "enters", value = 100, frames = 70, within_seconds = 60 }
+```
+
+| Key | |
+|---|---|
+| `frames` | frames to run: after the edge, or after entry when there is none. Above zero when there is none |
+| `field` | a `[watch.<name>]` with an address |
+| `edge`, `value`, `bit` | as a rule's [edges](#edges). An edge rather than a level: a byte already at the value says nothing |
+| `within_seconds` | required with `field`: every wait is bounded, and a machine that misses it is a round that cannot be prepared (ADR 0029) |
+
+Leave it out for a stage whose state is already in play. A state entry with no
+`ready` still shows its own first frame through the countdown, except on a core
+with a `settle_ms`, which shows the frame before the one it runs: `doom.toml`'s
+state says `ready = { frames = 2 }` for that alone.
+
+A stage on `netplay = "packets"` must name a `field`: its game starts when the
+network lets it, so only the machine can say when it has. It reaches `ready`
+behind the intro, is prepared only then, and runs on through the countdown with
+nobody's hands on it, since a lockstep game that stopped would stop the other
+machine too.
+
+**Input live and something to see are not the same frame, and the second is the
+one to choose.** On Bro Roulette input first does anything at 61, Mario is on
+screen at 62 and the enemies at 64. To find them, enter at the entry point itself
+and compare a run with nobody at the pad against scripted ones:
+
+```sh
+harness --game smb3 --challenge bro-roulette-time-trial --seed 3 --no-ready \
+    --synctest 240 --slots 1 --check 1 --ram-every 1 --idle-slots 0 --ram-log idle.bin
+harness --game smb3 --challenge bro-roulette-time-trial --seed 3 --no-ready \
+    --synctest 240 --slots 1 --check 1 --ram-every 1 --script 2 --ram-log two.bin
+```
 
 Stage identity always comes from the entry point that put the player there,
 never from RAM. SMB3 has no "current level number" at all — a level is

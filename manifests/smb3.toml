@@ -396,6 +396,9 @@ id = "sun-storm"
 name = "Sun Storm"
 rom = "hack3"
 entry = { state = "assets/states/smb3_sun-storm-hack3.state" }
+# The state is already walking in. The level comes up at 62 on every roll
+# (docs/games/smb3.md), Mario is on screen at 63 and the first sun at 64.
+ready = { frames = 64 }
 note = "captured on hack3, on the World 1 map, on the tile that enters W2_32 — not inside the level, so the object index is built from the rolled list"
 
 [[stage]]
@@ -403,6 +406,9 @@ id = "bro-roulette"
 name = "Bro Roulette"
 rom = "hack3"
 entry = { state = "assets/states/smb3_bro-roulette-hack3.state" }
+# Input is live at 61 with nothing to see; Mario is on screen at 62 and the
+# four enemies at 64, on every roll (docs/games/smb3.md).
+ready = { frames = 64 }
 note = "captured on hack3, on the World 1 map, on the tile that enters W1_03"
 
 # --- Sun Storm --------------------------------------------------------------

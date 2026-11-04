@@ -367,6 +367,10 @@ name = "E1M1: Hangar"
 # booting DOS.
 rom = "base"
 entry = { state = "assets/states/doom_e1m1.state" }
+# The core shows the frame before the one it runs, so the first frame after a
+# restore still shows the DOS prompt the machine had booted to; the second
+# shows the level.
+ready = { frames = 2 }
 
 # ----------------------------------------------------------------- challenges
 #

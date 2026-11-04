@@ -130,6 +130,8 @@ OPTIONS:
     --probe-stable <N>
                      ...and that held still for N frames before that. Default: 180
     --no-probe       Skip the per-frame change history (disables F11)
+    --no-ready       Enter at the entry point itself rather than running on to
+                     the stage's `ready` frame, to see what comes before it
     --frames <N>     Run N frames headless - no window, no sound, no pacing -
                      and print what fired. The frame numbers are the same as
                      they would be on screen
@@ -201,6 +203,7 @@ struct Args {
     script: u64,
     digest_log: Option<PathBuf>,
     ram_log: Option<PathBuf>,
+    no_ready: bool,
     ram_every: u64,
     script_slots: Option<u8>,
     idle_slots: Vec<u8>,
@@ -503,6 +506,8 @@ fn run() -> Result<(), String> {
     let (width, height) =
         (av.geometry.base_width as usize, av.geometry.base_height as usize);
 
+    runner.honour_ready(!args.no_ready);
+
     if let Some(n) = args.synctest {
         return synctest(runner, &spec, n, &args, av.timing.fps);
     }
@@ -689,6 +694,7 @@ fn run() -> Result<(), String> {
                     if let Err(e) = write_state(&runner, &state_path) {
                         eprintln!("[state] {e}");
                     }
+                    runner.forget_ready();
                 }
                 Key::F2 => {
                     if let Err(e) = runner.enter(&spec) {
@@ -1291,6 +1297,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         script: 1,
         digest_log: None,
         ram_log: None,
+        no_ready: false,
         ram_every: 30,
         script_slots: None,
         idle_slots: Vec::new(),
@@ -1337,6 +1344,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             }
             "--state" => args.state = Some(PathBuf::from(value("--state")?)),
             "--rebind-state" => args.rebind_state = true,
+            "--no-ready" => args.no_ready = true,
             "--no-audio" => args.audio = false,
             "--frames" => {
                 let v = value("--frames")?;

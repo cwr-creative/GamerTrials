@@ -26,6 +26,7 @@ use session_libretro::input::PadState;
 use session_libretro::libretro;
 use session_libretro::manifest::{Controller, Manifest, Netplay, PadLayout};
 use session_libretro::runner::LibretroRunner;
+use session_libretro::watch::ReadyState;
 use session_libretro::{input, prep};
 
 use crate::keys;
@@ -189,8 +190,9 @@ struct BoutState {
     udp: Option<Udp>,
     /// The provisional judge over every slot's facts.
     judge: Bout,
-    /// Held until the machines have found each other: `Prepared` means
-    /// ready to go, and a bout is not until then.
+    /// Held until the machines have found each other and, for a relayed
+    /// one, its game has started: `Prepared` means ready to go, and a bout is
+    /// not until then.
     artifact: String,
     last_probe: Option<Instant>,
     endpoint_sent: bool,
@@ -344,11 +346,9 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                             if let Some(b) = l.bout.as_mut() {
                                 b.judge.enter();
                             }
-                            if let Machine::Relay(r) = &mut l.machine {
-                                if let Err(e) = r.join() {
-                                    eprintln!("[bout] cannot join the game's network: {e}");
-                                }
-                            }
+                            // A relayed machine stood at its first playable
+                            // frame all through the countdown, still running.
+                            l.machine.runner_mut().go();
                             l.live = true;
                             l.next_deadline = Instant::now();
                             held = false;
@@ -459,12 +459,20 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 window.update();
                 std::thread::sleep(Duration::from_millis(16));
             }
+            Some(l) if !l.live && !l.done && relay_is_live(l) => {
+                lead_in(l, &mut window, &mut canvas, &reports, &streamer)?;
+            }
             Some(l) if held || !l.live || l.done => {
                 // Present whatever is there, pump the window, wait a frame.
                 if !l.live {
                     bout_prepare(l, &reports);
-                    // The entry frame, if the core drew one on entering.
-                    present(l, &mut window, &mut canvas, &streamer)?;
+                    // The entry frame. A relayed machine has not reached its
+                    // yet, and what it shows until then is a DOS prompt.
+                    if l.bout.as_ref().is_some_and(|b| b.packets) {
+                        window.update();
+                    } else {
+                        present(l, &mut window, &mut canvas, &streamer)?;
+                    }
                 } else {
                     window.update();
                 }
@@ -534,6 +542,9 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
         }
     }
     runner.enter(&spec).map_err(|e| e.to_string())?;
+    if packets && l.bout.is_some() {
+        runner.arm_ready(&spec);
+    }
     let timed = matches!(judged.kind, ChallengeKind::TimeTrial);
     let bout = match l.bout {
         Some(b) => {
@@ -787,7 +798,8 @@ fn local_address(udp: &Udp, rendezvous: Option<SocketAddr>) -> String {
 }
 
 /// Before a bout goes: probe the server until the peers are known, then
-/// find them, and only then say the round is prepared (ADR 0036). A bout
+/// find them, and only then say the round is prepared (ADR 0036), or for a
+/// relayed machine start it running so that `lead_in` can (ADR 0039). A bout
 /// whose machines cannot find each other within the timeout cannot be
 /// prepared, and the round is voided for everyone (ADR 0029).
 fn bout_prepare(l: &mut Loaded, reports: &Sender<Report>) {
@@ -809,9 +821,6 @@ fn bout_prepare(l: &mut Loaded, reports: &Sender<Report>) {
     if b.loaded_sent {
         // Prepared, waiting for `Go`: the engine's keep-alives leave only on
         // a poll, and the backing window is longer than its timeout.
-        if let Machine::Relay(r) = &mut l.machine {
-            r.poll();
-        }
         if let Machine::Bout(s) = &mut l.machine {
             if let RollbackState::Lost(slot) = s.poll().clone() {
                 if !b.lost_sent {
@@ -848,11 +857,19 @@ fn bout_prepare(l: &mut Loaded, reports: &Sender<Report>) {
     }
     if let Machine::Relay(r) = &mut l.machine {
         match r.poll().clone() {
-            RelayState::Connected | RelayState::Live => {
-                b.loaded_sent = true;
+            // The game starts only with both machines running, so running
+            // starts here; `lead_in` says prepared once it has (ADR 0039).
+            RelayState::Connected => {
                 println!("[bout] the other machine answered");
-                let _ = reports.send(Report::Loaded { round: l.round, artifact: b.artifact.clone() });
+                if let Err(e) = r.join() {
+                    l.done = true;
+                    let _ = reports.send(Report::LoadFailed {
+                        round: l.round,
+                        error: format!("cannot join the game's network: {e}"),
+                    });
+                }
             }
+            RelayState::Live => {}
             RelayState::Connecting => {
                 if b.syncing_since.is_some_and(|t| t.elapsed() >= SYNC_TIMEOUT) {
                     l.done = true;
@@ -933,6 +950,64 @@ fn connect_bout(l: &mut Loaded, peers: Vec<(u8, Vec<SocketAddr>)>) -> Result<(),
     let session = Rollback::connect(runner, udp, b.slot, b.slots, settings).map_err(|e| e.to_string())?;
     l.machine = Machine::Bout(Box::new(session));
     b.syncing_since = Some(Instant::now());
+    Ok(())
+}
+
+fn relay_is_live(l: &Loaded) -> bool {
+    matches!(&l.machine, Machine::Relay(r) if *r.state() == RelayState::Live)
+}
+
+/// One frame of a relayed machine before its bout goes (ADR 0039). It reaches
+/// its first playable frame on the network, behind the intro, with nobody's
+/// hands on it, and only then is the round prepared. It cannot then be held
+/// there: its netcode is lockstep, and a machine that stops stops the other.
+/// So it runs on through the countdown, and that picture is what is shown.
+fn lead_in(
+    l: &mut Loaded,
+    window: &mut Window,
+    canvas: &mut Canvas,
+    reports: &Sender<Report>,
+    streamer: &Streamer,
+) -> Result<(), String> {
+    // On the clock: nothing is being heard to pace on.
+    let now = Instant::now();
+    if l.next_deadline > now {
+        std::thread::sleep(l.next_deadline - now);
+    } else {
+        l.next_deadline = now;
+    }
+    l.next_deadline += l.frame_time;
+    window.update();
+
+    match l.input.keyboard.as_ref() {
+        None => libretro::JOYPAD.store(0, Ordering::Relaxed),
+        Some(_) => keys::keyboard_release_all(),
+    }
+    let round = l.round;
+    let (Some(b), Machine::Relay(r)) = (l.bout.as_mut(), &mut l.machine) else { return Ok(()) };
+    r.pump().map_err(|e| e.to_string())?;
+    let failed = match r.machine().lead_state() {
+        Some(ReadyState::Ready) => {
+            if !b.loaded_sent {
+                b.loaded_sent = true;
+                println!("[bout] at the first playable frame");
+                let _ = reports.send(Report::Loaded { round, artifact: b.artifact.clone() });
+            }
+            None
+        }
+        Some(ReadyState::Waiting) | None => {
+            r.machine().shutdown_requested().then(|| "the game shut down before it started".to_string())
+        }
+        Some(ReadyState::TimedOut) => Some("the game did not start on both machines in time".to_string()),
+    };
+    if let Some(error) = failed {
+        l.done = true;
+        let _ = reports.send(Report::LoadFailed { round, error });
+        return Ok(());
+    }
+    if b.loaded_sent {
+        return present(l, window, canvas, streamer);
+    }
     Ok(())
 }
 

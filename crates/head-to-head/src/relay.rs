@@ -20,8 +20,8 @@
 //!
 //! Reliable packets are resent until acknowledged and delivered in sequence
 //! per peer; a packet arriving twice is dropped by its number. The hello
-//! is how a bout says it is prepared: the other machine answered, so the
-//! game's own netcode will find it.
+//! is how a machine knows to start running: the other one answered, so the
+//! game's own netcode will find it, and the game starts when it does.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -134,7 +134,7 @@ impl<M: Networked, L: Link> Relay<M, L> {
 
     /// Hear from the link without advancing: hellos out and answered, and,
     /// once live, the core's packets delivered. Call it every few
-    /// milliseconds before the bout goes.
+    /// milliseconds until the machine is running.
     pub fn poll(&mut self) -> &RelayState {
         if self.state == RelayState::Connecting
             && self.last_hello.map_or(true, |t| t.elapsed() >= HELLO_EVERY)
@@ -155,7 +155,9 @@ impl<M: Networked, L: Link> Relay<M, L> {
     }
 
     /// Joins the machine to the session as `local` of `slots`, with every
-    /// other slot present: a bout goes only once every seat is prepared.
+    /// other slot present, and from here [`pump`](Relay::pump) carries its
+    /// packets. Done before the bout goes: the game has to start for the bout
+    /// to be prepared.
     pub fn join(&mut self) -> Result<(), RunnerError> {
         if self.state == RelayState::Connecting {
             return Err(RunnerError("the other slots have not answered yet".into()));
@@ -173,6 +175,12 @@ impl<M: Networked, L: Link> Relay<M, L> {
             self.joined = true;
         }
         self.state = RelayState::Live;
+        // The other machine may have gone live first. What it said must
+        // arrive has been waiting for this.
+        let peers: Vec<Slot> = self.reliable.keys().copied().collect();
+        for from in peers {
+            self.deliver_reliable(from);
+        }
         Ok(())
     }
 
@@ -262,16 +270,8 @@ impl<M: Networked, L: Link> Relay<M, L> {
                     if seq.wrapping_sub(r.next_in) < u32::MAX / 2 {
                         r.held.entry(seq).or_insert_with(|| data.to_vec());
                     }
-                    // Deliver everything now in sequence.
-                    let mut due = Vec::new();
-                    while let Some(d) = r.held.remove(&r.next_in) {
-                        due.push(d);
-                        r.next_in = r.next_in.wrapping_add(1);
-                    }
                     if self.state == RelayState::Live {
-                        for d in due {
-                            self.machine.deliver(from, &d);
-                        }
+                        self.deliver_reliable(from);
                     }
                 }
                 ACK => {
@@ -285,6 +285,19 @@ impl<M: Networked, L: Link> Relay<M, L> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Everything from `from` that is now in sequence.
+    fn deliver_reliable(&mut self, from: Slot) {
+        let Some(r) = self.reliable.get_mut(&from) else { return };
+        let mut due = Vec::new();
+        while let Some(d) = r.held.remove(&r.next_in) {
+            due.push(d);
+            r.next_in = r.next_in.wrapping_add(1);
+        }
+        for d in due {
+            self.machine.deliver(from, &d);
         }
     }
 
@@ -351,6 +364,32 @@ mod tests {
         ra.join().unwrap();
         rb.join().unwrap();
         assert_eq!(ra.state(), &RelayState::Live);
+    }
+
+    /// The machines go live a round trip apart, and now run before the bout
+    /// goes (ADR 0039). What the first said must arrive waits for the second,
+    /// acknowledged, and arrives once, in order.
+    #[test]
+    fn a_reliable_packet_waits_for_a_machine_not_yet_live() {
+        let (a, b) = Channels::pair();
+        let mut ra = Relay::connect(machine(), a, Slot(0), 2);
+        let mut rb = Relay::connect(machine(), b, Slot(1), 2);
+        for _ in 0..4 {
+            ra.poll();
+            rb.poll();
+        }
+        ra.join().unwrap();
+        for i in 0..3u8 {
+            ra.machine_mut().send(Some(Slot(1)), &[i], true);
+            ra.pump().unwrap();
+            rb.poll();
+        }
+        assert!(rb.machine().received().is_empty(), "not live yet");
+        ra.poll();
+        assert_eq!(ra.in_flight(), 0, "held, and acknowledged");
+        rb.join().unwrap();
+        let got: Vec<u8> = rb.machine().received().iter().map(|(_, d)| d[0]).collect();
+        assert_eq!(got, [0, 1, 2]);
     }
 
     /// A quarter of everything is lost: every reliable packet still arrives,
