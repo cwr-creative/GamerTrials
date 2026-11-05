@@ -116,6 +116,9 @@
   body.sidebar #clock { right: calc(var(--side) + 14px); }
   body.sidebar #hud { right: calc(var(--side) + 8px); }
   body.sidebar #spectate { right: var(--side); }
+  /* The countdown and the badge are about the game, so over its picture. */
+  body.sidebar #count { right: var(--side); }
+  body.sidebar #badge { left: calc((100% - var(--side)) / 2); }
 
   #round, #score, #pause { background: rgba(10, 10, 30, 0.8); }
   #error { position: absolute; left: 0; right: 0; top: 0; padding: .6em 1em;
@@ -353,9 +356,16 @@
     hud('round ' + p.round + ' result');
   }
 
+  // The host's play again reaches a guest as the next deal, and nothing else
+  // would take the card down. It may still be waiting out the round card.
+  let scoreWanted = false;
+  const dropScore = () => { scoreWanted = false; hide('score'); };
+
   async function showScore(p) {
+    scoreWanted = true;
     const delay = roundUntil - now();
     if (delay > 0) await wait(delay);
+    if (!scoreWanted) return;
     hide('round'); hide('waiting'); hidePause();
     $('s-format').textContent = formatText(p.format) + (p.mode ? ' · ' + p.mode.replace('_', ' ') : '');
     standingsTable($('s-standings'), p.standings, p.mode, p.format, p.me);
@@ -735,7 +745,7 @@
       case 'progress': onProgress(p); break;
       case 'thumbs': onThumbs(p); break;
       case 'thumb': onThumb(p); break;
-      case 'loading': playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
+      case 'loading': dropScore(); playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
       case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;
       case 'go': goWanted = true; tryGo(); break;
@@ -756,12 +766,13 @@
         if (!$('waiting').classList.contains('hidden')) showWaiting(waitingText());
         break;
       case 'eliminated':
+        dropScore();
         playing = p.players || [];
         dropRound();
         showWaiting("You're out. " + waitingText());
         hud('eliminated, round ' + p.round);
         break;
-      case 'backing': playing = p.players || []; dropRound(); showBacking(p); break;
+      case 'backing': dropScore(); playing = p.players || []; dropRound(); showBacking(p); break;
       case 'sides': onSides(p); break;
       case 'bout_go': hideBacking(); break;
       case 'voided':
@@ -778,14 +789,14 @@
     }
   }
 
-  $('again').onclick = () => { hide('score'); hide('error'); invoke('play_again'); };
-  $('lobby').onclick = () => { hide('score'); invoke('back_to_lobby'); };
+  $('again').onclick = () => { dropScore(); hide('error'); invoke('play_again'); };
+  $('lobby').onclick = () => { dropScore(); invoke('back_to_lobby'); };
   $('resume').onclick = () => { hidePause(); invoke('resume'); };
   $('giveup').onclick = () => { hidePause(); invoke('give_up'); };
   $('end').onclick = () => { hidePause(); invoke('end_match'); };
   // A guest leaving ends the match for everyone (ADR 0030); the host ends it instead.
   $('leave').onclick = () => { hidePause(); invoke('leave'); };
-  $('s-leave').onclick = () => { hide('score'); invoke('leave'); };
+  $('s-leave').onclick = () => { dropScore(); invoke('leave'); };
 
   // ---- the pause menu, by pad as well as by mouse ----------------------------
   // The game thread is held while this is up, so the page reads the pad

@@ -243,7 +243,8 @@ interface (78) and is `Networked` — the core's `start`, `receive`, `poll`,
 the packets with a frame header, a hello handshake before the bout goes,
 and reliable packets resent until acknowledged and delivered in order; the
 client takes that path when the manifest says `netplay = "packets"`, and
-claims the server's verdict for the slot it cannot judge itself.
+judges nothing on it, since each machine's clock is its own: it reports its
+own slot's facts until the server rules, then claims that verdict.
 **The first bout is played**: `manifests/sf2.toml` (Street Fighter II
 Turbo, `best-of-three`, its addresses found with the harness's scripted
 sync test and RAM log — `docs/games/sf2.md`) on two clients on one machine

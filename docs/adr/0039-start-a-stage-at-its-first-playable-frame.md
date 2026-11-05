@@ -106,10 +106,18 @@ already means a new state.
 stays up through it. The bound is the manifest's.
 
 **A relayed bout's first frame is each machine's own `Begin`.** `Go` reaches two
-players a round trip apart, and the same fact can still sit a frame apart across
-machines, as it could before. Nothing here makes that worse, and no number here
-comes from two machines over the internet.
+players a round trip apart, so the same fact sits on different frames across the
+machines, and a game that changes state on its own tics (Doom, every two frames)
+widens that. So a client judges nothing on a relayed machine. A verdict reckoned
+on its own clock need not be the server's, and judging itself over would stop it
+reporting while the server's judge still waited to hear past the win. It reports
+its own slot's facts until the server rules, then claims the ruling. Two wins
+closer together than the machines' clocks are apart are called on those clocks.
+No number here comes from two machines over the internet.
 
 **The relay holds a reliable packet for a machine not yet live**, because the
 machines now go live a round trip apart while running, rather than a round trip
-apart at `Go`. It was dropped before, and acknowledged.
+apart at `Go`. It was dropped before, and acknowledged. Holding them made a burst
+of what each machine said during its boot, to nobody, arrive every time, which
+left IPXSETUP waiting forever (`docs/games/doom.md`); a machine joined before its
+boot now discards that as it goes live.

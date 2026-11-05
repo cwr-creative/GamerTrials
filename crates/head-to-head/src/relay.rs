@@ -165,7 +165,13 @@ impl<M: Networked, L: Link> Relay<M, L> {
         if self.state == RelayState::Live {
             return Ok(());
         }
-        if !self.joined {
+        if self.joined {
+            // What a machine joined before its boot said on the way up, it
+            // said to nobody: there was no link yet. It is stale, and a burst
+            // of it can cost a game's setup the packet it was waiting for
+            // (docs/games/doom.md), so it is never sent.
+            let _ = self.machine.outgoing();
+        } else {
             self.machine.join(self.local, self.slots)?;
             for i in 0..self.slots {
                 if i != self.local.0 {
@@ -390,6 +396,29 @@ mod tests {
         rb.join().unwrap();
         let got: Vec<u8> = rb.machine().received().iter().map(|(_, d)| d[0]).collect();
         assert_eq!(got, [0, 1, 2]);
+    }
+
+    /// A machine joined before its boot talks to nobody until the link is up.
+    /// That goes unsent; what it says once live arrives.
+    #[test]
+    fn what_a_machine_said_before_going_live_is_never_sent() {
+        let (a, b) = Channels::pair();
+        let mut joined = machine();
+        joined.join(Slot(0), 2).unwrap();
+        joined.send(None, b"said while booting", true);
+        joined.send(Some(Slot(1)), b"and this", false);
+        let mut ra = Relay::connect_joined(joined, a, Slot(0), 2);
+        let mut rb = Relay::connect(machine(), b, Slot(1), 2);
+        for _ in 0..4 {
+            ra.poll();
+            rb.poll();
+        }
+        ra.join().unwrap();
+        rb.join().unwrap();
+        ra.machine_mut().send(None, b"said live", true);
+        ra.pump().unwrap();
+        rb.pump().unwrap();
+        assert_eq!(rb.machine().received(), [(Slot(0), b"said live".to_vec())]);
     }
 
     /// A quarter of everything is lost: every reliable packet still arrives,

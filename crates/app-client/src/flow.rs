@@ -160,9 +160,12 @@ pub struct Flow {
     /// The bout this player is backing someone in, if any.
     backing_round: Option<u64>,
     /// The round this player has claimed a verdict for. A relayed bout's
-    /// judge sees only its own machine's facts, so the other slot's
-    /// completion reaches it as the server's verdict, which it then claims.
+    /// client judges nothing, since its machine's clock is its own: the
+    /// server's verdict comes back, and that is what it claims.
     claimed: Option<u64>,
+    /// The round this player gave up in on a relayed machine, whose
+    /// forfeited verdict is therefore this client's to claim.
+    gave_up: Option<u64>,
     spiked: bool,
     auto: Auto,
     /// `--start` has been acted on.
@@ -220,6 +223,7 @@ impl Flow {
                     rendezvous: None,
                     backing_round: None,
                     claimed: None,
+                    gave_up: None,
                     spiked: false,
                     auto,
                     auto_started: false,
@@ -534,18 +538,24 @@ impl Flow {
             ToClient::PlayerFinished { round, player, outcome } => {
                 println!("[match] round {round}: {player} {outcome:?}");
                 let me = self.player.clone().unwrap_or_default();
+                if player == me && self.is_current(round) {
+                    // A relayed machine has run until now.
+                    if let Some(g) = &self.game {
+                        let _ = g.send(Command::Settled { round });
+                    }
+                }
                 if player == me && self.is_current(round) && self.claimed != Some(round) {
                     // The server ruled on a run this client could not judge
-                    // for itself: the other machine's facts never came here,
-                    // or the link was lost. Its verdict is the claim.
+                    // for itself: a relayed machine's clock is its own, or
+                    // the link was lost. Its verdict is the claim.
                     self.claimed = Some(round);
                     let completed = outcome.completed();
                     self.emit(json!({
                         "kind": if completed { "garland" } else { "skull" },
                         "frame": outcome.frames,
-                        "text": format!("{:?}", outcome.ending).to_lowercase(),
+                        "text": ending_text(&outcome.ending),
                     }));
-                    if outcome.ending != protocol::Ending::Forfeited {
+                    if outcome.ending != protocol::Ending::Forfeited || self.gave_up == Some(round) {
                         self.send(ToServer::Finished { round, outcome: outcome.clone() });
                     }
                 }
@@ -785,6 +795,11 @@ impl Flow {
                 if !others.is_empty() && !bout {
                     self.start_spectating(round, others);
                 }
+            }
+            Report::GaveUp { round, frame } => {
+                println!("[match] round {round}: gave up at frame {frame}");
+                self.gave_up = Some(round);
+                self.send(ToServer::Forfeit { round, frame });
             }
             Report::Video { round, frame, key, width, height, aspect, data, thumb } => {
                 self.send(ToServer::Video { round, frame, key, width, height, aspect, data: data.into(), thumb });
@@ -1170,6 +1185,17 @@ fn pick(from: &[String]) -> Option<String> {
     let mut h = RandomState::new().build_hasher();
     h.write_usize(from.len());
     Some(from[(h.finish() % from.len() as u64) as usize].clone())
+}
+
+/// How a run ended, for the badge.
+fn ending_text(e: &protocol::Ending) -> String {
+    match e {
+        protocol::Ending::Completed => "completed".into(),
+        protocol::Ending::Failed { how } => format!("failed: {how}"),
+        protocol::Ending::TimedOut => "timed out".into(),
+        protocol::Ending::Forfeited => "forfeited".into(),
+        protocol::Ending::Beaten => "beaten".into(),
+    }
 }
 
 /// A watched player's event in a few words, for the panel a watcher sees

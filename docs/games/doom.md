@@ -507,3 +507,26 @@ seconds of the limit are 150 seconds of level: both timed out on frame 10513,
 agreed by both clients and the server, with nobody fragging anybody again.
 **Not yet**: this over the internet, where the hellos and the game's own start
 are a round trip apart rather than none.
+
+IPXSETUP broadcasts its setup packet once a second from the moment DOS runs it,
+and the client joined the core's network before the boot, so 17 of them and a
+modem packet sat in the core's outbox by the time the hello was answered. Sent as
+one burst, they sometimes cost a machine the other's last `nodesfound=2`: slot 1
+went on to `listening for network start info...` and stopped sending, slot 0 stayed
+in IPXSETUP broadcasting, and the round was voided after `ready`'s 60 seconds.
+The burst was the trigger: between 1 in 16 and 9 in 16 bouts failed with it, the
+more the further apart the machines started, and none in 90 without it, 36 of
+those started half a second apart. Why it loses that one packet was not pinned
+down. dosbox-pure hands a machine every queued packet on one timer tick, into a
+few listening slots, and drops what does not fit, its own broadcasts included. So
+the relay discards that outbox as the machine goes live.
+
+A bout has been played to a real verdict only with a temporary rule, three pistol
+shots in place of three frags (`players[n].ammo[0]`, +0x9C in `player_t`), since
+random keys rarely frag. Each machine's clock starts at its own `Begin`, and the
+same fight read 2 to 4 frames apart on them. When each client judged both slots on
+its own clock, 8 of 10 bouts went wrong: 5 ended the match on a disagreement, and
+3 hung, the loser's clock being behind the winner's, so it had stopped reporting
+before the server had heard past the win. Now that the client reports until the
+server rules and claims the ruling, 26 of 26 settled, with winners on both sides
+and one draw, and 4 of 4 settled on a give-up. **Not yet**: a real frag.

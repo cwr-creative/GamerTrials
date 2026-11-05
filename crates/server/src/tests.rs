@@ -1119,6 +1119,41 @@ fn a_give_up_after_the_other_lost_the_link_hands_the_win() {
     assert!(t.errors(0).is_empty());
 }
 
+/// A relayed machine counts from its own `Go`, so one fight reads differently
+/// on the two clocks, and the winner's may be ahead or behind. Each client
+/// reports until the server rules, then claims what it ruled.
+#[test]
+fn a_relayed_bout_settles_on_either_clock_when_clients_claim_the_verdict() {
+    for (winner_at, loser_at) in [(300, 302), (302, 300)] {
+        let mut t = Table::fighting(5, &["ann", "bob"]);
+        t.start();
+        let round = t.rendezvous();
+        let (slots, _) = t.slots();
+        let (a, b) = (t.who(&slots[0]), t.who(&slots[1]));
+        t.send(a, ToServer::Frame { round, frame: 100, events: vec![won(100)] });
+        t.send(a, ToServer::Frame { round, frame: winner_at, events: vec![won(winner_at)] });
+        t.send(b, ToServer::Frame { round, frame: loser_at, events: vec![] });
+        // Behind the winner's clock, the loser is still being waited for.
+        t.send(b, ToServer::Frame { round, frame: loser_at + 15, events: vec![] });
+        let ruled = |t: &Table, p: &str| {
+            let p = p.to_string();
+            fetch(t, 0, move |m| match m {
+                ToClient::PlayerFinished { player, outcome, .. } if *player == p => Some(outcome.clone()),
+                _ => None,
+            })
+            .pop()
+            .expect("the server ruled")
+        };
+        let (va, vb) = (ruled(&t, &slots[0]), ruled(&t, &slots[1]));
+        assert_eq!(va, outcome(Ending::Completed, winner_at));
+        assert_eq!(vb, outcome(Ending::Beaten, winner_at));
+        t.send(b, ToServer::Finished { round, outcome: vb });
+        t.send(a, ToServer::Finished { round, outcome: va });
+        assert_eq!(entries(&t, 0).len(), 2);
+        assert!(t.errors(0).is_empty(), "{:?}", t.errors(0));
+    }
+}
+
 fn entries_or_none(t: &Table, who: usize) -> Option<Vec<protocol::RoundEntry>> {
     fetch(t, who, |m| match m {
         ToClient::RoundResult { entries, .. } => Some(entries.clone()),

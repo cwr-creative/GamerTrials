@@ -375,7 +375,10 @@ impl Mouse {
         libretro::set_mouse(dx, dy, buttons);
     }
 
-    fn release(&mut self, window: &mut Window) {
+    /// Hands the cursor back. Whoever stops calling [`pump`](Mouse::pump) has
+    /// to call this: only a frame that is pumped can notice focus going, and
+    /// a clip left on holds the cursor over everything shown afterwards.
+    pub fn release(&mut self, window: &mut Window) {
         if self.captured {
             cursor::release();
             // `set_cursor_visibility` is a counter on Windows, not a flag, so
@@ -390,6 +393,16 @@ impl Mouse {
 impl Default for Mouse {
     fn default() -> Self {
         Mouse::new()
+    }
+}
+
+/// A clip belongs to the desktop, not to this window: it must not outlive the
+/// game thread, however that ends. The cursor's visibility goes with the window.
+impl Drop for Mouse {
+    fn drop(&mut self) {
+        if self.captured {
+            cursor::release();
+        }
     }
 }
 

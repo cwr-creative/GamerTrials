@@ -97,6 +97,9 @@ pub enum Command {
     /// A bout: the player in that slot gave up on that frame, as the server
     /// judged it; whoever stays wins.
     PeerForfeited { slot: u8, frame: u64 },
+    /// A relayed bout: the server has ruled on this player's run, so the
+    /// machine can stop.
+    Settled { round: u64 },
     Quit,
 }
 
@@ -121,6 +124,9 @@ pub enum Report {
     /// The provisional verdict. `forfeited_at` is the frame the player gave
     /// up on, when they did; the server is told that first.
     Finished { round: u64, result: RunResult, forfeited_at: Option<u64> },
+    /// A relayed bout: the player gave up on that frame. What that comes to is
+    /// the server's to say, and the winner may already have beaten it there.
+    GaveUp { round: u64, frame: u64 },
     /// The player pressed the pause key; the game is held.
     Paused,
     /// One encoded picture for whoever is watching (ADR 0032): the bytes
@@ -188,7 +194,9 @@ struct BoutState {
     input_delay: u8,
     /// The UDP side, until the session takes it.
     udp: Option<Udp>,
-    /// The provisional judge over every slot's facts.
+    /// The provisional judge over every slot's facts. Not fed for a relayed
+    /// machine: each counts frames from its own `Begin`, so the facts of two
+    /// slots cannot be set side by side here, and only the server rules.
     judge: Bout,
     /// Held until the machines have found each other and, for a relayed
     /// one, its game has started: `Prepared` means ready to go, and a bout is
@@ -317,7 +325,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     let round = l.round;
                     // Drop the old core before loading the next: the frontend
                     // statics are per core.
-                    loaded = None;
+                    unload(&mut loaded, &mut window);
                     match load(*l, &mut window) {
                         Ok(mut x) => {
                             place_window(hwnd, &x.0, &mut borderless, &mut sized_for);
@@ -366,7 +374,8 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 }
                 Ok(Command::PeerForfeited { slot, frame }) => {
                     if let Some(l) = loaded.as_mut() {
-                        if let Some(b) = l.bout.as_mut() {
+                        // A relayed machine waits for the server's ruling.
+                        if let Some(b) = l.bout.as_mut().filter(|b| !b.packets) {
                             let verdicts = b.judge.forfeit(Slot(slot), frame);
                             if let Some((_, result)) = verdicts.into_iter().find(|(s, _)| *s == b.slot) {
                                 if !l.done {
@@ -375,6 +384,13 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                                     let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
                                 }
                             }
+                        }
+                    }
+                }
+                Ok(Command::Settled { round }) => {
+                    if let Some(l) = loaded.as_mut() {
+                        if l.round == round && l.bout.as_ref().is_some_and(|b| b.packets) {
+                            l.done = true;
                         }
                     }
                 }
@@ -393,7 +409,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     if let Some(l) = loaded.as_ref() {
                         l.machine.runner().tap_audio(false);
                     }
-                    loaded = None;
+                    unload(&mut loaded, &mut window);
                 }
                 Ok(Command::Overlay(h)) => ours = vec![hwnd, h],
                 Ok(Command::Stream { watchers: n, thumbs: t }) => {
@@ -463,6 +479,10 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 lead_in(l, &mut window, &mut canvas, &reports, &streamer)?;
             }
             Some(l) if held || !l.live || l.done => {
+                // Nothing reads the mouse here, so the player has it back.
+                if let Some(m) = l.mouse.as_mut() {
+                    m.release(&mut window);
+                }
                 // Present whatever is there, pump the window, wait a frame.
                 if !l.live {
                     bout_prepare(l, &reports);
@@ -491,6 +511,14 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
     }
     let _ = reports.send(Report::Closed);
     Ok(())
+}
+
+/// Drops the round's game, handing back the mouse if it holds it.
+fn unload(loaded: &mut Option<Loaded>, window: &mut Window) {
+    if let Some(m) = loaded.as_mut().and_then(|l| l.mouse.as_mut()) {
+        m.release(window);
+    }
+    *loaded = None;
 }
 
 fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
@@ -655,6 +683,9 @@ fn step(
                 }
             } else {
                 keys::keyboard_release_all();
+                if let Some(m) = l.mouse.as_mut() {
+                    m.release(window);
+                }
             }
         }
     }
@@ -725,6 +756,11 @@ fn forfeit(l: &mut Loaded, reports: &Sender<Report>) {
             Machine::Bout(s) => s.confirmed_frame(),
             other => other.runner().frame(),
         };
+        if b.packets {
+            l.done = true;
+            let _ = reports.send(Report::GaveUp { round: l.round, frame });
+            return;
+        }
         let verdicts = b.judge.forfeit(b.slot, frame);
         let result = verdicts
             .into_iter()
@@ -1013,9 +1049,11 @@ fn lead_in(
 
 /// One frame of a relayed bout: paced as a solo frame is, the keyboard and
 /// mouse (a DOS game) or the pad read as usual, the game's own packets
-/// carried, and this machine's own facts judged — the other slot's come to
-/// the server from the other machine, and its verdict for this one comes
-/// back as `PlayerFinished`.
+/// carried, and this machine's own facts reported. Nothing is judged here:
+/// each machine counts from its own `Begin`, so one fact sits on different
+/// frames on the two, and a verdict reckoned on this clock need not be the
+/// server's. It goes on reporting, since the server holds a win until it has
+/// heard past it, until the server's verdict comes back as `PlayerFinished`.
 fn step_relay(
     l: &mut Loaded,
     window: &mut Window,
@@ -1061,6 +1099,9 @@ fn step_relay(
                 }
             } else {
                 keys::keyboard_release_all();
+                if let Some(m) = l.mouse.as_mut() {
+                    m.release(window);
+                }
             }
         }
     }
@@ -1068,12 +1109,12 @@ fn step_relay(
     let round = l.round;
     let streaming = l.streaming();
     let watchers = l.watchers;
-    let (Some(b), Machine::Relay(r)) = (l.bout.as_mut(), &mut l.machine) else { return Ok(()) };
+    let (Some(b), Machine::Relay(r)) = (l.bout.as_ref(), &mut l.machine) else { return Ok(()) };
     r.pump().map_err(|e| e.to_string())?;
     let frame = r.machine().frame();
     // A game in lockstep simulates every player on every machine, so its
-    // facts are tagged per slot and every slot is judged here, as on a
-    // rolled-back machine; only this slot's go to the server.
+    // facts are tagged per slot; only this slot's go to the server, and the
+    // other machine reports the rest.
     let events = r.machine().slot_events().to_vec();
     if watchers > 0 {
         r.machine().take_audio(&mut |samples, rate| {
@@ -1082,29 +1123,13 @@ fn step_relay(
             }
         });
     }
-    if !l.done {
-        let mine: Vec<SessionEvent> = events
-            .iter()
-            .filter(|e| e.slot.is_none() || e.slot == Some(b.slot))
-            .map(|e| e.event.clone())
-            .collect();
-        let mut verdicts = Vec::new();
-        for slot in 0..b.slots {
-            let theirs: Vec<SessionEvent> = events
-                .iter()
-                .filter(|e| e.slot.is_none() || e.slot == Some(Slot(slot)))
-                .map(|e| e.event.clone())
-                .collect();
-            verdicts.extend(b.judge.observe(Slot(slot), frame, &theirs));
-        }
-        let settled = verdicts.into_iter().find(|(s, _)| *s == b.slot).map(|(_, r)| r);
-        if !mine.is_empty() || frame % HEARTBEAT == 0 || settled.is_some() {
-            let _ = reports.send(Report::Frame { round, frame, events: mine });
-        }
-        if let Some(result) = settled {
-            l.done = true;
-            let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
-        }
+    let mine: Vec<SessionEvent> = events
+        .iter()
+        .filter(|e| e.slot.is_none() || e.slot == Some(b.slot))
+        .map(|e| e.event.clone())
+        .collect();
+    if !mine.is_empty() || frame % HEARTBEAT == 0 {
+        let _ = reports.send(Report::Frame { round, frame, events: mine });
     }
     present(l, window, canvas, streamer)
 }
