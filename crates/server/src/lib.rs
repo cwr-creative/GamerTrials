@@ -374,12 +374,9 @@ impl Server {
         pool
     }
 
-    pub fn lobby_state(&self) -> LobbyState {
-        let dealable: Vec<ChallengeRef> = self
-            .pool()
-            .into_iter()
-            .map(|(lib, c)| ChallengeRef { game: lib.game.id.0.clone(), challenge: c.id.0.clone() })
-            .collect();
+    /// Why no match could be made now, whatever is at the table: what Start
+    /// and Play again both refuse on.
+    fn unready(&self) -> Vec<String> {
         let mut blocking = Vec::new();
         if self.seats.is_empty() {
             blocking.push("nobody is in the lobby".to_string());
@@ -389,11 +386,21 @@ impl Server {
                 blocking.push(format!("{} has not checked their files yet", s.name));
             }
         }
-        if dealable.is_empty() {
+        if self.pool().is_empty() {
             blocking.push(
                 "no enabled challenge fits the settings and everyone's files".to_string(),
             );
         }
+        blocking
+    }
+
+    pub fn lobby_state(&self) -> LobbyState {
+        let dealable: Vec<ChallengeRef> = self
+            .pool()
+            .into_iter()
+            .map(|(lib, c)| ChallengeRef { game: lib.game.id.0.clone(), challenge: c.id.0.clone() })
+            .collect();
+        let mut blocking = self.unready();
         match &self.live {
             Some(l) if l.finished() => {
                 blocking.push("the last match's score card is still up".to_string());
@@ -1068,6 +1075,10 @@ impl Server {
         let over = self.live.as_ref().is_some_and(|l| l.m.is_over());
         if !over {
             return vec![(host, ToClient::Refused { reason: "the match is not over".into() })];
+        }
+        let unready = self.unready();
+        if !unready.is_empty() {
+            return vec![(host, ToClient::Refused { reason: unready.join("; ") })];
         }
         match self.new_match() {
             Ok(m) => {

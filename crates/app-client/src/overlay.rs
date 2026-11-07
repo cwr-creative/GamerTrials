@@ -10,7 +10,7 @@
 //! window's transient, which is X11's owned window; `native` holds what
 //! differs.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,8 +30,13 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn create(app: &AppHandle, game: isize) -> Result<Overlay, Box<dyn std::error::Error>> {
+        // A label of its own: the last table's overlay may still be closing
+        // when the next table's comes up, and a label in use is refused. The
+        // capability names them `overlay-*`.
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        let label = format!("overlay-{}", MADE.fetch_add(1, Ordering::Relaxed));
         let (x, y, w, h) = client_rect(game).ok_or("cannot read the game window's rect")?;
-        let window = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("overlay.html".into()))
+        let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("overlay.html".into()))
             .title("GamerTrials")
             .transparent(true)
             .decorations(false)

@@ -379,7 +379,10 @@
     $('s-guest').classList.toggle('hidden', host);
   }
 
+  // The last score card, to bring back when Play again is refused.
+  let lastScore = null;
   async function showScore(p) {
+    lastScore = p;
     scoreWanted = true;
     scoreHost = !!p.host;
     const delay = roundUntil - now();
@@ -820,6 +823,16 @@
       case 'pause': showPause(p); break;
       case 'resume': hidePause(); hud('playing'); break;
       case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;
+      // Something asked for here was refused: say why, a while, and put back
+      // what the asking took away.
+      case 'refused': {
+        $('error').textContent = p.text; show('error'); hud('refused');
+        const text = p.text;
+        setTimeout(() => { if ($('error').textContent === text) hide('error'); }, 6000);
+        if (p.score && lastScore) showScore(lastScore);
+        if (p.back) { backed = null; paintBacking(); $('b-note').textContent = p.text; }
+        break;
+      }
       case 'hud': hud(p.text); break;
     }
   }

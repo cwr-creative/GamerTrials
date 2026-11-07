@@ -40,7 +40,10 @@ pub enum Msg {
     /// The link to a networked server failed. Tagged, so a link already
     /// replaced cannot end the next one.
     Disconnected { generation: u64, reason: String },
-    Game(Report),
+    /// From the game thread of the table numbered `table`. Tagged, so a
+    /// window still closing when the next deal opens a table cannot close
+    /// that one's books.
+    Game { table: u64, report: Report },
     Ui(UiCmd),
 }
 
@@ -133,6 +136,16 @@ impl Held {
     }
 }
 
+/// A request made at the table that leaves the player waiting on its answer,
+/// so that a refusal of it is shown there and not on the hidden lobby page.
+/// The game's own reports are refused too, routinely when a match ends with
+/// a run's last frames on the wire; those the player never asked for.
+#[derive(Clone, Copy, PartialEq)]
+enum Asked {
+    PlayAgain,
+    Back,
+}
+
 /// The round being played, as the overlay needs to describe it.
 struct Current {
     round: u64,
@@ -176,6 +189,8 @@ pub struct Flow {
     player: Option<String>,
     lobby: Option<LobbyState>,
     game: Option<Sender<Command>>,
+    /// Counts tables, so a report from one already left is recognised.
+    table: u64,
     game_hwnd: Option<isize>,
     overlay: Option<Overlay>,
     /// What the overlay page has yet to hear. A cell, since everything that
@@ -197,6 +212,8 @@ pub struct Flow {
     rendezvous: Option<String>,
     /// The bout this player is backing someone in, if any.
     backing_round: Option<u64>,
+    /// What this player asked for at the table and has not had answered.
+    asked: Option<Asked>,
     /// The round this player has claimed a verdict for. A relayed bout's
     /// client judges nothing, since its machine's clock is its own: the
     /// server's verdict comes back, and that is what it claims. Forgotten at
@@ -251,6 +268,7 @@ impl Flow {
                     player: None,
                     lobby: None,
                     game: None,
+                    table: 0,
                     game_hwnd: None,
                     overlay: None,
                     held: RefCell::default(),
@@ -263,6 +281,7 @@ impl Flow {
                     slots: BTreeMap::new(),
                     rendezvous: None,
                     backing_round: None,
+                    asked: None,
                     claimed: None,
                     gave_up: None,
                     spiked: false,
@@ -292,7 +311,10 @@ impl Flow {
                         self.notice(&text);
                     }
                 }
-                Msg::Game(r) => self.game(r),
+                Msg::Game { table, report } if table == self.table => self.game(report),
+                // A table left for a newer one: its window and overlay are
+                // going, and nothing it says is about the table now up.
+                Msg::Game { .. } => {}
             }
         }
     }
@@ -356,6 +378,7 @@ impl Flow {
             }
             UiCmd::PlayAgain => {
                 self.passthrough(true);
+                self.asked = Some(Asked::PlayAgain);
                 self.send(ToServer::PlayAgain);
             }
             UiCmd::BackToLobby => {
@@ -387,6 +410,7 @@ impl Flow {
             }
             UiCmd::Back { player } => {
                 if let Some(round) = self.backing_round {
+                    self.asked = Some(Asked::Back);
                     self.send(ToServer::Back { round, player });
                 }
             }
@@ -443,6 +467,17 @@ impl Flow {
                     // Not let in: a lobby that is not there, or another library.
                     self.leave();
                 }
+                if let Some(asked) = self.asked.take().filter(|_| self.game.is_some()) {
+                    // A refused Play again leaves the score card up, and the
+                    // mouse with it; a refused side is no side.
+                    self.emit(json!({
+                        "kind": "refused", "text": reason,
+                        "score": asked == Asked::PlayAgain, "back": asked == Asked::Back,
+                    }));
+                    if asked == Asked::PlayAgain {
+                        self.passthrough(false);
+                    }
+                }
                 self.notice(&reason);
             }
             ToClient::Lobby(lobby) => {
@@ -466,6 +501,7 @@ impl Flow {
                 self.dealt.insert(round, challenge.clone());
                 self.slots.insert(round, players.clone());
                 self.backing_round = None;
+                self.asked = None;
                 self.claimed = None;
                 self.gave_up = None;
                 self.waiting_load = None;
@@ -699,6 +735,9 @@ impl Flow {
             }
             ToClient::Sides { round, backing } => {
                 println!("[match] round {round} sides: {backing:?}");
+                if self.asked == Some(Asked::Back) {
+                    self.asked = None;
+                }
                 self.emit(json!({ "kind": "sides", "round": round, "backing": backing, "me": self.player }));
             }
             ToClient::Peers { round, peers } => {
@@ -746,6 +785,7 @@ impl Flow {
                 if let Some(g) = &self.game {
                     let _ = g.send(Command::Unload);
                 }
+                self.asked = None;
                 self.current = None;
                 self.stop_spectating();
                 self.thumbs = None;
@@ -1167,6 +1207,10 @@ impl Flow {
 
     /// Opens the game window; the overlay follows once it reports in.
     fn open_table(&mut self) {
+        self.table += 1;
+        let table = self.table;
+        // Whatever was asked of the last table, its `Closed` is not this one's.
+        self.closing = false;
         self.held.borrow_mut().open();
         self.mouse_through = true;
         let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -1184,14 +1228,14 @@ impl Flow {
             // One `Closed` per window: the game thread's own, or this one if
             // it ended without saying (an error, a panic).
             let mut closed = false;
-            for r in rep_rx {
-                closed |= matches!(r, Report::Closed { .. });
-                if to_flow.send(Msg::Game(r)).is_err() {
+            for report in rep_rx {
+                closed |= matches!(report, Report::Closed { .. });
+                if to_flow.send(Msg::Game { table, report }).is_err() {
                     return;
                 }
             }
             if !closed {
-                let _ = to_flow.send(Msg::Game(Report::Closed { in_front: true }));
+                let _ = to_flow.send(Msg::Game { table, report: Report::Closed { in_front: true } });
             }
         });
         self.game = Some(cmd_tx);

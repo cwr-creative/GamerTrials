@@ -219,6 +219,43 @@
   $('invite').onkeydown = e => { if (e.key === 'Enter') join(); };
   $('leave').onclick = () => invoke('leave');
 
+  // The host's changes go out one at a time, and only the latest: invokes in
+  // flight together can reach the client in either order, and a burst of
+  // changes, each carrying the whole form, could end on an older form. Until
+  // the lobby shows what was last sent, the lobby's older states do not
+  // overwrite the page either, or the next change would carry them back.
+  function sender(cmd, read, shows) {
+    const s = { busy: false, again: false, sent: null };
+    s.send = async () => {
+      s.again = true;
+      if (s.busy) return;
+      s.busy = true;
+      while (s.again) {
+        s.again = false;
+        s.sent = read();
+        try { await invoke(cmd, s.sent); } catch (e) { $('notice').textContent = String(e); }
+      }
+      s.busy = false;
+    };
+    // Whether the page may follow `lobby` again: nothing of ours is unanswered.
+    s.settled = lobby => {
+      if (s.sent && !s.busy && shows(lobby, s.sent)) s.sent = null;
+      return !s.sent;
+    };
+    return s;
+  }
+  const settingsKey = s => JSON.stringify([s.mode, s.format.kind, s.format.n, s.default_limit_seconds,
+                                           s.allow_custom, !!s.allow_head_to_head, s.grouping]);
+  const settingsOut = sender('set_settings', () => ({ settings: settingsFromForm() }),
+                             (l, sent) => settingsKey(l.settings) === settingsKey(sent.settings));
+  const keysOf = refs => refs.map(key).sort().join('\n');
+  const enabledOut = sender('set_enabled', () => ({ challenges: [...enabled].map(k => {
+    const i = k.indexOf('/');
+    return { game: k.slice(0, i), challenge: k.slice(i + 1) };
+  }) }), (l, sent) => keysOf(l.enabled) === keysOf(sent.challenges));
+  // A field being typed in is the host's until they leave it.
+  const editing = new Set();
+
   function settingsFromForm() {
     return {
       mode: $('mode').value,
@@ -230,19 +267,23 @@
     };
   }
   for (const id of ['mode', 'fkind', 'fn', 'limit', 'custom', 'h2h', 'grouping']) {
-    $(id).onchange = () => invoke('set_settings', { settings: settingsFromForm() });
+    $(id).oninput = () => editing.add(id);
+    $(id).onblur = () => editing.delete(id);
+    $(id).onchange = () => { editing.delete(id); settingsOut.send(); };
   }
   $('start').onclick = () => { $('notice').textContent = ''; invoke('start'); };
 
   function formToLobby() {
+    if (!settingsOut.settled(lobby)) return;
     const s = lobby.settings;
-    $('mode').value = s.mode;
-    $('fkind').value = s.format.kind;
-    $('fn').value = s.format.n;
-    $('limit').value = s.default_limit_seconds;
-    $('custom').checked = s.allow_custom;
-    $('h2h').checked = !!s.allow_head_to_head;
-    $('grouping').value = s.grouping;
+    const set = (id, prop, v) => { if (!editing.has(id)) $(id)[prop] = v; };
+    set('mode', 'value', s.mode);
+    set('fkind', 'value', s.format.kind);
+    set('fn', 'value', s.format.n);
+    set('limit', 'value', s.default_limit_seconds);
+    set('custom', 'checked', s.allow_custom);
+    set('h2h', 'checked', !!s.allow_head_to_head);
+    set('grouping', 'value', s.grouping);
   }
 
   // ---- the tree -----------------------------------------------------------
@@ -252,10 +293,7 @@
   }
 
   function sendEnabled() {
-    invoke('set_enabled', { challenges: [...enabled].map(k => {
-      const i = k.indexOf('/');
-      return { game: k.slice(0, i), challenge: k.slice(i + 1) };
-    }) });
+    enabledOut.send();
   }
 
   function setBox(box, keys) {
@@ -374,13 +412,15 @@
       // Back from a match: whatever was refused in it has passed.
       if (lobby && lobby.in_match && !e.payload.in_match) $('notice').textContent = '';
       lobby = e.payload;
-      enabled = new Set(lobby.enabled.map(key));
+      if (enabledOut.settled(lobby)) enabled = new Set(lobby.enabled.map(key));
       dealable = new Set(lobby.dealable.map(key));
       render();
     });
     await window.__TAURI__.event.listen('notice', e => { $('notice').textContent = e.payload.text; });
     await window.__TAURI__.event.listen('session', e => { me = e.payload.me; invite = e.payload.invite; $('notice').textContent = ''; });
-    await window.__TAURI__.event.listen('left', () => { lobby = null; me = null; invite = null; render(); });
+    await window.__TAURI__.event.listen('left', () => {
+      lobby = null; me = null; invite = null; settingsOut.sent = enabledOut.sent = null; editing.clear(); render();
+    });
   }
   init().catch(e => { $('notice').textContent = 'cannot reach the client: ' + e; });
 </script>

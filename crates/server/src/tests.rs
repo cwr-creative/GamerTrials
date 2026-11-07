@@ -1278,6 +1278,29 @@ fn entries_or_none(t: &Table, who: usize) -> Option<Vec<protocol::RoundEntry>> {
 }
 
 #[test]
+fn play_again_with_nothing_left_to_deal_is_refused_as_start_is() {
+    // `Challenges` counts the pool when a match is made; the others do not.
+    for format in [Format::Wins(1), Format::Challenges(1)] {
+        let mut t = Table::fighting(5, &["ann", "bob"]);
+        t.settings(LobbySettings { mode: Mode::Combo, format, allow_head_to_head: true, ..Default::default() });
+        t.start();
+        let round = t.rendezvous();
+        t.fight(round);
+        assert!(t.match_over(1).is_some());
+        leaves(&mut t, 0);
+        assert_eq!(hosts(&t, 1), ["bob"]);
+        assert!(t.lobby(1).in_match, "bob's score card is up");
+        t.take(1);
+        // Alone, bob cannot fill the bout's two slots: nothing is dealable,
+        // and the refusal is all that comes, so the score card stays.
+        t.send(1, ToServer::PlayAgain);
+        let msgs = t.take(1);
+        let [ToClient::Refused { reason }] = msgs.as_slice() else { panic!("{format:?}: {msgs:?}") };
+        assert!(reason.contains("no enabled challenge"), "{format:?}: {reason}");
+    }
+}
+
+#[test]
 fn a_bout_needs_the_toggle_a_rendezvous_and_enough_players() {
     let mut t = Table::fighting(5, &["ann"]);
     assert!(!t.lobby(0).can_start, "one player cannot fill two slots");

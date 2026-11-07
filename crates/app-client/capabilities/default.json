@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "The menu, lobby and overlay pages may listen for the client's events and call its commands.",
-  "windows": ["main", "overlay"],
+  "windows": ["main", "overlay-*"],
   "permissions": ["core:default"]
 }
