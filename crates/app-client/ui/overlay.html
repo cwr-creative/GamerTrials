@@ -745,7 +745,8 @@
       case 'progress': onProgress(p); break;
       case 'thumbs': onThumbs(p); break;
       case 'thumb': onThumb(p); break;
-      case 'loading': dropScore(); playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
+      // A `go` heard while sitting a round out was for that round, not this one.
+      case 'loading': goWanted = false; dropScore(); playing = []; hideClock(); closeSpectate(); hud('loading round ' + p.round); break;
       case 'clock': showClock(p); break;
       case 'intro': showIntro(p); break;
       case 'go': goWanted = true; tryGo(); break;
@@ -856,8 +857,8 @@
   // call is refused, and the refusal is the only sign, so it goes on the HUD.
   if (window.__TAURI__ && window.__TAURI__.event) {
     hud('subscribing');
-    // Made after the first round was dealt: ask for what was sent before
-    // this listened, such as that round's sidebar (ADR 0038).
+    // Made after the first round was dealt: the flow holds what it has for
+    // this page, such as that round's intro, until it hears this listens.
     window.__TAURI__.event.listen('overlay', e => handle(e.payload))
       .then(() => { hud('listening'); invoke('overlay_ready'); }, err => hud('listen refused: ' + err));
   } else {

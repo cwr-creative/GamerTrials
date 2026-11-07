@@ -12,6 +12,7 @@
 //! leaving means: a host's closed window ends the match and keeps the lobby,
 //! a guest's leaves the lobby.
 
+use std::cell::RefCell;
 use std::collections::hash_map::RandomState;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, Hasher};
@@ -68,9 +69,7 @@ pub enum UiCmd {
     Watch { player: String },
     /// Back a seated player in the bout, from the backing sheet (ADR 0036).
     Back { player: String },
-    /// The overlay page is listening. It is made when the game window
-    /// opens, after the first round is dealt, and an event sent before it
-    /// listens is lost, so whatever it needs to hold already is sent again.
+    /// The overlay page is listening: whatever `Held` kept for it follows.
     OverlayReady,
 }
 
@@ -99,6 +98,39 @@ pub struct Auto {
     /// `--script <seed>`: press random buttons instead of reading the pad,
     /// for a bout played by two clients with nobody at either keyboard.
     pub script: Option<u64>,
+}
+
+/// What the overlay page has yet to hear. The page is made once the game
+/// window is up, after the first round is dealt, and takes its time to listen,
+/// on a browser shared with other clients a long time. An event sent before
+/// then is lost for good, and the round can hang on the one lost, so from the
+/// table opening until the page says it listens, everything waits here.
+#[derive(Default)]
+struct Held(Option<Vec<serde_json::Value>>);
+
+impl Held {
+    /// A new page is on its way: keep what is sent until it listens.
+    fn open(&mut self) {
+        self.0 = Some(Vec::new());
+    }
+
+    /// Keeps a payload if the page is not listening, and hands it back to be
+    /// sent if it is. Pictures and sound are not kept: stale by the time the
+    /// page can show them, and the next key frame starts the picture anyway.
+    fn offer(&mut self, payload: serde_json::Value) -> Option<serde_json::Value> {
+        let Some(held) = self.0.as_mut() else { return Some(payload) };
+        let kind = payload["kind"].as_str().unwrap_or_default();
+        if !matches!(kind, "video" | "audio" | "thumb" | "progress") {
+            held.push(payload);
+        }
+        None
+    }
+
+    /// The page listens, or there will be none: what was kept, in order, and
+    /// from now on nothing is.
+    fn release(&mut self) -> Vec<serde_json::Value> {
+        self.0.take().unwrap_or_default()
+    }
 }
 
 /// The round being played, as the overlay needs to describe it.
@@ -146,6 +178,12 @@ pub struct Flow {
     game: Option<Sender<Command>>,
     game_hwnd: Option<isize>,
     overlay: Option<Overlay>,
+    /// What the overlay page has yet to hear. A cell, since everything that
+    /// emits only reads the flow; this thread is the only one that touches it.
+    held: RefCell<Held>,
+    /// Whether the mouse should go through the overlay, kept for an overlay
+    /// that is not up yet: this player may be spectating from the first deal.
+    mouse_through: bool,
     /// A round dealt before the game window was up.
     waiting_load: Option<Load>,
     current: Option<Current>,
@@ -161,7 +199,8 @@ pub struct Flow {
     backing_round: Option<u64>,
     /// The round this player has claimed a verdict for. A relayed bout's
     /// client judges nothing, since its machine's clock is its own: the
-    /// server's verdict comes back, and that is what it claims.
+    /// server's verdict comes back, and that is what it claims. Forgotten at
+    /// every deal, since round numbers start again with each match.
     claimed: Option<u64>,
     /// The round this player gave up in on a relayed machine, whose
     /// forfeited verdict is therefore this client's to claim.
@@ -214,6 +253,8 @@ impl Flow {
                     game: None,
                     game_hwnd: None,
                     overlay: None,
+                    held: RefCell::default(),
+                    mouse_through: true,
                     waiting_load: None,
                     current: None,
                     spectate: None,
@@ -338,7 +379,12 @@ impl Flow {
                 self.passthrough(true);
             }
             UiCmd::Watch { player } => self.watch(Some(player)),
-            UiCmd::OverlayReady => self.emit_thumbs(),
+            UiCmd::OverlayReady => {
+                let held = self.held.borrow_mut().release();
+                for payload in held {
+                    self.emit(payload);
+                }
+            }
             UiCmd::Back { player } => {
                 if let Some(round) = self.backing_round {
                     self.send(ToServer::Back { round, player });
@@ -414,6 +460,15 @@ impl Flow {
                 self.dealt.insert(round, challenge.clone());
                 self.slots.insert(round, players.clone());
                 self.backing_round = None;
+                self.claimed = None;
+                self.gave_up = None;
+                self.waiting_load = None;
+                // The table opens for everyone at the first deal, seated or
+                // not: someone sitting out a bout backs a side and watches on
+                // it (ADR 0036), and comes to the score card there.
+                if self.game.is_none() {
+                    self.open_table();
+                }
                 let me = self.player.clone().unwrap_or_default();
                 let bout = kind == Kind::HeadToHead;
                 self.stop_spectating();
@@ -490,15 +545,12 @@ impl Flow {
                     script: self.auto.script,
                 };
                 self.emit(json!({ "kind": "loading", "round": round }));
-                match &self.game {
-                    Some(g) => {
+                match (&self.game, self.game_hwnd) {
+                    (Some(g), Some(_)) => {
                         let _ = g.send(Command::Unload);
                         let _ = g.send(Command::Load(Box::new(load)));
                     }
-                    None => {
-                        self.waiting_load = Some(load);
-                        self.open_table();
-                    }
+                    _ => self.waiting_load = Some(load),
                 }
             }
             ToClient::Go { round } => {
@@ -718,12 +770,16 @@ impl Flow {
                         if let Some(g) = &self.game {
                             let _ = g.send(Command::Overlay(ov.hwnd()));
                         }
-                        let _ = ov.set_passthrough(true);
                         let tracker = ov.clone();
                         thread::spawn(move || tracker.track());
                         self.overlay = Some(ov);
+                        self.passthrough(self.mouse_through);
                     }
-                    Err(e) => eprintln!("[overlay] cannot create: {e}"),
+                    Err(e) => {
+                        eprintln!("[overlay] cannot create: {e}");
+                        // No page is coming to hear any of it.
+                        self.held.borrow_mut().release();
+                    }
                 }
                 if let Some(w) = self.app.get_webview_window("main") {
                     let _ = w.hide();
@@ -830,6 +886,7 @@ impl Flow {
                 self.game = None;
                 self.game_hwnd = None;
                 self.overlay = None;
+                self.held.borrow_mut().release();
                 let asked = std::mem::take(&mut self.closing);
                 if self.is_host() {
                     if self.current.is_some() {
@@ -1070,12 +1127,14 @@ impl Flow {
     }
 
     fn emit(&self, payload: serde_json::Value) {
+        let Some(payload) = self.held.borrow_mut().offer(payload) else { return };
         if let Some(ov) = &self.overlay {
             ov.emit(payload);
         }
     }
 
-    fn passthrough(&self, on: bool) {
+    fn passthrough(&mut self, on: bool) {
+        self.mouse_through = on;
         if let Some(ov) = &self.overlay {
             let _ = ov.set_passthrough(on);
             if !on {
@@ -1102,6 +1161,8 @@ impl Flow {
 
     /// Opens the game window; the overlay follows once it reports in.
     fn open_table(&mut self) {
+        self.held.borrow_mut().open();
+        self.mouse_through = true;
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (rep_tx, rep_rx) = mpsc::channel();
         thread::Builder::new()
@@ -1215,5 +1276,52 @@ fn said(e: &session_api::SessionEvent) -> String {
         SessionEvent::ItemCollected { item, .. } => format!("got {}", item.replace('_', " ")),
         SessionEvent::Counted { counter, .. } => counter.replace('_', " "),
         SessionEvent::ObjectiveReached { objective, .. } => format!("reached {}", objective.replace('-', " ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(payloads: &[serde_json::Value]) -> Vec<&str> {
+        payloads.iter().map(|p| p["kind"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn nothing_is_held_with_no_page_on_the_way() {
+        let mut held = Held::default();
+        assert!(held.offer(json!({ "kind": "intro" })).is_some());
+        assert!(held.release().is_empty());
+    }
+
+    #[test]
+    fn what_a_page_needs_waits_for_it_in_order_and_comes_once() {
+        let mut held = Held::default();
+        held.open();
+        for kind in ["thumbs", "loading", "intro", "go"] {
+            assert!(held.offer(json!({ "kind": kind })).is_none());
+        }
+        assert_eq!(kinds(&held.release()), ["thumbs", "loading", "intro", "go"]);
+        assert!(held.release().is_empty(), "a second ready has nothing to replay");
+        assert!(held.offer(json!({ "kind": "clock" })).is_some(), "listening now, so straight through");
+    }
+
+    #[test]
+    fn pictures_and_sound_are_not_kept_for_a_page_not_yet_listening() {
+        let mut held = Held::default();
+        held.open();
+        for kind in ["video", "audio", "thumb", "progress"] {
+            assert!(held.offer(json!({ "kind": kind })).is_none());
+        }
+        assert!(held.release().is_empty());
+    }
+
+    #[test]
+    fn a_new_page_forgets_what_the_last_never_heard() {
+        let mut held = Held::default();
+        held.open();
+        held.offer(json!({ "kind": "intro" }));
+        held.open();
+        assert!(held.release().is_empty());
     }
 }
