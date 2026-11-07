@@ -353,7 +353,7 @@
           text.innerHTML = '<div>' + esc(ch.name) + (ch.title !== g.title ? ' <span class="tag">on ' + esc(ch.title) + '</span>' : '') +
                            '</div><div class="goal">' + esc(ch.goal) + '</div>';
           const tag = document.createElement('div'); tag.className = 'tag';
-          tag.textContent = (ch.kind === 'time_trial' ? 'TIME TRIAL' : ch.kind === 'head_to_head' ? 'HEAD-TO-HEAD' : 'SURVIVAL') +
+          tag.textContent = (ch.kind === 'time_trial' ? 'TIME TRIAL' : 'SURVIVAL') +
                             (ch.generated ? ' · GENERATED' : ch.custom ? ' · HACK' : '') +
                             (dealable.has(k) || !enabled.has(k) ? '' : ' · NOT IN THIS MATCH');
           el.appendChild(box); el.appendChild(text); el.appendChild(tag);
