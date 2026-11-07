@@ -251,10 +251,15 @@
   function hideBacking() { clearInterval(backingTimer); backingRound = null; hide('backing'); }
 
   // The round will not be played: whatever was on the way to a countdown stops.
+  // No intro is coming to take the last round's card down, so it goes when its
+  // time is up; it would cover the backing sheet and the spectate view.
+  let roundTimer = null;
   function dropRound() {
     goWanted = false; introUp = false;
     $('intro').classList.remove('in');
     if (!counting) $('intro').classList.add('out');
+    clearTimeout(roundTimer);
+    roundTimer = setTimeout(() => hide('round'), Math.max(0, roundUntil - now()));
   }
 
   async function showIntro(p) {
@@ -341,6 +346,7 @@
   }
 
   function showRound(p) {
+    clearTimeout(roundTimer);
     hide('intro'); $('intro').classList.remove('in', 'out'); hide('waiting');
     $('r-title').textContent = 'Round ' + (p.round + 1) + ' · ' + (p.title || '');
     let h = '<tr><th>Place</th><th>Player</th><th>Result</th><th class="num">Frames</th><th class="num">Attempts</th></tr>';
