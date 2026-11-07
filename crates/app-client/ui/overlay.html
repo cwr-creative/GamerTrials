@@ -361,16 +361,25 @@
   let scoreWanted = false;
   const dropScore = () => { scoreWanted = false; hide('score'); };
 
+  // The host's buttons or a guest's wait. The host can leave while this
+  // card is up, or while it waits out the round card.
+  let scoreHost = false;
+  function setScoreHost(host) {
+    scoreHost = host;
+    $('s-host').classList.toggle('hidden', !host);
+    $('s-guest').classList.toggle('hidden', host);
+  }
+
   async function showScore(p) {
     scoreWanted = true;
+    scoreHost = !!p.host;
     const delay = roundUntil - now();
     if (delay > 0) await wait(delay);
     if (!scoreWanted) return;
     hide('round'); hide('waiting'); hidePause();
     $('s-format').textContent = formatText(p.format) + (p.mode ? ' · ' + p.mode.replace('_', ' ') : '');
     standingsTable($('s-standings'), p.standings, p.mode, p.format, p.me);
-    $('s-host').classList.toggle('hidden', !p.host);
-    $('s-guest').classList.toggle('hidden', !!p.host);
+    setScoreHost(scoreHost);
     show('score');
     hud('match over');
   }
@@ -783,6 +792,7 @@
         break;
       case 'round': hideClock(); closeSpectate(); hideBacking(); showRound(p); break;
       case 'score': hideClock(); closeSpectate(); hideBacking(); showScore(p); break;
+      case 'host': setScoreHost(!!p.host); break;
       case 'pause': showPause(p); break;
       case 'resume': hidePause(); hud('playing'); break;
       case 'error': $('error').textContent = p.text; show('error'); hud('error'); break;

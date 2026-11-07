@@ -232,7 +232,7 @@
   for (const id of ['mode', 'fkind', 'fn', 'limit', 'custom', 'h2h', 'grouping']) {
     $(id).onchange = () => invoke('set_settings', { settings: settingsFromForm() });
   }
-  $('start').onclick = () => invoke('start');
+  $('start').onclick = () => { $('notice').textContent = ''; invoke('start'); };
 
   function formToLobby() {
     const s = lobby.settings;
@@ -315,7 +315,7 @@
           text.innerHTML = '<div>' + esc(ch.name) + (ch.title !== g.title ? ' <span class="tag">on ' + esc(ch.title) + '</span>' : '') +
                            '</div><div class="goal">' + esc(ch.goal) + '</div>';
           const tag = document.createElement('div'); tag.className = 'tag';
-          tag.textContent = (ch.kind === 'time_trial' ? 'TIME TRIAL' : 'SURVIVAL') +
+          tag.textContent = (ch.kind === 'time_trial' ? 'TIME TRIAL' : ch.kind === 'head_to_head' ? 'HEAD-TO-HEAD' : 'SURVIVAL') +
                             (ch.generated ? ' · GENERATED' : ch.custom ? ' · HACK' : '') +
                             (dealable.has(k) || !enabled.has(k) ? '' : ' · NOT IN THIS MATCH');
           el.appendChild(box); el.appendChild(text); el.appendChild(tag);
@@ -360,8 +360,9 @@
   }
 
   function render() {
-    if (!lobby) { $('menu').classList.remove('hidden'); $('lobby').classList.add('hidden'); return; }
-    $('menu').classList.add('hidden'); $('lobby').classList.remove('hidden');
+    // One notice, on whichever page is up: a refusal reaches either.
+    if (!lobby) { $('menu').classList.remove('hidden'); $('lobby').classList.add('hidden'); $('menu').appendChild($('notice')); return; }
+    $('menu').classList.add('hidden'); $('lobby').classList.remove('hidden'); $('blocking').before($('notice'));
     formToLobby();
     renderTree();
     renderPlayers();
@@ -370,13 +371,15 @@
   async function init() {
     cat = await invoke('catalog');
     await window.__TAURI__.event.listen('lobby', e => {
+      // Back from a match: whatever was refused in it has passed.
+      if (lobby && lobby.in_match && !e.payload.in_match) $('notice').textContent = '';
       lobby = e.payload;
       enabled = new Set(lobby.enabled.map(key));
       dealable = new Set(lobby.dealable.map(key));
       render();
     });
     await window.__TAURI__.event.listen('notice', e => { $('notice').textContent = e.payload.text; });
-    await window.__TAURI__.event.listen('session', e => { me = e.payload.me; invite = e.payload.invite; });
+    await window.__TAURI__.event.listen('session', e => { me = e.payload.me; invite = e.payload.invite; $('notice').textContent = ''; });
     await window.__TAURI__.event.listen('left', () => { lobby = null; me = null; invite = null; render(); });
   }
   init().catch(e => { $('notice').textContent = 'cannot reach the client: ' + e; });

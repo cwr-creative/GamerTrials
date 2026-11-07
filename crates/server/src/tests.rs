@@ -590,6 +590,121 @@ fn a_player_leaving_mid_match_ends_it() {
     assert_eq!(players, ["host"]);
 }
 
+/// Two players and one challenge, played through to the score card.
+fn at_the_score_card(seed: u64) -> Table {
+    let mut t = Table::new(seed);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.settings(LobbySettings { format: Format::Challenges(1), ..Default::default() });
+    t.start();
+    t.play_round();
+    assert!(t.match_over(0).is_some());
+    t
+}
+
+fn leaves(t: &mut Table, who: usize) {
+    let conn = t.clients[who].conn;
+    let out = t.server.disconnect(conn);
+    t.deliver(out);
+}
+
+fn hosts(t: &Table, who: usize) -> Vec<String> {
+    t.lobby(who).players.iter().filter(|p| p.host).map(|p| p.id.clone()).collect()
+}
+
+#[test]
+fn a_match_being_played_refuses_a_joiner_and_one_on_its_score_card_does_not() {
+    let mut t = Table::new(4);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.settings(LobbySettings { format: Format::Challenges(1), ..Default::default() });
+    t.start();
+    let early = t.join("early", ace);
+    assert!(
+        matches!(t.clients[early].inbox.first(), Some(ToClient::Refused { reason }) if reason.contains("in progress")),
+        "{:?}",
+        t.clients[early].inbox
+    );
+    t.clients.remove(early);
+    t.play_round();
+    assert!(t.match_over(0).is_some());
+
+    let late = t.join("late", ace);
+    let lobby = t.lobby(late);
+    assert_eq!(lobby.players.len(), 3, "let in");
+    assert!(lobby.in_match, "the tables stay up: only the host's word closes them");
+    assert!(!lobby.can_start);
+    assert_eq!(lobby.blocking, ["the last match's score card is still up"]);
+
+    // The host's Play again deals the new player in, and Back to lobby frees
+    // the lobby for everyone.
+    t.send(0, ToServer::PlayAgain);
+    assert!(t.last_dealt(late).is_some(), "seated in the next match");
+    t.send(0, ToServer::EndMatch);
+    t.send(0, ToServer::BackToLobby);
+    assert!(!t.lobby(late).in_match);
+    assert!(t.lobby(late).can_start, "{:?}", t.lobby(late).blocking);
+}
+
+#[test]
+fn a_guest_leaving_a_finished_match_disturbs_nobody() {
+    let mut t = at_the_score_card(4);
+    t.take(0);
+    leaves(&mut t, 1);
+    let msgs = t.take(0);
+    let [ToClient::Lobby(lobby)] = msgs.as_slice() else { panic!("only the roster changes: {msgs:?}") };
+    assert_eq!(lobby.players.len(), 1);
+    assert!(lobby.in_match, "the host's score card stays up");
+}
+
+#[test]
+fn the_host_leaving_mid_round_hands_over_a_lobby_that_works() {
+    let mut t = Table::new(4);
+    t.join("host", ace);
+    t.join("guest", ace);
+    t.join("third", ace);
+    t.start();
+    leaves(&mut t, 0);
+    assert_eq!(t.errors(1), ["host left the match"]);
+    assert!(t.match_over(1).is_some());
+    assert_eq!(hosts(&t, 1), ["guest"]);
+    assert!(t.lobby(1).in_match, "the next host's score card is up");
+
+    // A joiner is let in, and the new host's word closes the tables.
+    let late = t.join("late", ace);
+    assert_eq!(t.lobby(late).players.len(), 3);
+    t.send(1, ToServer::BackToLobby);
+    assert!(!t.lobby(1).in_match);
+    assert!(t.lobby(1).can_start, "{:?}", t.lobby(1).blocking);
+    t.send(1, ToServer::Start);
+    assert!(t.last_dealt(late).is_some(), "the lobby deals again");
+}
+
+#[test]
+fn the_host_leaving_a_finished_match_hands_over_play_again() {
+    let mut t = at_the_score_card(4);
+    t.take(1);
+    leaves(&mut t, 0);
+    assert!(t.errors(1).is_empty(), "{:?}", t.errors(1));
+    assert_eq!(hosts(&t, 1), ["guest"]);
+    t.send(1, ToServer::PlayAgain);
+    assert!(t.last_dealt(1).is_some(), "the new host's Play again deals");
+}
+
+#[test]
+fn a_lobby_with_nobody_left_on_a_score_card_is_free() {
+    let mut t = at_the_score_card(4);
+    let late = t.join("late", ace);
+    assert!(t.lobby(late).in_match);
+    leaves(&mut t, 0);
+    assert!(t.lobby(late).in_match, "the guest is still on the score card");
+    leaves(&mut t, 1);
+    // No table to press Back to lobby on, and no other way out of this.
+    assert_eq!(hosts(&t, late), ["late"]);
+    assert!(!t.lobby(late).in_match);
+    assert!(t.lobby(late).can_start, "{:?}", t.lobby(late).blocking);
+}
+
 // ------------------------------------------------------------- spectating
 
 fn video(round: u64, frame: u64) -> ToServer {

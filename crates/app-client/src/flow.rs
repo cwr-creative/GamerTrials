@@ -450,7 +450,13 @@ impl Flow {
                     // The host went back to the lobby; so does everyone.
                     self.leave_table();
                 }
+                let was_host = self.is_host();
                 self.show_lobby(lobby);
+                // The host's score card has the buttons, and the host may
+                // have left since this one came up.
+                if self.is_host() != was_host {
+                    self.emit(json!({ "kind": "host", "host": self.is_host() }));
+                }
             }
             ToClient::Dealt { round, challenge, kind, seed, limit_frames, players, backing_seconds } => {
                 println!(

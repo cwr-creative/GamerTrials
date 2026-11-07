@@ -89,6 +89,17 @@ struct RoundState {
 struct Live {
     m: Match,
     round: Option<RoundState>,
+    /// Everyone who began this match and has not left. They have a table
+    /// open, and a score card on it once the match is over; a player who
+    /// joined after that has neither.
+    table: BTreeSet<ConnId>,
+}
+
+impl Live {
+    /// Its `MatchOver` has gone out: all that is left of it is score cards.
+    fn finished(&self) -> bool {
+        self.round.is_none()
+    }
 }
 
 pub struct Server {
@@ -153,7 +164,9 @@ impl Server {
     }
 
     /// A connection went away. A player leaving mid-match ends the match: a
-    /// run with nobody to report it cannot be judged.
+    /// run with nobody to report it cannot be judged. Leaving one already
+    /// over disturbs nobody, and once nobody is left on a score card the
+    /// lobby is free, since only they could have gone back to it.
     pub fn disconnect(&mut self, conn: ConnId) -> Outbox {
         self.unnamed.remove(&conn);
         let Some(i) = self.seats.iter().position(|s| s.conn == conn) else {
@@ -161,8 +174,14 @@ impl Server {
         };
         let seat = self.seats.remove(i);
         let mut out = Vec::new();
-        if self.live.is_some() {
+        if self.live.as_ref().is_some_and(|l| !l.finished()) {
             out.extend(self.fail(format!("{} left the match", seat.name)));
+        }
+        if let Some(live) = self.live.as_mut() {
+            live.table.remove(&conn);
+            if live.table.is_empty() {
+                self.live = None;
+            }
         }
         out.extend(self.broadcast(ToClient::Lobby(self.lobby_state())));
         out
@@ -295,7 +314,7 @@ impl Server {
                 },
             )];
         }
-        if self.live.is_some() {
+        if self.live.as_ref().is_some_and(|l| !l.finished()) {
             return vec![(conn, ToClient::Refused { reason: "a match is in progress".into() })];
         }
         // Ids are names made unique: "Chris", then "Chris (2)".
@@ -375,8 +394,12 @@ impl Server {
                 "no enabled challenge fits the settings and everyone's files".to_string(),
             );
         }
-        if self.live.is_some() {
-            blocking.push("a match is in progress".to_string());
+        match &self.live {
+            Some(l) if l.finished() => {
+                blocking.push("the last match's score card is still up".to_string());
+            }
+            Some(_) => blocking.push("a match is in progress".to_string()),
+            None => {}
         }
         LobbyState {
             code: self.code.clone(),
@@ -409,7 +432,8 @@ impl Server {
         }
         match self.new_match() {
             Ok(m) => {
-                self.live = Some(Live { m, round: None });
+                let table = self.seats.iter().map(|s| s.conn).collect();
+                self.live = Some(Live { m, round: None, table });
                 self.deal_next()
             }
             Err(e) => vec![(host, ToClient::Refused { reason: e })],
@@ -1047,7 +1071,8 @@ impl Server {
         }
         match self.new_match() {
             Ok(m) => {
-                self.live = Some(Live { m, round: None });
+                let table = self.seats.iter().map(|s| s.conn).collect();
+                self.live = Some(Live { m, round: None, table });
                 self.deal_next()
             }
             Err(e) => vec![(host, ToClient::Refused { reason: e })],
