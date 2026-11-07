@@ -146,7 +146,7 @@ struct Thumbs {
     round: u64,
     /// Who is still playing this round, not counting this player.
     active: Vec<String>,
-    /// Who is in each box, top to bottom: at most `MAX_THUMBS`.
+    /// Who is shown: at most `MAX_THUMBS`. The page keeps each in their box.
     shown: Vec<String>,
 }
 

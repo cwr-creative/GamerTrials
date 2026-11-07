@@ -311,7 +311,10 @@
   const endingText = e => !e ? '' :
     e.type === 'completed' ? 'completed' :
     e.type === 'failed' ? 'failed: ' + e.how :
-    e.type === 'timed_out' ? 'timed out' : 'gave up';
+    e.type === 'timed_out' ? 'timed out' :
+    // A bout's other side won, and a backer shares this: it says nothing of
+    // playing or of giving up (ADR 0036).
+    e.type === 'beaten' ? 'lost the bout' : 'gave up';
 
   const formatText = f => !f ? '' :
     f.kind === 'challenges' ? f.n + ' challenges' :
@@ -394,12 +397,12 @@
   const LEAD_MS = 150;
   const spec = { players: [], player: null, decoder: null, size: null, needKey: true,
                  frames: [], raf: null, audio: null, nextTime: 0, timer: null, padWas: null,
-                 painted: [], since: 0, slow: false, run: null, said: [],
+                 painted: [], since: null, slow: false, run: null, said: [],
                  configuring: false, failures: 0, broken: null };
   const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
   function closeFeed() {
-    spec.painted = []; spec.since = now(); spec.run = null; spec.said = [];
+    spec.painted = []; spec.since = null; spec.run = null; spec.said = [];
     setSlow(false); showRun();
     if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} spec.decoder = null; }
     spec.size = null; spec.needKey = true;
@@ -446,8 +449,9 @@
   }
 
   async function onVideo(p) {
-    if (!('VideoDecoder' in window) || !spec.player || p.player !== spec.player) return;
-    if (spec.broken || spec.configuring) return;
+    if (!spec.player || p.player !== spec.player) return;
+    picturesDue();
+    if (!('VideoDecoder' in window) || spec.broken || spec.configuring) return;
     const size = p.width + 'x' + p.height;
     if (!spec.decoder || spec.size !== size) {
       if (spec.decoder) { try { spec.decoder.close(); } catch (e) {} spec.decoder = null; }
@@ -516,9 +520,14 @@
   // The picture is healthy while it paints at a watchable rate. Below that
   // the run panel takes over, and it hands back only once the picture has
   // held a better rate, so a link at the edge does not flicker between them.
+  // Nothing is sent before the watched player's game begins, however fast the
+  // link: the rate counts from the first picture or Progress report of their
+  // run. Progress is never dropped, so a link that loses every picture still
+  // gets here.
   const SLOW_FPS = 8, GOOD_FPS = 15, WINDOW_MS = 3000;
+  function picturesDue() { if (spec.since === null) spec.since = now(); }
   function checkFeed() {
-    if (!spec.player) return;
+    if (!spec.player || spec.since === null) return;
     const t = now();
     while (spec.painted.length && spec.painted[0] < t - WINDOW_MS) spec.painted.shift();
     if (t - spec.since < WINDOW_MS) return;
@@ -544,6 +553,7 @@
   // second past the last one, so a stalled link does not invent time.
   function onProgress(p) {
     if (!spec.player || p.player !== spec.player) return;
+    picturesDue();
     spec.run = { clock: p.clock, fps: p.fps, attempt: p.attempt, at: now() };
     for (const e of p.events || []) spec.said.push(e);
     spec.said = spec.said.slice(-3);
@@ -624,8 +634,10 @@
   // ---- the sidebar (ADR 0038) ---------------------------------------------
   // Up to three other players still playing, each picture from a decoder of
   // its own and painted as soon as it is decoded: there is no sound to keep
-  // it in step with. The flow says who is in which box; a box whose player
-  // changes starts again from that player's next key frame.
+  // it in step with. The flow says who is shown; a player keeps their box and
+  // its decoder for as long as they are, since the sender makes a key frame
+  // for a new viewer but not for one who has not gone anywhere. A box whose
+  // player leaves stays empty until someone new takes it.
   const thumbs = [...document.querySelectorAll('.thumb')].map(el => ({
     el, canvas: el.querySelector('canvas'), label: el.querySelector('.label'),
     player: null, decoder: null, size: null, aspect: 0, needKey: true, frame: null,
@@ -653,12 +665,18 @@
     document.body.classList.toggle('sidebar', !!p.sidebar);
     layoutSide();
     const players = p.players || [];
-    thumbs.forEach((b, i) => {
-      const player = players[i] || null;
-      if (b.player !== player) { closeThumb(b); b.player = player; }
-      b.label.textContent = player || '';
-      b.el.classList.toggle('empty', !player);
-    });
+    for (const b of thumbs) {
+      if (b.player && !players.includes(b.player)) { closeThumb(b); b.player = null; }
+    }
+    for (const player of players) {
+      if (thumbs.some(b => b.player === player)) continue;
+      const b = thumbs.find(b => !b.player);
+      if (b) b.player = player;
+    }
+    for (const b of thumbs) {
+      b.label.textContent = b.player || '';
+      b.el.classList.toggle('empty', !b.player);
+    }
     if (p.sidebar && !thumbRaf) thumbRaf = requestAnimationFrame(paintThumbs);
     if (!p.sidebar && thumbRaf) { cancelAnimationFrame(thumbRaf); thumbRaf = null; }
   }
