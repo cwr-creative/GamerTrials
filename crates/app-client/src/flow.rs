@@ -825,7 +825,7 @@ impl Flow {
                 }));
                 self.passthrough(false);
             }
-            Report::Closed => {
+            Report::Closed { in_front } => {
                 println!("[client] game window closed");
                 self.game = None;
                 self.game_hwnd = None;
@@ -845,7 +845,10 @@ impl Flow {
                 self.current = None;
                 if let Some(w) = self.app.get_webview_window("main") {
                     let _ = w.show();
-                    let _ = w.set_focus();
+                    // As `Overlay::focus`: only if the player was at this client.
+                    if in_front {
+                        let _ = w.set_focus();
+                    }
                 }
             }
         }
@@ -1115,13 +1118,13 @@ impl Flow {
             // it ended without saying (an error, a panic).
             let mut closed = false;
             for r in rep_rx {
-                closed |= matches!(r, Report::Closed);
+                closed |= matches!(r, Report::Closed { .. });
                 if to_flow.send(Msg::Game(r)).is_err() {
                     return;
                 }
             }
             if !closed {
-                let _ = to_flow.send(Msg::Game(Report::Closed));
+                let _ = to_flow.send(Msg::Game(Report::Closed { in_front: true }));
             }
         });
         self.game = Some(cmd_tx);

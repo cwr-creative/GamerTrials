@@ -146,9 +146,26 @@ mod host {
     }
 }
 
-/// The quit key, read as a level like the harness does.
-pub fn quit_pressed() -> bool {
-    down(VK_F12)
+/// The quit key: pressed while one of our windows is in front, since the key's
+/// state is the whole machine's. An edge of the key itself, not of the key and
+/// the check together, so that a press aimed elsewhere does not fire when this
+/// client comes to the front with the key still held, as the next client on
+/// a machine does when the one in front closes.
+#[derive(Default)]
+pub struct QuitKey {
+    was: bool,
+}
+
+impl QuitKey {
+    pub fn pressed(&mut self, ours: &[isize]) -> bool {
+        self.poll(down(VK_F12), ours_in_front(ours))
+    }
+
+    fn poll(&mut self, now: bool, in_front: bool) -> bool {
+        let fired = now && !self.was && in_front;
+        self.was = now;
+        fired
+    }
 }
 
 /// Whether one bound input is held now.
@@ -272,4 +289,30 @@ pub fn all_held(pad: &PadState, deadzone: f32) -> Vec<Input> {
         out.push(i);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_quit_key_fires_once_per_press_and_only_in_front() {
+        let mut q = QuitKey::default();
+        assert!(!q.poll(false, true));
+        assert!(q.poll(true, true));
+        assert!(!q.poll(true, true), "held is not pressed again");
+        assert!(!q.poll(false, true));
+        assert!(!q.poll(true, false), "pressed in another program");
+    }
+
+    /// The client in front closes with the key still down, and this one is
+    /// next in line: the press was not aimed at it.
+    #[test]
+    fn a_press_made_elsewhere_does_not_fire_on_coming_to_the_front() {
+        let mut q = QuitKey::default();
+        assert!(!q.poll(true, false));
+        assert!(!q.poll(true, true));
+        assert!(!q.poll(false, true));
+        assert!(q.poll(true, true), "the next press is its own");
+    }
 }

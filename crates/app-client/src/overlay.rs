@@ -36,7 +36,6 @@ impl Overlay {
             .transparent(true)
             .decorations(false)
             .shadow(false)
-            .always_on_top(true)
             .skip_taskbar(true)
             // GTK holds a window it may not resize at its first size, even
             // against the program's own `set_size`; there is no frame to drag.
@@ -70,10 +69,16 @@ impl Overlay {
         self.window.set_ignore_cursor_events(on)
     }
 
-    /// Brings the overlay to the front, for when it has buttons to click.
+    /// Brings the overlay to the front, for when it has buttons to click, if
+    /// the player is at this client. If not it stays where it is, and its
+    /// buttons take the click that brings it up: a card must not pull them out
+    /// of whatever they are doing, and clients sharing a browser that all
+    /// activate at once freeze it.
     pub fn focus(&self) {
-        native::bring_to_front(self.hwnd);
-        let _ = self.window.set_focus();
+        if crate::keys::ours_in_front(&[self.game, self.hwnd]) {
+            native::bring_to_front(self.hwnd);
+            let _ = self.window.set_focus();
+        }
     }
 
     pub fn emit(&self, payload: serde_json::Value) {
@@ -189,7 +194,7 @@ mod native {
     use winapi::um::winuser::{
         keybd_event, ClientToScreen, GetClientRect, GetForegroundWindow, GetWindowLongW, GetWindowRect, IsIconic,
         SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, GWLP_HWNDPARENT, GWL_EXSTYLE, KEYEVENTF_KEYUP,
-        SWP_NOACTIVATE, SWP_NOZORDER, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
 
     pub fn handle(window: &WebviewWindow) -> Option<isize> {
@@ -225,6 +230,9 @@ mod native {
     pub fn set_owner(hwnd: isize, owner: isize) {
         unsafe {
             SetWindowLongPtrW(hwnd as HWND, GWLP_HWNDPARENT, owner as _);
+            // Naming an owner moves nothing, and the overlay may have come up
+            // under the game window; from here on Windows keeps them in order.
+            SetWindowPos(owner as HWND, hwnd as HWND, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
 

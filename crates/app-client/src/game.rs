@@ -140,7 +140,9 @@ pub enum Report {
     /// A bout: the link to the other slot died on this side, on the last
     /// frame confirmed. No claim follows; the server rules.
     PeerLost { round: u64, frame: u64 },
-    Closed,
+    /// The window is going. `in_front`: one of its windows had the foreground,
+    /// asked here because once they are gone nothing can say.
+    Closed { in_front: bool },
 }
 
 /// The runner alone, or inside the bout's rollback session once the other
@@ -318,7 +320,9 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
     // every round that would ask for the same size again.
     let mut sized_for: Option<(u32, u32)> = None;
 
-    while window.is_open() && !keys::quit_pressed() {
+    let mut quit_key = keys::QuitKey::default();
+
+    while window.is_open() && !quit_key.pressed(&ours) {
         loop {
             match cmds.try_recv() {
                 Ok(Command::Load(l)) => {
@@ -428,7 +432,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     thumbs = t;
                 }
                 Ok(Command::Quit) | Err(TryRecvError::Disconnected) => {
-                    let _ = reports.send(Report::Closed);
+                    let _ = reports.send(Report::Closed { in_front: keys::ours_in_front(&ours) });
                     return Ok(());
                 }
                 Err(TryRecvError::Empty) => break,
@@ -509,7 +513,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
             }
         }
     }
-    let _ = reports.send(Report::Closed);
+    let _ = reports.send(Report::Closed { in_front: keys::ours_in_front(&ours) });
     Ok(())
 }
 
