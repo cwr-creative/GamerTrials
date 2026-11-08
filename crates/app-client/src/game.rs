@@ -20,7 +20,9 @@ use challenge_core::{Bout, Next, Run, RunResult};
 use head_to_head::relay::RelayState;
 use head_to_head::{Relay, Rollback, Settings as RollbackSettings, State as RollbackState, Udp};
 use minifb::{Scale, ScaleMode, Window, WindowOptions};
-use session_api::{ChallengeKind, Networked, Presentable, SessionEvent, Slot, SlotInput, StageRunner, StageSpec};
+use session_api::{
+    ChallengeKind, Networked, Presentable, SessionEvent, Slot, SlotInput, StageRunner, StageSpec, VideoFrame,
+};
 use session_libretro::audio::{self, Audio};
 use session_libretro::input::PadState;
 use session_libretro::libretro;
@@ -285,7 +287,8 @@ impl Loaded {
 pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), String> {
     // Opened at the NES's size three times over; the first round resizes it
     // to its own core's picture (`video::window_size`), and every frame is
-    // placed in it by `video::Canvas`, so minifb is only ever asked to stretch.
+    // placed in it by `video::Canvas`, so the window is only ever asked to
+    // stretch (`Screen`).
     let (width, height) = (768usize, 720usize);
     let mut window = Window::new(
         "GamerTrials",
@@ -314,7 +317,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
     let mut thumbs = 0u32;
     let mut pause_edge = settings::Edge::default();
     let mut give_up_edge = settings::Edge::default();
-    let mut canvas = Canvas::default();
+    let mut screen = Screen::new(hwnd);
     let mut borderless = false;
     // The windowed size last asked for, so a player's own resize survives
     // every round that would ask for the same size again.
@@ -480,7 +483,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 std::thread::sleep(Duration::from_millis(16));
             }
             Some(l) if !l.live && !l.done && relay_is_live(l) => {
-                lead_in(l, &mut window, &mut canvas, &reports, &streamer)?;
+                lead_in(l, &mut window, &mut screen, &reports, &streamer)?;
             }
             Some(l) if held || !l.live || l.done => {
                 // Nothing reads the mouse here, so the player has it back.
@@ -495,7 +498,7 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                     if l.bout.as_ref().is_some_and(|b| b.packets) {
                         window.update();
                     } else {
-                        present(l, &mut window, &mut canvas, &streamer)?;
+                        present(l, &mut window, &mut screen, &streamer)?;
                     }
                 } else {
                     window.update();
@@ -503,13 +506,13 @@ pub fn run(cmds: Receiver<Command>, reports: Sender<Report>) -> Result<(), Strin
                 std::thread::sleep(l.frame_time);
             }
             Some(l) if l.bout.as_ref().is_some_and(|b| b.packets) => {
-                step_relay(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
+                step_relay(l, &mut window, &mut screen, in_front, &pad, &reports, &streamer)?;
             }
             Some(l) if l.bout.is_some() => {
-                step_bout(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
+                step_bout(l, &mut window, &mut screen, in_front, &pad, &reports, &streamer)?;
             }
             Some(l) => {
-                step(l, &mut window, &mut canvas, in_front, &pad, &reports, &streamer)?;
+                step(l, &mut window, &mut screen, in_front, &pad, &reports, &streamer)?;
             }
         }
     }
@@ -651,7 +654,7 @@ fn load(l: Load, window: &mut Window) -> Result<(Loaded, String), String> {
 fn step(
     l: &mut Loaded,
     window: &mut Window,
-    canvas: &mut Canvas,
+    screen: &mut Screen,
     in_front: bool,
     pad: &PadState,
     reports: &Sender<Report>,
@@ -733,7 +736,7 @@ fn step(
             let _ = reports.send(Report::Finished { round: l.round, result, forfeited_at: None });
         }
     }
-    present(l, window, canvas, streamer)
+    present(l, window, screen, streamer)
 }
 
 /// Shown to the player only; the run is scored in frames, never in these.
@@ -1005,7 +1008,7 @@ fn relay_is_live(l: &Loaded) -> bool {
 fn lead_in(
     l: &mut Loaded,
     window: &mut Window,
-    canvas: &mut Canvas,
+    screen: &mut Screen,
     reports: &Sender<Report>,
     streamer: &Streamer,
 ) -> Result<(), String> {
@@ -1046,7 +1049,7 @@ fn lead_in(
         return Ok(());
     }
     if b.loaded_sent {
-        return present(l, window, canvas, streamer);
+        return present(l, window, screen, streamer);
     }
     Ok(())
 }
@@ -1061,7 +1064,7 @@ fn lead_in(
 fn step_relay(
     l: &mut Loaded,
     window: &mut Window,
-    canvas: &mut Canvas,
+    screen: &mut Screen,
     in_front: bool,
     pad: &PadState,
     reports: &Sender<Report>,
@@ -1135,7 +1138,7 @@ fn step_relay(
     if !mine.is_empty() || frame % HEARTBEAT == 0 {
         let _ = reports.send(Report::Frame { round, frame, events: mine });
     }
-    present(l, window, canvas, streamer)
+    present(l, window, screen, streamer)
 }
 
 /// One frame of a bout: pace on the clock (a frame the engine sits out
@@ -1144,7 +1147,7 @@ fn step_relay(
 fn step_bout(
     l: &mut Loaded,
     window: &mut Window,
-    canvas: &mut Canvas,
+    screen: &mut Screen,
     in_front: bool,
     pad: &PadState,
     reports: &Sender<Report>,
@@ -1219,7 +1222,7 @@ fn step_bout(
         RollbackState::Desynced { frame } if !l.done => {
             eprintln!("[bout] the machines disagreed at frame {frame}; giving up the run");
             forfeit(l, reports);
-            return present(l, window, canvas, streamer);
+            return present(l, window, screen, streamer);
         }
         _ => {}
     }
@@ -1229,10 +1232,10 @@ fn step_bout(
             let _ = reports.send(Report::Finished { round, result, forfeited_at: None });
         }
     }
-    present(l, window, canvas, streamer)
+    present(l, window, screen, streamer)
 }
 
-fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &Streamer) -> Result<(), String> {
+fn present(l: &mut Loaded, window: &mut Window, screen: &mut Screen, streamer: &Streamer) -> Result<(), String> {
     let mut painted = false;
     let mut paint_error = None;
     let client = window.get_size();
@@ -1259,9 +1262,8 @@ fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &
                 });
             }
         }
-        let (buf, w, h) = canvas.draw(&f, client, aspect, &video, sidebar);
-        if let Err(e) = window.update_with_buffer(buf, w, h) {
-            paint_error = Some(e.to_string());
+        if let Err(e) = screen.paint(&f, window, client, aspect, &video, sidebar) {
+            paint_error = Some(e);
         }
     });
     if keyed[0] {
@@ -1277,6 +1279,60 @@ fn present(l: &mut Loaded, window: &mut Window, canvas: &mut Canvas, streamer: &
         window.update();
     }
     Ok(())
+}
+
+/// The canvas every frame is placed in, and what puts it on the window.
+///
+/// On Windows that is minifb, whose `StretchDIBits` the system scales. On
+/// Linux minifb would stretch on the CPU to the window's size and send every
+/// pixel of that to the X server, on this thread: `x11::Presenter` sends the
+/// canvas alone and has the server stretch it (ADR 0035). minifb paints only
+/// where the server will not have that.
+struct Screen {
+    canvas: Canvas,
+    #[cfg(target_os = "linux")]
+    x11: Option<session_libretro::x11::Presenter>,
+}
+
+impl Screen {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    fn new(hwnd: isize) -> Screen {
+        #[cfg(target_os = "linux")]
+        {
+            let x11 = session_libretro::x11::Presenter::new(hwnd);
+            match &x11 {
+                Some(p) if p.shared() => eprintln!("[video] painting through XRender, from shared memory"),
+                Some(_) => eprintln!("[video] painting through XRender; the X server is not sharing memory"),
+                None => eprintln!("[video] no XRender on this X server; minifb paints, on the CPU"),
+            }
+            Screen { canvas: Canvas::default(), x11 }
+        }
+        #[cfg(not(target_os = "linux"))]
+        Screen { canvas: Canvas::default() }
+    }
+
+    fn paint(
+        &mut self,
+        f: &VideoFrame<'_>,
+        window: &mut Window,
+        client: (usize, usize),
+        aspect: f32,
+        video: &VideoPrefs,
+        sidebar: bool,
+    ) -> Result<(), String> {
+        let (buf, w, h) = self.canvas.draw(f, client, aspect, video, sidebar);
+        #[cfg(target_os = "linux")]
+        if let Some(p) = &mut self.x11 {
+            if p.paint(buf, w, h, (client.0 as u32, client.1 as u32)) {
+                // What `update_with_buffer` would have done after painting.
+                window.update();
+                return Ok(());
+            }
+            eprintln!("[video] the X server refused an XRender paint; minifb paints from here, on the CPU");
+            self.x11 = None;
+        }
+        window.update_with_buffer(buf, w, h).map_err(|e| e.to_string())
+    }
 }
 
 /// Fullscreen or not, and in a window, the size this core's picture wants at

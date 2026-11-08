@@ -3596,6 +3596,7 @@ dependencies = [
  "cpal",
  "gilrs",
  "head-to-head",
+ "libc",
  "libloading 0.8.9",
  "minifb",
  "serde",

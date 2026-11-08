@@ -4,9 +4,10 @@
 //! The window is created once per match and is never told how to scale; this
 //! module does. Each frame it builds a **canvas** with the window's own
 //! shape, puts the cropped picture in it at 1:1 where it should appear, and
-//! leaves black around it. minifb then stretches the canvas to the window
-//! (`ScaleMode::Stretch`), so the enlargement is still the blit's and no CPU
-//! upscale is added between a frame and the screen. Placing the picture is
+//! leaves black around it. The canvas is then stretched to the window —
+//! by minifb's blit on Windows, by the X server's XRender on Linux (`game::Screen`)
+//! — so the enlargement is the system's and no CPU upscale is added between
+//! a frame and the screen. Placing the picture is
 //! the whole of `scaling` and `aspect`: the canvas is sized so that the
 //! stretch takes the picture to exactly the rectangle the setting wants.
 //!

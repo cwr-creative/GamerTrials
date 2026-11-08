@@ -46,9 +46,31 @@ which every Ubuntu desktop has. The Win32 calls map one for one:
 | `IsIconic` | ICCCM `WM_STATE` |
 | borderless at the monitor's size | `_NET_WM_STATE_FULLSCREEN` |
 | `ClipCursor` + `SetCursorPos` | `XWarpPointer` every frame, no grab |
+| minifb's `StretchDIBits` | MIT-SHM into a pixmap, XRender stretches it (`x11::Presenter`) |
 
 They live in `session_libretro::x11`, beside the game window minifb opens,
 loaded at run time through `x11-dl` as minifb loads it.
+
+**The game window is not painted by minifb.** Its X11 backend stretches each
+frame on the CPU to the window's size and sends every pixel of that with a
+plain `XPutImage`, on the thread that steps the core: eight megabytes a frame
+at 1920×1080, and a large enough window slowed the game itself, every core
+alike. The client sends the canvas alone — through shared memory where the
+server allows it, else as a small `XPutImage` — and the server's XRender
+stretches it over the window, as the system's blit does on Windows. Measured
+under WSLg (a server that scales on the CPU) with a 256×240 canvas, a frame's
+paint on the game thread cost:
+
+| Window | minifb | `Presenter` |
+|---|---|---|
+| 1280×720 | 1.4 ms | 0.4 ms |
+| 1920×1080 | 3.3 ms | 0.9 ms |
+| 2560×1440 | 6.6 ms | 2.3 ms |
+| 3840×2160 | 19.5 ms | 7.6 ms |
+
+with every sampled pixel the one nearest-neighbour sampling at pixel centres
+picks, with shared memory and without. A server with glamor scales on the
+GPU. minifb still paints a server with no XRender.
 
 **A key is still a Windows virtual-key code.** It is what a settings file
 stores (ADR 0028), so one file binds the same keys on both platforms; Linux
@@ -78,9 +100,10 @@ webview.
 **Played under WSLg, not yet on a Linux desktop.** The workspace builds and
 every test passes on Ubuntu 22.04 under WSL. Under WSLg a round of each game
 plays with the overlay transparent over it, its clock running, and `--spike`
-finds it aligned with the game window through a move and a resize. Not yet
-seen: a real desktop's window manager, fullscreen, mouse capture, sound (WSL
-has no ALSA device), and a match against a Windows player.
+finds it aligned with the game window through a move and a resize, and
+borderless fills the monitor. Not yet seen: a real desktop's window manager,
+fullscreen there, mouse capture, sound (WSL has no ALSA device), and a match
+against a Windows player.
 
 **Both platforms run one build of each core.** An entry state is a savestate
 (ADR 0002), and a core of another version may refuse it or load it

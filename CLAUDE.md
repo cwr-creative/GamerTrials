@@ -294,10 +294,15 @@ Open, roughly in order:
   dealt and every artifact hash agreeing, so **ADR 0013 is Accepted**.
   Head-to-head is Phase D, above.
 - **Linux (ADR 0035, Proposed) plays under WSLg, not yet on a desktop.**
-  A round of each game runs with the overlay aligned over it; a real window
-  manager, fullscreen, mouse capture, sound and a match against a Windows
-  player are unseen. `cores/` holds each core for both platforms from one
-  nightly — update both at once, since entry states are savestates. `bash
+  A round of each game runs with the overlay aligned over it, and
+  borderless fills the monitor; a real window manager, fullscreen there,
+  mouse capture, sound and a match against a Windows player are unseen.
+  The game window is painted by `x11::Presenter` (the canvas through shared
+  memory, stretched by XRender), not minifb, whose CPU stretch to the
+  window's size slowed every game at a large window (reported on a
+  Linux machine; not yet re-checked there). Borderless is the default
+  display on both platforms. `cores/` holds each core for both platforms
+  from one nightly — update both at once, since entry states are savestates. `bash
   tools/setup-ubuntu.sh` installs what a build needs; `bash
   tools/package.sh` is `package.ps1`'s twin. Closing the client mid-round
   may hang there: dosbox-pure's static destructors wait on its thread, as a

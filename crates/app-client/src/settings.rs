@@ -391,10 +391,11 @@ impl Layer {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Display {
-    #[default]
     Windowed,
     /// The game window and the overlay over it, borderless at the monitor's
-    /// size (ADR 0027).
+    /// size (ADR 0027). The default: a match starts fullscreen on a machine
+    /// whose player has never opened Settings, Linux as much as Windows.
+    #[default]
     Borderless,
 }
 
@@ -1049,7 +1050,7 @@ mod tests {
         s.input.pad.insert(RetroButton::A, vec![Input::Pad(PadButton::Rt)]);
         s.games.entry("doom".into()).or_default().key_remap.insert("w".into(), "up".into());
         s.games.get_mut("doom").unwrap().stick_keys.insert(Input::Stick(Stick::Right, Dir::Right), "period".into());
-        s.video.display = Display::Borderless;
+        s.video.display = Display::Windowed;
         s.video.cores.insert("mesen".into(), VideoLayer { scaling: Some(Scaling::Integer), ..Default::default() });
         let text = s.to_toml();
         assert_eq!(Settings::from_toml(&text).unwrap(), s, "{text}");
